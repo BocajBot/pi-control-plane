@@ -93,9 +93,12 @@ Your request text is wrapped in delimiters and treated as data — it cannot mas
 |---|---|
 | `alt+c` | Toggle a context-preview widget above the editor |
 | `alt+e` | Open the session context in **nvim** to view and edit it |
+| `alt+s` | **Send preview**: everything the next message will send — system prompt (with the auto-appended control-plane block shown read-only), full history, and your unsent draft — in nvim, editable |
 | `alt+p` | Cycle phase: Discuss → Plan → Execute → Verify |
 | `alt+a` | Cycle autonomy: Read-only → Attended → Restricted |
-| `alt+h` | Toggle a hotkey cheat sheet (control-plane keys + pi essentials; `/hotkeys` lists everything) |
+| `alt+h` | Hotkey cheat sheet as a centered modal (any key closes; `/hotkeys` lists everything) |
+
+`alt+s` is `alt+e` plus two things: lines prefixed `#> ` show the control-plane state block exactly as it will be appended to the system prompt (read-only — edits to them are ignored), and a `DRAFT` section holds your unsent message — editing it rewrites the input box on save. Context edits behave identically to `alt+e` (override, `CTX-EDITED`, `/context restore`).
 
 ### The context editor (`alt+e`)
 

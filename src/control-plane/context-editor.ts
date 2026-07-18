@@ -16,6 +16,10 @@
  */
 
 export const SYSTEM_MARKER = "#### PI-CTX SYSTEM-PROMPT ####";
+export const DRAFT_MARKER = "#### PI-CTX DRAFT ####";
+/** Informational lines (e.g. the auto-generated control-plane block shown in
+ * the send preview). Stripped on parse — edits to them have no effect. */
+export const PREVIEW_PREFIX = "#> ";
 const MESSAGE_MARKER = /^#### PI-CTX MESSAGE (\d+) ([A-Za-z]+) ####$/;
 const ANY_MARKER = /^#### PI-CTX /;
 
@@ -27,6 +31,8 @@ export const EDITOR_HEADER = [
   "##   (Careful: removing one half of a tool call/result pair can make the provider reject the request.)",
   "## - Do not edit marker lines. Tool calls, tool results, and images are preserved automatically",
   "##   and shown as [non-text: ...] placeholders. Placeholder lines are ignored on save.",
+  "## - Lines starting with \"#> \" are a read-only preview (auto-generated each turn); edits to them are ignored.",
+  "## - A DRAFT section, when present, is your unsent message — editing it updates the input box.",
   "## - Edits apply to FUTURE turns in this session only. Run \"/context restore\" to undo.",
   "",
 ].join("\n");
@@ -61,8 +67,23 @@ function nonTextSummary(message: MessageLike): string[] {
     .map((b) => `[non-text: ${b?.type ?? "unknown"}${typeof b?.name === "string" ? ` ${b.name}` : ""}]`);
 }
 
-export function serializeContext(systemPrompt: string, messages: MessageLike[]): string {
-  const parts: string[] = [EDITOR_HEADER, SYSTEM_MARKER, systemPrompt, ""];
+export interface SerializeOptions {
+  /** Current editor draft; when set, a DRAFT section is appended. */
+  draft?: string;
+  /** Informational lines rendered with PREVIEW_PREFIX after the system prompt. */
+  previewLines?: string[];
+}
+
+export function serializeContext(
+  systemPrompt: string,
+  messages: MessageLike[],
+  options: SerializeOptions = {},
+): string {
+  const parts: string[] = [EDITOR_HEADER, SYSTEM_MARKER, systemPrompt];
+  if (options.previewLines && options.previewLines.length > 0) {
+    parts.push(...options.previewLines.map((line) => PREVIEW_PREFIX + line));
+  }
+  parts.push("");
   messages.forEach((message, index) => {
     parts.push(`#### PI-CTX MESSAGE ${index} ${message.role ?? "unknown"} ####`);
     const placeholders = nonTextSummary(message);
@@ -71,6 +92,9 @@ export function serializeContext(systemPrompt: string, messages: MessageLike[]):
     if (text.length > 0) parts.push(text);
     parts.push("");
   });
+  if (options.draft !== undefined) {
+    parts.push(DRAFT_MARKER, options.draft, "");
+  }
   return parts.join("\n");
 }
 
@@ -78,12 +102,16 @@ export interface ParsedEdit {
   systemPrompt: string;
   /** Message index -> edited text. Missing index means the message was deleted. */
   messages: Map<number, string>;
+  /** Edited draft text, or null when the document had no DRAFT section. */
+  draft: string | null;
 }
 
 export type ParseResult = { ok: true; edit: ParsedEdit } | { ok: false; error: string };
 
 function cleanBody(lines: string[]): string {
-  const kept = lines.filter((line) => !/^\[non-text: [^\]]*\]$/.test(line));
+  const kept = lines.filter(
+    (line) => !/^\[non-text: [^\]]*\]$/.test(line) && !line.startsWith(PREVIEW_PREFIX),
+  );
   while (kept.length > 0 && kept[0].trim() === "") kept.shift();
   while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
   return kept.join("\n");
@@ -92,8 +120,10 @@ function cleanBody(lines: string[]): string {
 export function parseEditedContext(text: string, originalMessageCount: number): ParseResult {
   const lines = text.split(/\r?\n/);
   let systemPrompt: string | null = null;
+  let draft: string | null = null;
   const messages = new Map<number, string>();
-  let current: { kind: "system" } | { kind: "message"; index: number } | null = null;
+  let current: { kind: "system" } | { kind: "draft" } | { kind: "message"; index: number } | null =
+    null;
   let body: string[] = [];
 
   const flush = (): string | null => {
@@ -102,6 +132,9 @@ export function parseEditedContext(text: string, originalMessageCount: number): 
     if (current.kind === "system") {
       if (systemPrompt !== null) return "duplicate SYSTEM-PROMPT section";
       systemPrompt = content;
+    } else if (current.kind === "draft") {
+      if (draft !== null) return "duplicate DRAFT section";
+      draft = content;
     } else {
       if (messages.has(current.index)) return `duplicate MESSAGE ${current.index} section`;
       if (current.index >= originalMessageCount) {
@@ -118,6 +151,12 @@ export function parseEditedContext(text: string, originalMessageCount: number): 
       const err = flush();
       if (err) return { ok: false, error: err };
       current = { kind: "system" };
+      continue;
+    }
+    if (line === DRAFT_MARKER) {
+      const err = flush();
+      if (err) return { ok: false, error: err };
+      current = { kind: "draft" };
       continue;
     }
     const match = MESSAGE_MARKER.exec(line);
@@ -138,7 +177,7 @@ export function parseEditedContext(text: string, originalMessageCount: number): 
   if (systemPrompt === null) {
     return { ok: false, error: "the SYSTEM-PROMPT section is missing; aborted (nothing applied)" };
   }
-  return { ok: true, edit: { systemPrompt, messages } };
+  return { ok: true, edit: { systemPrompt, messages, draft } };
 }
 
 export interface ApplyResult {

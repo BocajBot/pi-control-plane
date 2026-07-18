@@ -286,11 +286,12 @@ export function buildInjectionBlock(state: ControlPlaneState, policyValid: boole
 /** Cheat-sheet shown by the alt+h hotkey widget. Pure data, testable. */
 export function renderHotkeyCheatsheet(): string[] {
   return [
-    "Hotkeys — alt+h to hide",
+    "Hotkeys — press any key to close",
     "",
     "Control plane:",
     "  alt+c  toggle context-preview widget",
     "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",
+    "  alt+s  send preview: everything the next message will send, editable, incl. your draft",
     "  alt+p  cycle phase: Discuss > Plan > Execute > Verify",
     "  alt+a  cycle autonomy: Read-only > Attended > Restricted",
     "  alt+h  this cheat sheet",

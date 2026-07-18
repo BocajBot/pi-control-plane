@@ -95,6 +95,37 @@ test("extractText handles string, blocks, and empty content", () => {
   assert.equal(extractText({}), "");
 });
 
+test("draft section round-trips; preview-prefixed lines are ignored on parse", () => {
+  const doc = serializeContext("SYSTEM", sampleMessages, {
+    draft: "my unsent message",
+    previewLines: ["[PI CONTROL PLANE]", "Phase: Discuss"],
+  });
+  assert.ok(doc.includes("#> [PI CONTROL PLANE]"));
+  const parsed = parseEditedContext(doc, sampleMessages.length);
+  assert.ok(parsed.ok);
+  if (!parsed.ok) return;
+  assert.equal(parsed.edit.draft, "my unsent message");
+  // Preview lines must not leak into the parsed system prompt.
+  assert.equal(parsed.edit.systemPrompt, "SYSTEM");
+
+  const editedDraft = doc.replace("my unsent message", "rewritten draft");
+  const reparsed = parseEditedContext(editedDraft, sampleMessages.length);
+  assert.ok(reparsed.ok);
+  if (!reparsed.ok) return;
+  assert.equal(reparsed.edit.draft, "rewritten draft");
+});
+
+test("document without a DRAFT section parses with draft null; duplicate DRAFT rejected", () => {
+  const doc = serializeContext("SYSTEM", sampleMessages);
+  const parsed = parseEditedContext(doc, sampleMessages.length);
+  assert.ok(parsed.ok);
+  if (!parsed.ok) return;
+  assert.equal(parsed.edit.draft, null);
+
+  const dupe = serializeContext("S", [], { draft: "a" }) + "\n#### PI-CTX DRAFT ####\nb";
+  assert.equal(parseEditedContext(dupe, 0).ok, false);
+});
+
 test("overlay merge: edited prefix + live tail; shrunk conversation invalidates", () => {
   const overlay = {
     messages: [{ role: "user", content: "EDITED" }],

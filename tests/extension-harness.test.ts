@@ -423,16 +423,16 @@ test("context overlay: /context restore with no override says so; alt+e register
   assert.ok(ctx.notifications.some((n) => /no context override/i.test(n.message)));
 });
 
-test("alt+h toggles the hotkey cheat-sheet widget", async () => {
+test("alt+h and alt+s registered; alt+h without modal support falls back to chat output", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
   assert.ok(pi.shortcuts.has("alt+h"));
+  assert.ok(pi.shortcuts.has("alt+s"));
   await pi.shortcuts.get("alt+h")!(ctx);
-  const shown = ctx.widgets["control-plane-hotkeys"];
-  assert.ok(Array.isArray(shown) && shown.some((l) => /alt\+e/.test(l)) && shown.some((l) => /shift\+tab/.test(l)));
-  await pi.shortcuts.get("alt+h")!(ctx);
-  assert.equal(ctx.widgets["control-plane-hotkeys"], undefined);
+  const output = pi.entries.find((e) => e.customType === "pi-control-plane-output");
+  assert.ok(output, "cheat sheet emitted as chat entry when no modal UI exists");
+  assert.ok(JSON.stringify(output!.data).includes("alt+e"));
 });
 
 test("phase and autonomy cycle hotkeys advance in order", async () => {

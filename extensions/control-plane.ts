@@ -81,7 +81,6 @@ import {
 
 const STATUS_KEY = "control-plane";
 const WIDGET_KEY = "control-plane-context";
-const HOTKEYS_WIDGET_KEY = "control-plane-hotkeys";
 
 interface OutputEntryData {
   title: string;
@@ -119,7 +118,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let lastPayloadMeta: { length: number; hash: string } | null = null;
   let projectRoot: string | null = null;
   let widgetVisible = false;
-  let hotkeysWidgetVisible = false;
+  let hotkeysModalOpen = false;
   // Guards against a stale agent_end from a previous turn being mistaken for
   // the interpretation turn: only an agent turn that started while the guard
   // was active may complete the interpretation.
@@ -961,7 +960,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     });
   };
 
-  const runContextEditor = async (ctx: ExtensionContext) => {
+  const runContextEditor = async (ctx: ExtensionContext, opts: { includeDraft: boolean }) => {
     // lastContextMessages is the merged view when an overlay is active, so
     // re-edits see previous edits plus any newer live messages.
     const baseMessages = lastContextMessages;
@@ -974,8 +973,24 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       }
     }
     const messages = baseMessages ?? [];
+    let draft: string | undefined;
+    if (opts.includeDraft) {
+      try {
+        draft = ctx.ui.getEditorText();
+      } catch {
+        draft = "";
+      }
+    }
     const serialized =
-      serializeContext(systemPrompt, messages) +
+      serializeContext(systemPrompt, messages, {
+        draft,
+        previewLines: opts.includeDraft
+          ? [
+              "──── appended automatically to the system prompt each turn (read-only preview): ────",
+              ...buildInjectionBlock(state, policy !== null).split("\n"),
+            ]
+          : undefined,
+      }) +
       (baseMessages === null
         ? "\n## Note: no LLM call has happened yet this session, so there are no messages to edit.\n"
         : "");
@@ -995,8 +1010,17 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     }
     const applied = applyEdits(messages, parsed.edit);
     const systemPromptChanged = parsed.edit.systemPrompt !== systemPrompt;
+    const draftChanged =
+      opts.includeDraft && parsed.edit.draft !== null && parsed.edit.draft !== (draft ?? "");
+    if (draftChanged) {
+      try {
+        ctx.ui.setEditorText(parsed.edit.draft!);
+      } catch {
+        ctx.ui.notify("Could not update the draft in the input editor.", "warning");
+      }
+    }
     if (applied.editedCount === 0 && applied.droppedCount === 0 && !systemPromptChanged) {
-      ctx.ui.notify("No effective changes.", "info");
+      ctx.ui.notify(draftChanged ? "Draft updated; context unchanged." : "No effective changes.", "info");
       return;
     }
     contextOverlay = {
@@ -1012,6 +1036,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       systemPromptChanged ? "system prompt edited" : null,
       applied.editedCount > 0 ? `${applied.editedCount} message(s) edited` : null,
       applied.droppedCount > 0 ? `${applied.droppedCount} message(s) removed` : null,
+      draftChanged ? "draft updated" : null,
     ]
       .filter(Boolean)
       .join(", ");
@@ -1026,7 +1051,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   pi.registerShortcut("alt+e", {
     description: "Control plane: view/edit session context in nvim",
     handler: async (ctx) => {
-      await runContextEditor(ctx);
+      await runContextEditor(ctx, { includeDraft: false });
+    },
+  });
+
+  pi.registerShortcut("alt+s", {
+    description: "Control plane: send preview — everything the next message sends, editable",
+    handler: async (ctx) => {
+      await runContextEditor(ctx, { includeDraft: true });
     },
   });
 
@@ -1048,19 +1080,39 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   });
 
   pi.registerShortcut("alt+h", {
-    description: "Control plane: toggle hotkey cheat sheet",
-    handler: (ctx) => {
-      if (hotkeysWidgetVisible) {
-        ctx.ui.setWidget(HOTKEYS_WIDGET_KEY, undefined);
-        hotkeysWidgetVisible = false;
+    description: "Control plane: hotkey cheat sheet (modal)",
+    handler: async (ctx) => {
+      const uiAny = ctx.ui as {
+        custom?: <T>(factory: unknown, options?: unknown) => Promise<T>;
+      };
+      if (ctx.mode !== "tui" || typeof uiAny.custom !== "function") {
+        emit("hotkeys", renderHotkeyCheatsheet());
         return;
       }
-      ctx.ui.setWidget(
-        HOTKEYS_WIDGET_KEY,
-        renderHotkeyCheatsheet().map((line) => (line.length > 0 ? line : " ")),
-        { placement: "aboveEditor" },
-      );
-      hotkeysWidgetVisible = true;
+      if (hotkeysModalOpen) return;
+      hotkeysModalOpen = true;
+      try {
+        await uiAny.custom<void>(
+          (_tui: unknown, theme: { fg(color: string, text: string): string }, _kb: unknown, done: (r: void) => void) => ({
+            render: (width: number) => {
+              const lines = renderHotkeyCheatsheet();
+              const inner = Math.max(20, Math.min(width - 6, Math.max(...lines.map((l) => l.length)) + 2));
+              const top = "╭" + "─".repeat(inner + 2) + "╮";
+              const bottom = "╰" + "─".repeat(inner + 2) + "╯";
+              const body = lines.map((line, i) => {
+                const clipped = line.length > inner ? line.slice(0, inner - 1) + "…" : line;
+                const padded = clipped.padEnd(inner);
+                return "│ " + (i === 0 ? theme.fg("accent", padded) : padded) + " │";
+              });
+              return [top, ...body, bottom];
+            },
+            handleInput: () => done(undefined),
+          }),
+          { overlay: true, overlayOptions: { width: "85%", maxHeight: "90%" } },
+        );
+      } finally {
+        hotkeysModalOpen = false;
+      }
     },
   });
 
