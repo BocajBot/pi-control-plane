@@ -410,6 +410,15 @@ test("/task clear force clears without UI; /task set stores objective only", asy
   assert.match(ctx.statuses["control-plane"] ?? "", /Task: none/);
 });
 
+test("context overlay: /context restore with no override says so; alt+e registered", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot() });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  assert.ok(pi.shortcuts.has("alt+e"), "alt+e shortcut registered");
+  await pi.commands.get("context")!.handler("restore", ctx);
+  assert.ok(ctx.notifications.some((n) => /no context override/i.test(n.message)));
+});
+
 test("phase and autonomy cycle hotkeys advance in order", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });

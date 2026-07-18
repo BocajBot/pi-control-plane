@@ -62,3 +62,5 @@ Persisted (in the Pi session file, via custom entries excluded from LLM context)
 Never persisted by this extension:
 
 - Raw provider payloads, full system prompts, message histories, credentials, or any automatic context-capture files. Payloads are observed in memory, reduced to `{length, sha256}`, and discarded.
+
+One deliberate, user-initiated exception: the `alt+e` context editor writes the **unredacted** session context to a temp file (mode 0600 in the system temp dir) so nvim can edit it, and deletes it when the editor exits — including on error. This only happens when the user presses `alt+e`; nothing writes context to disk automatically. The resulting override lives in process memory only and is never appended to the session file.

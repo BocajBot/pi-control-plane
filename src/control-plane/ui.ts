@@ -285,12 +285,13 @@ export function buildInjectionBlock(state: ControlPlaneState, policyValid: boole
 
 export const USAGE = {
   context: [
-    "Usage: /context [diff|full|sources|toggle <name>]",
+    "Usage: /context [diff|full|sources|toggle <name>|restore]",
     "  /context          — redacted summary of the effective context",
     "  /context diff     — changes since the last /context or /context full",
     "  /context full     — detailed redacted view (size-limited)",
     "  /context sources  — list prompt sources with toggle status",
     "  /context toggle <name> — enable/disable a source (e.g. tool:bash, file:/path, skill:foo)",
+    "  /context restore  — remove the alt+e context override (undo edits)",
   ],
   task: [
     "Usage: /task [set <text>|clear|accept|reject]",

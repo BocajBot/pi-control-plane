@@ -10,7 +10,10 @@
  * without Pi. This file is wiring only.
  */
 
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   ExtensionAPI,
@@ -27,6 +30,15 @@ import {
   parseTaskArgs,
 } from "../src/control-plane/commands.ts";
 import { diffIsEmpty, diffSnapshots } from "../src/control-plane/context-diff.ts";
+import {
+  applyEdits,
+  extractText,
+  mergeOverlay,
+  type MessageLike,
+  type Overlay,
+  parseEditedContext,
+  serializeContext,
+} from "../src/control-plane/context-editor.ts";
 import { buildSnapshot, sha256 } from "../src/control-plane/context-snapshot.ts";
 import {
   buildInterpretationPrompt,
@@ -109,6 +121,12 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // the interpretation turn: only an agent turn that started while the guard
   // was active may complete the interpretation.
   let interpretTurnStarted = false;
+  // Context-editor state (memory only; raw context is never persisted).
+  let lastContextMessages: MessageLike[] | null = null;
+  /** Length of the live (unmerged) conversation at the last context event. */
+  let lastIncomingCount = 0;
+  let lastBaseSystemPrompt: string | null = null;
+  let contextOverlay: Overlay | null = null;
 
   const pathOps: PathOps = {
     realpath: (p) => fs.realpathSync(p),
@@ -148,7 +166,15 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
   const updateStatus = (ctx: ExtensionContext) => {
     const percent = ctx.getContextUsage()?.percent ?? null;
-    ctx.ui.setStatus(STATUS_KEY, formatStatus(state, percent, policy !== null));
+    const base = formatStatus(state, percent, policy !== null);
+    ctx.ui.setStatus(STATUS_KEY, contextOverlay !== null ? `${base} | CTX-EDITED` : base);
+  };
+
+  const clearOverlay = (ctx: ExtensionContext, reason: string) => {
+    if (contextOverlay === null) return;
+    contextOverlay = null;
+    updateStatus(ctx);
+    ctx.ui.notify(`Context override removed: ${reason}`, "info");
   };
 
   const emit = (title: string, lines: string[]) => {
@@ -369,6 +395,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       ctx.ui.notify(`Control plane: ${policyLoadError}`, "warning");
     }
     reapplyToolToggles();
+    // Editor state is process/session scoped; a new or resumed session starts clean.
+    contextOverlay = null;
+    lastContextMessages = null;
+    lastBaseSystemPrompt = null;
     updateStatus(ctx);
   });
 
@@ -376,6 +406,24 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   pi.on("model_select", (_event, ctx) => updateStatus(ctx));
 
   // ---- context capture ----
+
+  // Fires before every LLM call: capture the effective messages for the
+  // context editor and apply any active override (edited prefix + live tail).
+  pi.on("context", (event, ctx) => {
+    const incoming = event.messages as unknown as MessageLike[];
+    lastIncomingCount = incoming.length;
+    if (contextOverlay !== null) {
+      const merged = mergeOverlay(contextOverlay, incoming);
+      if (!merged.ok) {
+        clearOverlay(ctx, merged.reason);
+        lastContextMessages = [...incoming];
+        return;
+      }
+      lastContextMessages = merged.messages;
+      return { messages: merged.messages as never };
+    }
+    lastContextMessages = [...incoming];
+  });
 
   pi.on("before_provider_request", (event) => {
     try {
@@ -391,7 +439,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // ---- per-turn injection + source toggles ----
 
   pi.on("before_agent_start", (event, ctx) => {
-    let prompt = event.systemPrompt;
+    // The context editor can override the base system prompt; toggles and the
+    // control-plane block still apply on top of the override.
+    let prompt = contextOverlay?.systemPrompt ?? event.systemPrompt;
+    lastBaseSystemPrompt = prompt;
     const options = event.systemPromptOptions;
 
     // Context-file toggles: verified excision, honest failure handling.
@@ -553,7 +604,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   pi.registerCommand("context", {
     description: "Inspect the effective context (summary, diff, full, sources, toggle)",
     getArgumentCompletions: (prefix) => {
-      const subs = ["diff", "full", "sources", "toggle "];
+      const subs = ["diff", "full", "sources", "toggle ", "restore"];
       const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
       return matches.length > 0 ? matches.map((s) => ({ value: s, label: s.trim() })) : null;
     },
@@ -621,6 +672,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         }
         case "sources": {
           emit("context sources", renderSources(buildCurrentSnapshot(ctx)));
+          return;
+        }
+        case "restore": {
+          if (contextOverlay === null) {
+            ctx.ui.notify("No context override is active.", "info");
+            return;
+          }
+          clearOverlay(ctx, "restored by /context restore");
           return;
         }
         case "toggle": {
@@ -836,7 +895,137 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     },
   });
 
+  // ---- context editor (alt+e) ----
+
+  const pickEditor = (): string | null => {
+    for (const candidate of ["nvim", "vim"]) {
+      try {
+        const found = process.env.PATH?.split(path.delimiter).some((dir) =>
+          fs.existsSync(path.join(dir, candidate)),
+        );
+        if (found) return candidate;
+      } catch {
+        // keep looking
+      }
+    }
+    return null;
+  };
+
+  /**
+   * Suspend the TUI, open the content in nvim/vim, resume, and return the
+   * edited text (null on cancel/error). Uses the same stop/spawn/start
+   * pattern as Pi's own external-editor support. The temp file holds raw
+   * context (user-initiated), is chmod 600, and is always deleted.
+   */
+  const editInEditor = (ctx: ExtensionContext, initial: string): Promise<string | null> => {
+    const uiAny = ctx.ui as { custom?: <T>(factory: unknown, options?: unknown) => Promise<T> };
+    if (ctx.mode !== "tui" || typeof uiAny.custom !== "function") {
+      ctx.ui.notify("The context editor needs the interactive TUI.", "error");
+      return Promise.resolve(null);
+    }
+    const editor = pickEditor();
+    if (editor === null) {
+      ctx.ui.notify("Neither nvim nor vim was found on PATH.", "error");
+      return Promise.resolve(null);
+    }
+    return uiAny.custom<string | null>((tui: { stop(): void; start(): void; requestRender(force?: boolean): void }, _theme: unknown, _kb: unknown, done: (r: string | null) => void) => {
+      setTimeout(async () => {
+        const tmpFile = path.join(os.tmpdir(), `pi-control-plane-ctx-${process.pid}-${Date.now()}.md`);
+        let result: string | null = null;
+        try {
+          fs.writeFileSync(tmpFile, initial, { encoding: "utf8", mode: 0o600 });
+          tui.stop();
+          const code = await new Promise<number | null>((resolve) => {
+            const child = spawn(editor, [tmpFile], { stdio: "inherit" });
+            child.on("error", () => resolve(null));
+            child.on("close", (c) => resolve(c));
+          });
+          if (code === 0) result = fs.readFileSync(tmpFile, "utf8");
+        } catch {
+          result = null;
+        } finally {
+          try {
+            fs.unlinkSync(tmpFile);
+          } catch {
+            // ignore cleanup failure
+          }
+          tui.start();
+          tui.requestRender(true);
+          done(result);
+        }
+      }, 10);
+      return { render: () => [] };
+    });
+  };
+
+  const runContextEditor = async (ctx: ExtensionContext) => {
+    // lastContextMessages is the merged view when an overlay is active, so
+    // re-edits see previous edits plus any newer live messages.
+    const baseMessages = lastContextMessages;
+    let systemPrompt = contextOverlay?.systemPrompt ?? lastBaseSystemPrompt;
+    if (systemPrompt === null) {
+      try {
+        systemPrompt = ctx.getSystemPrompt();
+      } catch {
+        systemPrompt = "";
+      }
+    }
+    const messages = baseMessages ?? [];
+    const serialized =
+      serializeContext(systemPrompt, messages) +
+      (baseMessages === null
+        ? "\n## Note: no LLM call has happened yet this session, so there are no messages to edit.\n"
+        : "");
+    const edited = await editInEditor(ctx, serialized);
+    if (edited === null) {
+      ctx.ui.notify("Context edit cancelled.", "info");
+      return;
+    }
+    if (edited === serialized) {
+      ctx.ui.notify("No changes made.", "info");
+      return;
+    }
+    const parsed = parseEditedContext(edited, messages.length);
+    if (!parsed.ok) {
+      ctx.ui.notify(`Context edit rejected: ${parsed.error}`, "error");
+      return;
+    }
+    const applied = applyEdits(messages, parsed.edit);
+    const systemPromptChanged = parsed.edit.systemPrompt !== systemPrompt;
+    if (applied.editedCount === 0 && applied.droppedCount === 0 && !systemPromptChanged) {
+      ctx.ui.notify("No effective changes.", "info");
+      return;
+    }
+    contextOverlay = {
+      messages: applied.messages,
+      // Anchor to the live conversation length so future messages append cleanly.
+      baseCount: lastIncomingCount,
+      systemPrompt: systemPromptChanged ? parsed.edit.systemPrompt : (contextOverlay?.systemPrompt ?? null),
+      createdAt: new Date().toISOString(),
+    };
+    lastContextMessages = applied.messages;
+    updateStatus(ctx);
+    const summary = [
+      systemPromptChanged ? "system prompt edited" : null,
+      applied.editedCount > 0 ? `${applied.editedCount} message(s) edited` : null,
+      applied.droppedCount > 0 ? `${applied.droppedCount} message(s) removed` : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+    ctx.ui.notify(
+      `Context override active (${summary}). Applies to future turns this session; "/context restore" undoes it.`,
+      "info",
+    );
+  };
+
   // ---- hotkeys ----
+
+  pi.registerShortcut("alt+e", {
+    description: "Control plane: view/edit session context in nvim",
+    handler: async (ctx) => {
+      await runContextEditor(ctx);
+    },
+  });
 
   pi.registerShortcut("alt+c", {
     description: "Control plane: toggle context preview widget",

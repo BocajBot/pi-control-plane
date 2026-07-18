@@ -51,6 +51,7 @@ Pi's own footer already shows token throughput and model info; the control plane
 - `/context diff` — what changed since the last `/context` or `/context full` (sources, tools, skills, model, tokens, hashes). The first run establishes the baseline.
 - `/context full` — detailed view including the redacted system prompt (size-limited, truncation marked). Prints a warning first: redaction is pattern-based and cannot guarantee every secret is caught.
 - `/context sources` — every prompt source with its toggle status: `enabled`, `disabled`, or `not toggleable`.
+- `/context restore` — remove the `alt+e` context override (see the context editor section below).
 - `/context toggle <name>` — turn a source on or off for subsequent turns:
   - `tool:<name>` — genuinely removed from the model's tool list.
   - `file:<path>` — the file's content is excised from the system prompt each turn, **with verification**. If the excision cannot be verified, the toggle is reverted and you are warned — a source is never shown as disabled while it still reaches the provider.
@@ -91,8 +92,19 @@ Your request text is wrapped in delimiters and treated as data — it cannot mas
 | Key | Action |
 |---|---|
 | `alt+c` | Toggle a context-preview widget above the editor |
+| `alt+e` | Open the session context in **nvim** to view and edit it |
 | `alt+p` | Cycle phase: Discuss → Plan → Execute → Verify |
 | `alt+a` | Cycle autonomy: Read-only → Attended → Restricted |
+
+### The context editor (`alt+e`)
+
+`alt+e` suspends the TUI and opens the current session context — the system prompt plus every message the model would receive — in nvim (falls back to vim). Each message sits under a marker line; edit the text, delete whole message sections to remove them, `:wq` to apply, `:q!` to cancel.
+
+- Edits become an **override for future turns in this session**: the model sees your edited history instead of the original. The session file is never rewritten — the chat scrollback still shows what really happened.
+- Tool calls, tool results, thinking, and images appear as `[non-text: …]` placeholders and are preserved exactly; only text is editable. (Deleting one half of a tool call/result pair can make the provider reject the request — if that happens, `alt+e` again or restore.)
+- `/context restore` removes the override. The footer shows `CTX-EDITED` while one is active.
+- The override lives in memory only: it does not survive quitting, `/reload`, or compaction (compaction invalidates it with a notification, since the conversation no longer lines up).
+- Malformed edits (broken markers, missing system-prompt section) are rejected whole — nothing half-applies.
 
 **Why not shift+tab?** Pi already binds `shift+tab` to cycling the thinking level, so these default elsewhere. If you prefer Claude-Code-style `shift+tab` for the phase cycle, add this to `~/.pi/agent/keybindings.json` to move the *thinking* cycle somewhere else first, then the control plane's binding can take its place — see Pi's `docs/keybindings.md` for the file format:
 
