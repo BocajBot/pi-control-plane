@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "denyPathBasenames": [
+    ".env",
+    ".netrc",
+    ".npmrc",
+    ".pgpass",
+    "auth.json",
+    "credentials",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "secrets"
+  ],
+  "denyPathSubstrings": [
+    "/.ssh/",
+    "/.aws/",
+    "/.gnupg/",
+    "/.pi/agent/",
+    "/.config/gcloud/",
+    "/.kube/",
+    "/.docker/config.json"
+  ],
+  "allowBash": false
+}
