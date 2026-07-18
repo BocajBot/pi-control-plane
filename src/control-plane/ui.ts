@@ -283,6 +283,32 @@ export function buildInjectionBlock(state: ControlPlaneState, policyValid: boole
   return block;
 }
 
+/** Cheat-sheet shown by the alt+h hotkey widget. Pure data, testable. */
+export function renderHotkeyCheatsheet(): string[] {
+  return [
+    "Hotkeys — alt+h to hide",
+    "",
+    "Control plane:",
+    "  alt+c  toggle context-preview widget",
+    "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",
+    "  alt+p  cycle phase: Discuss > Plan > Execute > Verify",
+    "  alt+a  cycle autonomy: Read-only > Attended > Restricted",
+    "  alt+h  this cheat sheet",
+    "",
+    "Pi essentials:",
+    "  ctrl+g     edit prompt in external editor",
+    "  shift+tab  cycle thinking level",
+    "  ctrl+t     collapse/expand thinking blocks",
+    "  ctrl+o     collapse/expand tool output",
+    "  ctrl+l     model selector    ctrl+p  cycle model",
+    "  alt+enter  queue follow-up   alt+up  restore queued message",
+    "  ctrl+x     copy last assistant message",
+    "  escape     interrupt         ctrl+c  clear editor   ctrl+d  exit",
+    "",
+    "Commands: /context /task /phase /autonomy /interpret /hotkeys /compact /new",
+  ];
+}
+
 export const USAGE = {
   context: [
     "Usage: /context [diff|full|sources|toggle <name>|restore]",

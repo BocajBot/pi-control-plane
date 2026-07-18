@@ -76,9 +76,11 @@ interface FakeCtxOptions {
 function makeCtx(options: FakeCtxOptions = {}) {
   const notifications: { message: string; type?: string }[] = [];
   const statuses: Record<string, string | undefined> = {};
+  const widgets: Record<string, string[] | undefined> = {};
   const ctx = {
     notifications,
     statuses,
+    widgets,
     hasUI: options.hasUI ?? true,
     cwd: options.cwd ?? process.cwd(),
     mode: "tui",
@@ -88,7 +90,9 @@ function makeCtx(options: FakeCtxOptions = {}) {
       setStatus: (key: string, text: string | undefined) => {
         statuses[key] = text;
       },
-      setWidget: () => {},
+      setWidget: (key: string, content: string[] | undefined) => {
+        widgets[key] = content;
+      },
     },
     sessionManager: {
       getBranch: () => options.branchEntries ?? [],
@@ -417,6 +421,18 @@ test("context overlay: /context restore with no override says so; alt+e register
   assert.ok(pi.shortcuts.has("alt+e"), "alt+e shortcut registered");
   await pi.commands.get("context")!.handler("restore", ctx);
   assert.ok(ctx.notifications.some((n) => /no context override/i.test(n.message)));
+});
+
+test("alt+h toggles the hotkey cheat-sheet widget", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot() });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  assert.ok(pi.shortcuts.has("alt+h"));
+  await pi.shortcuts.get("alt+h")!(ctx);
+  const shown = ctx.widgets["control-plane-hotkeys"];
+  assert.ok(Array.isArray(shown) && shown.some((l) => /alt\+e/.test(l)) && shown.some((l) => /shift\+tab/.test(l)));
+  await pi.shortcuts.get("alt+h")!(ctx);
+  assert.equal(ctx.widgets["control-plane-hotkeys"], undefined);
 });
 
 test("phase and autonomy cycle hotkeys advance in order", async () => {

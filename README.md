@@ -95,6 +95,7 @@ Your request text is wrapped in delimiters and treated as data — it cannot mas
 | `alt+e` | Open the session context in **nvim** to view and edit it |
 | `alt+p` | Cycle phase: Discuss → Plan → Execute → Verify |
 | `alt+a` | Cycle autonomy: Read-only → Attended → Restricted |
+| `alt+h` | Toggle a hotkey cheat sheet (control-plane keys + pi essentials; `/hotkeys` lists everything) |
 
 ### The context editor (`alt+e`)
 

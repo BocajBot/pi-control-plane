@@ -62,6 +62,7 @@ import {
   LIMITS,
   renderContextSummary,
   renderDiff,
+  renderHotkeyCheatsheet,
   renderSources,
   renderTask,
   SANDBOX_ALIAS_WARNING,
@@ -80,6 +81,7 @@ import {
 
 const STATUS_KEY = "control-plane";
 const WIDGET_KEY = "control-plane-context";
+const HOTKEYS_WIDGET_KEY = "control-plane-hotkeys";
 
 interface OutputEntryData {
   title: string;
@@ -117,6 +119,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let lastPayloadMeta: { length: number; hash: string } | null = null;
   let projectRoot: string | null = null;
   let widgetVisible = false;
+  let hotkeysWidgetVisible = false;
   // Guards against a stale agent_end from a previous turn being mistaken for
   // the interpretation turn: only an agent turn that started while the guard
   // was active may complete the interpretation.
@@ -1041,6 +1044,23 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       );
       ctx.ui.setWidget(WIDGET_KEY, lines, { placement: "aboveEditor" });
       widgetVisible = true;
+    },
+  });
+
+  pi.registerShortcut("alt+h", {
+    description: "Control plane: toggle hotkey cheat sheet",
+    handler: (ctx) => {
+      if (hotkeysWidgetVisible) {
+        ctx.ui.setWidget(HOTKEYS_WIDGET_KEY, undefined);
+        hotkeysWidgetVisible = false;
+        return;
+      }
+      ctx.ui.setWidget(
+        HOTKEYS_WIDGET_KEY,
+        renderHotkeyCheatsheet().map((line) => (line.length > 0 ? line : " ")),
+        { placement: "aboveEditor" },
+      );
+      hotkeysWidgetVisible = true;
     },
   });
 
