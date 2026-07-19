@@ -73,6 +73,7 @@ import {
   buildInjectionBlock,
   contextWarningLevel,
   displayMode,
+  formatAddedContext,
   formatContextWarning,
   formatDenial,
   formatDraftCounter,
@@ -466,7 +467,22 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           } catch {
             draft = "";
           }
-          return [theme.fg("dim", formatDraftCounter(draft, width))];
+          // What accompanies the draft when it is sent: exact when the model's
+          // tokenizer counted the last request, otherwise pi's estimate.
+          let added: number | null = null;
+          let exact = false;
+          if (lastTokenCount !== null) {
+            added = lastTokenCount.tokens;
+            exact = true;
+          } else {
+            const tokens = ctx.getContextUsage()?.tokens;
+            // 0 before the first request means "nothing measured yet", not zero.
+            if (typeof tokens === "number" && tokens > 0) added = tokens;
+          }
+          return [
+            theme.fg("dim", formatDraftCounter(draft, width)),
+            theme.fg("dim", formatAddedContext(added, exact, width)),
+          ];
         },
       }),
       { placement: "belowEditor" },

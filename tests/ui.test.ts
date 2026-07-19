@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   contextWarningLevel,
   estimateTokens,
+  formatAddedContext,
   formatContextWarning,
   formatDraftCounter,
   formatFooterStats,
@@ -43,6 +44,14 @@ test("formatDraftCounter right-aligns within the width", () => {
   assert.ok(line.startsWith(" "));
   // Narrow width: label survives untruncated even if wider than the box.
   assert.equal(formatDraftCounter("", 5), "Token Counter: ~0");
+});
+
+test("formatAddedContext: exact plain, estimate tilded, unknown as ?", () => {
+  const exact = formatAddedContext(2897, true, 40);
+  assert.equal(exact.length, 40);
+  assert.ok(exact.endsWith("Added Context: 2,897"));
+  assert.ok(formatAddedContext(4222, false, 40).endsWith("Added Context: ~4,222"));
+  assert.ok(formatAddedContext(null, false, 40).endsWith("Added Context: ?"));
 });
 
 test("formatTokenCount matches pi's footer formatting", () => {

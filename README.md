@@ -53,7 +53,7 @@ sent 4.2k · received 30 · cache 4.2k reused (99.2% hits) · context 8.6% of 49
 
 Pi's "(auto)" auto-compact indicator is not shown: extensions cannot observe that setting, and the control plane never guesses values it cannot verify.
 
-A live `Token Counter: ~N` sits at the bottom right of the input box, estimating the token cost of what you are typing. It is an estimate (~4 characters per token — no tokenizer runs in-process), hence the `~`.
+A live `Token Counter: ~N` sits at the bottom right of the input box, estimating the token cost of what you are typing. It is an estimate (~4 characters per token — no tokenizer runs in-process), hence the `~`. Below it, `Added Context: N` shows the tokens that accompany your draft when it is sent — system prompt, conversation history, and tool definitions. It is exact (no `~`) when the model's tokenizer counted the last request, `~N` when only pi's estimate exists, and `?` before anything has been measured.
 
 ## Commands
 

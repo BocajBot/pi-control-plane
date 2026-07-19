@@ -124,11 +124,32 @@ export function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
-/** Right-aligned draft token counter line shown under the input box. */
-export function formatDraftCounter(text: string, width: number): string {
-  const label = `Token Counter: ~${estimateTokens(text)}`;
+function rightAlign(label: string, width: number): string {
   if (label.length >= width) return label;
   return " ".repeat(width - label.length) + label;
+}
+
+/** Right-aligned draft token counter line shown under the input box. */
+export function formatDraftCounter(text: string, width: number): string {
+  return rightAlign(`Token Counter: ~${estimateTokens(text)}`, width);
+}
+
+/**
+ * "Added Context" line under the token counter: the tokens that accompany the
+ * draft when it is sent (system prompt, history, tool definitions). Exact when
+ * the model's tokenizer counted the last request; "~" when only pi's estimate
+ * exists; "?" before anything is known.
+ */
+export function formatAddedContext(
+  addedTokens: number | null,
+  exact: boolean,
+  width: number,
+): string {
+  const value =
+    addedTokens === null
+      ? "?"
+      : `${exact ? "" : "~"}${addedTokens.toLocaleString("en-US")}`;
+  return rightAlign(`Added Context: ${value}`, width);
 }
 
 /** Context-fullness warning thresholds, applied to the EXACT (model-tokenizer)
