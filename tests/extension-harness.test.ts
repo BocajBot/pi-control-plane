@@ -42,11 +42,12 @@ class FakePi {
   sendUserMessage(content: string) {
     this.sentUserMessages.push(content);
   }
+  allToolNames = ["read", "bash", "edit", "write", "grep", "find", "ls", "web_search"];
   getActiveTools() {
     return [...this.activeTools];
   }
   getAllTools() {
-    return this.activeTools.map((name) => ({ name, description: `${name} tool`, parameters: {}, sourceInfo: {} }));
+    return this.allToolNames.map((name) => ({ name, description: `${name} tool`, parameters: {}, sourceInfo: {} }));
   }
   setActiveTools(names: string[]) {
     this.activeTools = [...names];
@@ -433,6 +434,43 @@ test("alt+h and alt+s registered; alt+h without modal support falls back to chat
   const output = pi.entries.find((e) => e.customType === "pi-control-plane-output");
   assert.ok(output, "cheat sheet emitted as chat entry when no modal UI exists");
   assert.ok(JSON.stringify(output!.data).includes("alt+e"));
+});
+
+test("/context profile applies loadouts, lists them, and 'all' restores", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot() });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+
+  await pi.commands.get("context")!.handler("profile minimal", ctx);
+  assert.ok(!pi.activeTools.includes("web_search"), "profile must remove unlisted tools");
+  assert.ok(pi.activeTools.includes("bash"));
+  assert.ok(ctx.notifications.some((n) => /Profile "minimal"/.test(n.message)));
+
+  await pi.commands.get("context")!.handler("profile", ctx);
+  const listing = pi.entries.filter((e) => e.customType === "pi-control-plane-output").at(-1);
+  const listingText = JSON.stringify(listing?.data);
+  assert.ok(/minimal/.test(listingText) && /reading/.test(listingText) && /Active: minimal/.test(listingText));
+
+  await pi.commands.get("context")!.handler("profile all", ctx);
+  assert.ok(pi.activeTools.includes("web_search"), "'all' re-enables everything");
+
+  await pi.commands.get("context")!.handler("profile bogus", ctx);
+  assert.ok(ctx.notifications.some((n) => /Unknown profile "bogus"/.test(n.message)));
+});
+
+test("applied profile persists and is restored in a new session", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("context")!.handler("profile reading", ctx);
+  assert.deepEqual([...pi.activeTools].sort(), ["find", "grep", "ls", "read"]);
+
+  const pi2 = new (pi.constructor as new () => FakePi)();
+  await controlPlaneExtension(pi2 as never);
+  const ctx2 = makeCtx({ cwd: root, branchEntries: pi.entries.filter((e) => e.customType === STATE_ENTRY_TYPE) });
+  await pi2.emit("session_start", { type: "session_start", reason: "resume" }, ctx2);
+  assert.deepEqual([...pi2.activeTools].sort(), ["find", "grep", "ls", "read"], "profile toggles reapplied on restore");
 });
 
 test("phase and autonomy cycle hotkeys advance in order", async () => {

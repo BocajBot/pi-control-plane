@@ -54,6 +54,14 @@ import {
   restoreFromEntries,
 } from "../src/control-plane/state.ts";
 import { applyContextFileToggles, replaceSkillsBlock, toggleName } from "../src/control-plane/toggles.ts";
+import {
+  ALL_PROFILE,
+  applyProfile,
+  clearToolToggles,
+  currentProfileName,
+  type ProfilesConfig,
+  validateProfiles,
+} from "../src/control-plane/profiles.ts";
 import { evaluateToolCall, validatePolicy, type PathOps } from "../src/control-plane/tool-policy.ts";
 import {
   buildInjectionBlock,
@@ -134,6 +142,19 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     realpath: (p) => fs.realpathSync(p),
     exists: (p) => fs.existsSync(p),
   };
+
+  // ---- profiles loading (invalid file -> profiles unavailable; safety unaffected) ----
+  let profilesConfig: ProfilesConfig | null = null;
+  let profilesLoadError: string | null = null;
+  try {
+    const profilesPath = fileURLToPath(new URL("../policy/profiles.json", import.meta.url));
+    profilesConfig = validateProfiles(JSON.parse(fs.readFileSync(profilesPath, "utf8")));
+    if (profilesConfig === null) {
+      profilesLoadError = "policy/profiles.json failed validation; /context profile is unavailable.";
+    }
+  } catch (error) {
+    profilesLoadError = `policy/profiles.json could not be loaded (${String(error)}); /context profile is unavailable.`;
+  }
 
   // ---- policy loading (fail closed: invalid policy -> null -> Read-only) ----
   try {
@@ -606,7 +627,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   pi.registerCommand("context", {
     description: "Inspect the effective context (summary, diff, full, sources, toggle)",
     getArgumentCompletions: (prefix) => {
-      const subs = ["diff", "full", "sources", "toggle ", "restore"];
+      const subs = ["diff", "full", "sources", "toggle ", "restore", "profile "];
       const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
       return matches.length > 0 ? matches.map((s) => ({ value: s, label: s.trim() })) : null;
     },
@@ -682,6 +703,56 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
             return;
           }
           clearOverlay(ctx, "restored by /context restore");
+          return;
+        }
+        case "profile": {
+          const allTools = pi.getAllTools().map((t) => t.name);
+          if (command.name === null) {
+            const active = currentProfileName(profilesConfig, allTools, state.sourceToggles);
+            const lines: string[] = [];
+            if (profilesLoadError !== null) lines.push(profilesLoadError);
+            lines.push(`Active: ${active ?? "(custom toggle state, matches no profile)"}`);
+            lines.push("");
+            lines.push(`  ${active === ALL_PROFILE ? "*" : " "} all — every tool enabled (built-in)`);
+            for (const [name, profile] of Object.entries(profilesConfig?.profiles ?? {})) {
+              lines.push(`  ${active === name ? "*" : " "} ${name} — ${profile.description}`);
+              lines.push(`      tools: ${profile.tools.join(", ")}`);
+            }
+            lines.push("");
+            lines.push("Apply with /context profile <name>. Define profiles in policy/profiles.json (then /reload).");
+            emit("tool profiles", lines);
+            return;
+          }
+          if (command.name === ALL_PROFILE) {
+            state.sourceToggles = clearToolToggles(state.sourceToggles);
+            pi.setActiveTools(allTools);
+            persist();
+            updateStatus(ctx);
+            ctx.ui.notify(`Profile "all": every tool enabled (${allTools.length}).`, "info");
+            return;
+          }
+          const profile = profilesConfig?.profiles[command.name];
+          if (profile === undefined) {
+            const known = [ALL_PROFILE, ...Object.keys(profilesConfig?.profiles ?? {})].join(", ");
+            ctx.ui.notify(
+              profilesLoadError ?? `Unknown profile "${command.name}". Available: ${known}`,
+              "error",
+            );
+            return;
+          }
+          const result = applyProfile(profile.tools, allTools, state.sourceToggles);
+          state.sourceToggles = result.toggles;
+          pi.setActiveTools(result.enabled);
+          persist();
+          updateStatus(ctx);
+          const missingNote =
+            result.missing.length > 0
+              ? ` Not present in this session (skipped): ${result.missing.join(", ")}.`
+              : "";
+          ctx.ui.notify(
+            `Profile "${command.name}": ${result.enabled.length} tool(s) enabled, ${result.disabled.length} disabled.${missingNote}`,
+            "info",
+          );
           return;
         }
         case "toggle": {

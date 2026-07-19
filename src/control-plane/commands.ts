@@ -13,6 +13,7 @@ export type ContextCommand =
   | { kind: "sources" }
   | { kind: "toggle"; name: string }
   | { kind: "restore" }
+  | { kind: "profile"; name: string | null }
   | { kind: "usage" };
 
 export function parseContextArgs(args: string): ContextCommand {
@@ -30,6 +31,9 @@ export function parseContextArgs(args: string): ContextCommand {
       return rest.length > 0 ? { kind: "toggle", name: rest.join(" ") } : { kind: "usage" };
     case "restore":
       return rest.length === 0 ? { kind: "restore" } : { kind: "usage" };
+    case "profile":
+      if (rest.length === 0) return { kind: "profile", name: null };
+      return rest.length === 1 ? { kind: "profile", name: rest[0] } : { kind: "usage" };
     default:
       return { kind: "usage" };
   }

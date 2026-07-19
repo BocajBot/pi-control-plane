@@ -319,6 +319,8 @@ export const USAGE = {
     "  /context sources  — list prompt sources with toggle status",
     "  /context toggle <name> — enable/disable a source (e.g. tool:bash, file:/path, skill:foo)",
     "  /context restore  — remove the alt+e context override (undo edits)",
+    "  /context profile  — list tool profiles; /context profile <name> applies one",
+    "                      (\"all\" re-enables every tool; edit policy/profiles.json to define profiles)",
   ],
   task: [
     "Usage: /task [set <text>|clear|accept|reject]",
