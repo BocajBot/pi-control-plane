@@ -68,9 +68,11 @@ import {
   formatDenial,
   formatStatus,
   LIMITS,
+  type ProfilePickerItem,
   renderContextSummary,
   renderDiff,
   renderHotkeyCheatsheet,
+  renderProfilePicker,
   renderSources,
   renderTask,
   SANDBOX_ALIAS_WARNING,
@@ -371,6 +373,39 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           ? `Unknown source "${name}". Close matches: ${near.join(", ")}`
           : `Unknown source "${name}". Run /context sources to list toggleable sources.`,
     };
+  };
+
+  /** Apply a profile by name ("all" included). Notifies on success and failure. */
+  const applyNamedProfile = (ctx: ExtensionContext, name: string): boolean => {
+    const allTools = pi.getAllTools().map((t) => t.name);
+    if (name === ALL_PROFILE) {
+      state.sourceToggles = clearToolToggles(state.sourceToggles);
+      pi.setActiveTools(allTools);
+      persist();
+      updateStatus(ctx);
+      ctx.ui.notify(`Profile "all": every tool enabled (${allTools.length}).`, "info");
+      return true;
+    }
+    const profile = profilesConfig?.profiles[name];
+    if (profile === undefined) {
+      const known = [ALL_PROFILE, ...Object.keys(profilesConfig?.profiles ?? {})].join(", ");
+      ctx.ui.notify(profilesLoadError ?? `Unknown profile "${name}". Available: ${known}`, "error");
+      return false;
+    }
+    const result = applyProfile(profile.tools, allTools, state.sourceToggles);
+    state.sourceToggles = result.toggles;
+    pi.setActiveTools(result.enabled);
+    persist();
+    updateStatus(ctx);
+    const missingNote =
+      result.missing.length > 0
+        ? ` Not present in this session (skipped): ${result.missing.join(", ")}.`
+        : "";
+    ctx.ui.notify(
+      `Profile "${name}": ${result.enabled.length} tool(s) enabled, ${result.disabled.length} disabled.${missingNote}`,
+      "info",
+    );
+    return true;
   };
 
   // ---- entry renderers (chat-visible output, excluded from LLM context) ----
@@ -723,36 +758,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
             emit("tool profiles", lines);
             return;
           }
-          if (command.name === ALL_PROFILE) {
-            state.sourceToggles = clearToolToggles(state.sourceToggles);
-            pi.setActiveTools(allTools);
-            persist();
-            updateStatus(ctx);
-            ctx.ui.notify(`Profile "all": every tool enabled (${allTools.length}).`, "info");
-            return;
-          }
-          const profile = profilesConfig?.profiles[command.name];
-          if (profile === undefined) {
-            const known = [ALL_PROFILE, ...Object.keys(profilesConfig?.profiles ?? {})].join(", ");
-            ctx.ui.notify(
-              profilesLoadError ?? `Unknown profile "${command.name}". Available: ${known}`,
-              "error",
-            );
-            return;
-          }
-          const result = applyProfile(profile.tools, allTools, state.sourceToggles);
-          state.sourceToggles = result.toggles;
-          pi.setActiveTools(result.enabled);
-          persist();
-          updateStatus(ctx);
-          const missingNote =
-            result.missing.length > 0
-              ? ` Not present in this session (skipped): ${result.missing.join(", ")}.`
-              : "";
-          ctx.ui.notify(
-            `Profile "${command.name}": ${result.enabled.length} tool(s) enabled, ${result.disabled.length} disabled.${missingNote}`,
-            "info",
-          );
+          applyNamedProfile(ctx, command.name);
           return;
         }
         case "toggle": {
@@ -1183,6 +1189,70 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         );
       } finally {
         hotkeysModalOpen = false;
+      }
+    },
+  });
+
+  let profileModalOpen = false;
+  pi.registerShortcut("alt+t", {
+    description: "Control plane: tool-profile picker (modal)",
+    handler: async (ctx) => {
+      const uiAny = ctx.ui as { custom?: <T>(factory: unknown, options?: unknown) => Promise<T> };
+      if (ctx.mode !== "tui" || typeof uiAny.custom !== "function") {
+        ctx.ui.notify("The profile picker needs the interactive TUI. Use /context profile instead.", "warning");
+        return;
+      }
+      if (profileModalOpen) return;
+      const allTools = pi.getAllTools().map((t) => t.name);
+      const active = currentProfileName(profilesConfig, allTools, state.sourceToggles);
+      const items: ProfilePickerItem[] = [
+        {
+          name: ALL_PROFILE,
+          description: "Every tool enabled (built-in).",
+          tools: [...allTools].sort(),
+          active: active === ALL_PROFILE,
+        },
+        ...Object.entries(profilesConfig?.profiles ?? {}).map(([name, profile]) => ({
+          name,
+          description: profile.description,
+          tools: [...profile.tools].sort(),
+          active: active === name,
+        })),
+      ];
+      profileModalOpen = true;
+      try {
+        const chosen = await uiAny.custom<string | null>(
+          (
+            tui: { requestRender(force?: boolean): void },
+            _theme: unknown,
+            _kb: unknown,
+            done: (r: string | null) => void,
+          ) => {
+            let selectedIndex = Math.max(0, items.findIndex((item) => item.active));
+            return {
+              render: (width: number) => renderProfilePicker(items, selectedIndex, Math.min(width, 100)),
+              handleInput: (data: string) => {
+                if (data === "\x1b[A" || data === "k") {
+                  selectedIndex = (selectedIndex + items.length - 1) % items.length;
+                  tui.requestRender();
+                } else if (data === "\x1b[B" || data === "j" || data === "\t") {
+                  selectedIndex = (selectedIndex + 1) % items.length;
+                  tui.requestRender();
+                } else if (data === "\r" || data === "\n") {
+                  done(items[selectedIndex].name);
+                } else if (data === "\x1b" || data === "q" || data === "\x03") {
+                  done(null);
+                }
+              },
+            };
+          },
+          { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%" } },
+        );
+        if (chosen !== null) {
+          applyNamedProfile(ctx, chosen);
+        }
+      } finally {
+        profileModalOpen = false;
       }
     },
   });

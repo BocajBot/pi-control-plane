@@ -60,6 +60,39 @@ test("clearToolToggles removes only tool toggles", () => {
   assert.deepEqual(cleared, { "skill:foo": false });
 });
 
+test("profile picker layout: 1/5 left column, two right rows, selection marker", async () => {
+  const { renderProfilePicker } = await import("../src/control-plane/ui.ts");
+  const items = [
+    { name: "all", description: "Every tool enabled (built-in).", tools: ["a", "b"], active: false },
+    { name: "minimal", description: "Core coding tools only", tools: ["read", "bash"], active: true },
+  ];
+  const width = 82;
+  const lines = renderProfilePicker(items, 1, width);
+  const inner = width - 2;
+  const leftWidth = Math.floor(inner / 5);
+  // Rectangular: every line equal length.
+  assert.ok(lines.every((l) => l.length === lines[0].length), "all lines equal width");
+  // Column split at 1/5: body rows have the divider at leftWidth+1.
+  const bodyRow = lines[3];
+  assert.equal(bodyRow[0], "│");
+  assert.equal(bodyRow[leftWidth + 1], "│", "left column is 1/5 of the modal");
+  // Separator between description row and tools row on the right side (body
+  // lines only — skip the top/bottom borders and header separator).
+  const bodyLines = lines.slice(3, -1);
+  assert.ok(
+    bodyLines.some((l) => /─{10,}/.test(l.slice(leftWidth + 2))),
+    "right side has a row separator between description and tools",
+  );
+  // Selection marker and active star in the left column.
+  assert.ok(lines.some((l) => l.includes("> *minimal") || l.includes(">*minimal") || l.includes("> *min")));
+  // Right side shows description then tools of the SELECTED item.
+  const joined = lines.join("\n");
+  assert.ok(joined.includes("Core coding tools only"));
+  assert.ok(joined.includes("Tools (2)"));
+  assert.ok(joined.includes("bash, read") || joined.includes("read, bash"));
+  assert.ok(!joined.includes("Every tool enabled"), "unselected item's description not shown");
+});
+
 test("currentProfileName matches all, named profiles, and custom states", () => {
   const allTools = ["read", "bash", "edit", "write", "grep"];
   const config = validateProfiles(validConfig)!;

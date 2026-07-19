@@ -283,6 +283,79 @@ export function buildInjectionBlock(state: ControlPlaneState, policyValid: boole
   return block;
 }
 
+export interface ProfilePickerItem {
+  name: string;
+  description: string;
+  tools: string[];
+  active: boolean;
+}
+
+function wrapText(text: string, width: number): string[] {
+  if (width <= 0) return [text];
+  const words = text.split(/\s+/).filter((w) => w.length > 0);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    if (line.length === 0) {
+      line = word.slice(0, width);
+    } else if (line.length + 1 + word.length <= width) {
+      line += " " + word;
+    } else {
+      lines.push(line);
+      line = word.slice(0, width);
+    }
+  }
+  if (line.length > 0) lines.push(line);
+  return lines.length > 0 ? lines : [""];
+}
+
+/**
+ * Profile picker modal layout (alt+t). Rectangular; left column = 1/5 of the
+ * modal width listing profile names, right side = two rows (description on
+ * top, enabled tools below). Pure: returns plain text lines.
+ */
+export function renderProfilePicker(
+  items: ProfilePickerItem[],
+  selectedIndex: number,
+  width: number,
+): string[] {
+  const inner = Math.max(40, width - 2);
+  const leftWidth = Math.max(10, Math.floor(inner / 5));
+  const rightWidth = inner - leftWidth - 1;
+  const selected = items[selectedIndex] ?? items[0];
+
+  const title = " Tool Profiles — up/down select · enter apply · esc close";
+  const leftLines: string[] = ["Profiles", ""];
+  items.forEach((item, index) => {
+    const marker = index === selectedIndex ? "> " : "  ";
+    const star = item.active ? "*" : " ";
+    leftLines.push(`${marker}${star}${item.name}`.slice(0, leftWidth));
+  });
+
+  const descLines = ["Description", ...wrapText(selected?.description ?? "", rightWidth - 2).map((l) => "  " + l)];
+  const toolsHeader = `Tools (${selected?.tools.length ?? 0})`;
+  const toolsLines = [
+    toolsHeader,
+    ...wrapText((selected?.tools ?? []).join(", ") || "(none)", rightWidth - 2).map((l) => "  " + l),
+  ];
+  // Right side: two rows — description row, horizontal rule, tools row.
+  const rightLines = [...descLines, "─".repeat(rightWidth), ...toolsLines];
+
+  const bodyHeight = Math.max(leftLines.length, rightLines.length);
+  const row = (left: string, right: string) =>
+    "│" + left.padEnd(leftWidth).slice(0, leftWidth) + "│" + right.padEnd(rightWidth).slice(0, rightWidth) + "│";
+
+  const lines: string[] = [];
+  lines.push("╭" + "─".repeat(inner) + "╮");
+  lines.push("│" + title.padEnd(inner).slice(0, inner) + "│");
+  lines.push("├" + "─".repeat(leftWidth) + "┬" + "─".repeat(rightWidth) + "┤");
+  for (let i = 0; i < bodyHeight; i++) {
+    lines.push(row(leftLines[i] ?? "", rightLines[i] ?? ""));
+  }
+  lines.push("╰" + "─".repeat(leftWidth) + "┴" + "─".repeat(rightWidth) + "╯");
+  return lines;
+}
+
 /** Cheat-sheet shown by the alt+h hotkey widget. Pure data, testable. */
 export function renderHotkeyCheatsheet(): string[] {
   return [
@@ -292,6 +365,7 @@ export function renderHotkeyCheatsheet(): string[] {
     "  alt+c  toggle context-preview widget",
     "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",
     "  alt+s  send preview: everything the next message will send, editable, incl. your draft",
+    "  alt+t  tool-profile picker (modal: select + apply loadouts)",
     "  alt+p  cycle phase: Discuss > Plan > Execute > Verify",
     "  alt+a  cycle autonomy: Read-only > Attended > Restricted",
     "  alt+h  this cheat sheet",

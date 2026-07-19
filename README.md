@@ -95,6 +95,7 @@ Your request text is wrapped in delimiters and treated as data — it cannot mas
 | `alt+c` | Toggle a context-preview widget above the editor |
 | `alt+e` | Open the session context in **nvim** to view and edit it |
 | `alt+s` | **Send preview**: everything the next message will send — system prompt (with the auto-appended control-plane block shown read-only), full history, and your unsent draft — in nvim, editable |
+| `alt+t` | Tool-profile picker: modal with profile names in a left column (1/5 width) and, on the right, the selected profile's description over its tool list. ↑/↓ or j/k select, enter applies, esc closes; `*` marks the active profile |
 | `alt+p` | Cycle phase: Discuss → Plan → Execute → Verify |
 | `alt+a` | Cycle autonomy: Read-only → Attended → Restricted |
 | `alt+h` | Hotkey cheat sheet as a centered modal (any key closes; `/hotkeys` lists everything) |

@@ -430,6 +430,7 @@ test("alt+h and alt+s registered; alt+h without modal support falls back to chat
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
   assert.ok(pi.shortcuts.has("alt+h"));
   assert.ok(pi.shortcuts.has("alt+s"));
+  assert.ok(pi.shortcuts.has("alt+t"));
   await pi.shortcuts.get("alt+h")!(ctx);
   const output = pi.entries.find((e) => e.customType === "pi-control-plane-output");
   assert.ok(output, "cheat sheet emitted as chat entry when no modal UI exists");
