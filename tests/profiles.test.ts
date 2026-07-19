@@ -43,6 +43,19 @@ test("validateProfiles rejects malformed shapes and the reserved name", () => {
   );
 });
 
+test("validateProfiles handles defaultProfile", () => {
+  const withDefault = { ...validConfig, defaultProfile: "minimal" };
+  assert.equal(validateProfiles(withDefault)?.defaultProfile, "minimal");
+  assert.equal(validateProfiles({ ...validConfig, defaultProfile: "all" })?.defaultProfile, "all");
+  assert.equal(validateProfiles(validConfig)?.defaultProfile, null, "absent -> null");
+  assert.equal(
+    validateProfiles({ ...validConfig, defaultProfile: "nope" }),
+    null,
+    "default must reference an existing profile",
+  );
+  assert.equal(validateProfiles({ ...validConfig, defaultProfile: 3 }), null);
+});
+
 test("applyProfile disables unlisted tools, keeps non-tool toggles, reports missing", () => {
   const allTools = ["read", "bash", "edit", "write", "web_search", "mcp"];
   const current = { "skill:foo": false, "tool:mcp": false };
@@ -63,8 +76,8 @@ test("clearToolToggles removes only tool toggles", () => {
 test("profile picker layout: 1/5 left column, two right rows, selection marker", async () => {
   const { renderProfilePicker } = await import("../src/control-plane/ui.ts");
   const items = [
-    { name: "all", description: "Every tool enabled (built-in).", tools: ["a", "b"], active: false },
-    { name: "minimal", description: "Core coding tools only", tools: ["read", "bash"], active: true },
+    { name: "all", description: "Every tool enabled (built-in).", tools: ["a", "b"], active: false, isDefault: false },
+    { name: "minimal", description: "Core coding tools only", tools: ["read", "bash"], active: true, isDefault: true },
   ];
   const width = 82;
   const lines = renderProfilePicker(items, 1, width);
@@ -85,6 +98,12 @@ test("profile picker layout: 1/5 left column, two right rows, selection marker",
   );
   // Selection marker and active star in the left column.
   assert.ok(lines.some((l) => l.includes("> *minimal") || l.includes(">*minimal") || l.includes("> *min")));
+  // Default profile is labeled in the left column and explained when selected.
+  assert.ok(lines.join("\n").includes("minimal (def"), "default marker shown (possibly truncated)");
+  assert.ok(lines.join("\n").includes("Default profile"), "default explanation in description row");
+  // Title advertises both actions.
+  assert.ok(lines[1].includes("enter apply (session)"));
+  assert.ok(lines[1].includes("space set default"));
   // Right side shows description then tools of the SELECTED item.
   const joined = lines.join("\n");
   assert.ok(joined.includes("Core coding tools only"));

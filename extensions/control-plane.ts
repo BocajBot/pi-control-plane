@@ -178,8 +178,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // ---- profiles loading (invalid file -> profiles unavailable; safety unaffected) ----
   let profilesConfig: ProfilesConfig | null = null;
   let profilesLoadError: string | null = null;
+  const profilesPath = fileURLToPath(new URL("../policy/profiles.json", import.meta.url));
   try {
-    const profilesPath = fileURLToPath(new URL("../policy/profiles.json", import.meta.url));
     profilesConfig = validateProfiles(JSON.parse(fs.readFileSync(profilesPath, "utf8")));
     if (profilesConfig === null) {
       profilesLoadError = "policy/profiles.json failed validation; /context profile is unavailable.";
@@ -580,6 +580,40 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     return true;
   };
 
+  /**
+   * Persist a profile name as the default for fresh sessions by writing
+   * "defaultProfile" back into policy/profiles.json. The file is re-validated
+   * after the edit so an unexpected on-disk shape can never be made worse.
+   */
+  const setDefaultProfile = (ctx: ExtensionContext, name: string): boolean => {
+    if (name !== ALL_PROFILE && profilesConfig?.profiles[name] === undefined) {
+      ctx.ui.notify(profilesLoadError ?? `Unknown profile "${name}".`, "error");
+      return false;
+    }
+    try {
+      const raw = JSON.parse(fs.readFileSync(profilesPath, "utf8")) as Record<string, unknown>;
+      raw.defaultProfile = name;
+      const revalidated = validateProfiles(raw);
+      if (revalidated === null) {
+        ctx.ui.notify(
+          "policy/profiles.json on disk does not validate; default profile not saved.",
+          "error",
+        );
+        return false;
+      }
+      fs.writeFileSync(profilesPath, JSON.stringify(raw, null, 2) + "\n", "utf8");
+      profilesConfig = revalidated;
+      ctx.ui.notify(
+        `Default profile is now "${name}" — new sessions will start with it.`,
+        "info",
+      );
+      return true;
+    } catch (error) {
+      ctx.ui.notify(`Could not save default profile: ${String(error)}`, "error");
+      return false;
+    }
+  };
+
   // ---- entry renderers (chat-visible output, excluded from LLM context) ----
 
   pi.registerEntryRenderer<OutputEntryData>(OUTPUT_ENTRY_TYPE, (entry, _options, theme) => {
@@ -625,6 +659,12 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       ctx.ui.notify(`Control plane: ${policyLoadError}`, "warning");
     }
     reapplyToolToggles();
+    // Fresh sessions (no saved control-plane state) start on the default
+    // profile, if one is configured. Restored sessions keep their own toggles.
+    const defaultProfile = profilesConfig?.defaultProfile ?? null;
+    if (!result.restored && defaultProfile !== null && defaultProfile !== ALL_PROFILE) {
+      applyNamedProfile(ctx, defaultProfile);
+    }
     installFooter(ctx);
     // Editor state is process/session scoped; a new or resumed session starts clean.
     contextOverlay = null;
@@ -1378,28 +1418,32 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       if (profileModalOpen) return;
       const allTools = pi.getAllTools().map((t) => t.name);
       const active = currentProfileName(profilesConfig, allTools, state.sourceToggles);
+      const defaultName = profilesConfig?.defaultProfile ?? null;
       const items: ProfilePickerItem[] = [
         {
           name: ALL_PROFILE,
           description: "Every tool enabled (built-in).",
           tools: [...allTools].sort(),
           active: active === ALL_PROFILE,
+          isDefault: defaultName === ALL_PROFILE,
         },
         ...Object.entries(profilesConfig?.profiles ?? {}).map(([name, profile]) => ({
           name,
           description: profile.description,
           tools: [...profile.tools].sort(),
           active: active === name,
+          isDefault: defaultName === name,
         })),
       ];
       profileModalOpen = true;
       try {
-        const chosen = await uiAny.custom<string | null>(
+        type PickerChoice = { kind: "session" | "default"; name: string } | null;
+        const chosen = await uiAny.custom<PickerChoice>(
           (
             tui: { requestRender(force?: boolean): void },
             _theme: unknown,
             _kb: unknown,
-            done: (r: string | null) => void,
+            done: (r: PickerChoice) => void,
           ) => {
             let selectedIndex = Math.max(0, items.findIndex((item) => item.active));
             return {
@@ -1412,7 +1456,9 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
                   selectedIndex = (selectedIndex + 1) % items.length;
                   tui.requestRender();
                 } else if (keyIs(data, "enter", ["\r", "\n"])) {
-                  done(items[selectedIndex].name);
+                  done({ kind: "session", name: items[selectedIndex].name });
+                } else if (keyIs(data, "space", [" "])) {
+                  done({ kind: "default", name: items[selectedIndex].name });
                 } else if (
                   keyIs(data, "escape", ["\x1b"]) ||
                   keyIs(data, "ctrl+c", ["\x03"]) ||
@@ -1426,7 +1472,12 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%" } },
         );
         if (chosen !== null) {
-          applyNamedProfile(ctx, chosen);
+          if (chosen.kind === "default") {
+            // Space = make it the default for new sessions AND switch to it now.
+            if (setDefaultProfile(ctx, chosen.name)) applyNamedProfile(ctx, chosen.name);
+          } else {
+            applyNamedProfile(ctx, chosen.name);
+          }
         }
       } finally {
         profileModalOpen = false;

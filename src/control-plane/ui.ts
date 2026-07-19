@@ -337,6 +337,8 @@ export interface ProfilePickerItem {
   description: string;
   tools: string[];
   active: boolean;
+  /** This profile is applied automatically at the start of fresh sessions. */
+  isDefault: boolean;
 }
 
 function wrapText(text: string, width: number): string[] {
@@ -373,15 +375,23 @@ export function renderProfilePicker(
   const rightWidth = inner - leftWidth - 1;
   const selected = items[selectedIndex] ?? items[0];
 
-  const title = " Tool Profiles — up/down select · enter apply · esc close";
+  const title = " Tool Profiles — enter apply (session) · space set default · esc close";
   const leftLines: string[] = ["Profiles", ""];
   items.forEach((item, index) => {
     const marker = index === selectedIndex ? "> " : "  ";
     const star = item.active ? "*" : " ";
-    leftLines.push(`${marker}${star}${item.name}`.slice(0, leftWidth));
+    const name = item.isDefault ? `${item.name} (default)` : item.name;
+    leftLines.push(`${marker}${star}${name}`.slice(0, leftWidth));
   });
 
   const descLines = ["Description", ...wrapText(selected?.description ?? "", rightWidth - 2).map((l) => "  " + l)];
+  if (selected?.isDefault) {
+    descLines.push(
+      ...wrapText("Default profile — applied automatically when a new session starts.", rightWidth - 2).map(
+        (l) => "  " + l,
+      ),
+    );
+  }
   const toolsHeader = `Tools (${selected?.tools.length ?? 0})`;
   const toolsLines = [
     toolsHeader,
@@ -414,7 +424,7 @@ export function renderHotkeyCheatsheet(): string[] {
     "  alt+c  toggle context-preview widget",
     "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",
     "  alt+s  send preview: everything the next message will send, editable, incl. your draft",
-    "  alt+t  tool-profile picker (modal: select + apply loadouts)",
+    "  alt+t  tool-profile picker (enter: apply this session · space: set as default)",
     "  alt+p  cycle phase: Discuss > Plan > Execute > Verify",
     "  alt+a  cycle autonomy: Read-only > Attended > Restricted",
     "  alt+h  this cheat sheet",

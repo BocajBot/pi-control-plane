@@ -33,6 +33,7 @@ Rules:
 - `schemaVersion` must be `1`.
 - Each profile has exactly `description` (string) and `tools` (array of non-empty strings). No other keys.
 - The name `all` is reserved (built-in profile that re-enables every tool).
+- An optional top-level `"defaultProfile": "<name>"` makes that profile apply automatically at the start of new sessions. It must name a defined profile or `all`. (The alt+t picker's spacebar sets this too.)
 - Note: this edit may require the Execute phase and an autonomy level that permits writes outside the current project root (Attended will ask for confirmation).
 
 5. **Validate before declaring done.** Run:

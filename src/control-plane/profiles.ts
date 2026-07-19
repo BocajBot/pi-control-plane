@@ -19,6 +19,8 @@ export interface ToolProfile {
 export interface ProfilesConfig {
   schemaVersion: typeof PROFILES_SCHEMA_VERSION;
   profiles: Record<string, ToolProfile>;
+  /** Profile applied at the start of fresh sessions; null when unset. */
+  defaultProfile: string | null;
 }
 
 const TOOL_PREFIX = "tool:";
@@ -49,7 +51,15 @@ export function validateProfiles(value: unknown): ProfilesConfig | null {
     }
     profiles[name] = { description: profile.description, tools: [...new Set(profile.tools)] };
   }
-  return { schemaVersion: PROFILES_SCHEMA_VERSION, profiles };
+  let defaultProfile: string | null = null;
+  if (record.defaultProfile !== undefined && record.defaultProfile !== null) {
+    if (typeof record.defaultProfile !== "string") return null;
+    if (record.defaultProfile !== ALL_PROFILE && profiles[record.defaultProfile] === undefined) {
+      return null; // default must reference "all" or a defined profile
+    }
+    defaultProfile = record.defaultProfile;
+  }
+  return { schemaVersion: PROFILES_SCHEMA_VERSION, profiles, defaultProfile };
 }
 
 export interface ApplyProfileResult {
