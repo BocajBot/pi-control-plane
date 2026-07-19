@@ -53,7 +53,7 @@ sent 4.2k · received 30 · cache 4.2k reused (99.2% hits) · context 8.6% of 49
 
 Pi's "(auto)" auto-compact indicator is not shown: extensions cannot observe that setting, and the control plane never guesses values it cannot verify.
 
-A live `Token Counter: ~N` sits at the bottom right of the input box, estimating the token cost of what you are typing. It is an estimate (~4 characters per token — no tokenizer runs in-process), hence the `~`. Below it, `Added Context: N` shows the tokens that accompany your draft when it is sent — system prompt, conversation history, and tool definitions. It is exact (no `~`) when the model's tokenizer counted the last request, `~N` when only pi's estimate exists, and `?` before anything has been measured.
+A live `Token Counter: ~N` sits at the bottom right of the input box, estimating the token cost of what you are typing. It is an estimate (~4 characters per token — no tokenizer runs in-process), hence the `~`. Below it, `Added Context: ~N` shows the tokens that will accompany your draft when it is sent — system prompt, conversation history, and tool definitions — counted **before sending** by the model's own tokenizer while the agent is idle (refreshed after every turn, profile change, and at session start; never per keystroke). After the first request the count is built from the real last request plus what arrived since, and lands within a couple of tokens of the actual next request. Before the first request it is reconstructed from scratch and can undercount somewhat (pi adds serialization the extension cannot see); hence the `~`. `?` appears only when nothing could be counted at all.
 
 ## Commands
 

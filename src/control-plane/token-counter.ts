@@ -45,6 +45,32 @@ export function providerOrigin(baseUrl: string): string | null {
   }
 }
 
+/**
+ * Serialize one agent message for prospective counting: text blocks verbatim,
+ * non-text blocks (tool calls, tool results, images) as their JSON — an
+ * approximation of the provider wire format, close enough that the model's
+ * tokenizer count lands within a few tokens of the real request.
+ */
+export function serializeForCounting(message: { role?: string; content?: unknown }): {
+  role: string;
+  content: string;
+} {
+  const role = message.role === "toolResult" ? "user" : (message.role ?? "user");
+  let content: string;
+  if (typeof message.content === "string") {
+    content = message.content;
+  } else if (Array.isArray(message.content)) {
+    content = (message.content as Array<{ type?: string; text?: string }>)
+      .map((block) =>
+        block?.type === "text" && typeof block.text === "string" ? block.text : JSON.stringify(block),
+      )
+      .join("\n");
+  } else {
+    content = "";
+  }
+  return { role, content };
+}
+
 export async function countPayloadTokens(
   baseUrl: string,
   model: string,
@@ -65,10 +91,15 @@ export async function countPayloadTokens(
       return { tokens: data.input_tokens, model, source: "llama-swap-count-tokens", exact: true, countedAt };
     }
     if (format === "openai") {
-      const { messages } = payload as { messages: unknown[] };
-      const templated = await fetchJson(`${origin}/upstream/${encodeURIComponent(model)}/apply-template`, {
-        messages,
-      });
+      const { messages, tools } = payload as { messages: unknown[]; tools?: unknown };
+      const templateBody: Record<string, unknown> = { messages };
+      // llama.cpp renders tool definitions into the chat template, so passing
+      // them through makes the count include their real token cost.
+      if (Array.isArray(tools)) templateBody.tools = tools;
+      const templated = await fetchJson(
+        `${origin}/upstream/${encodeURIComponent(model)}/apply-template`,
+        templateBody,
+      );
       if (!templated.ok) return null;
       const { prompt } = (await templated.json()) as { prompt?: unknown };
       if (typeof prompt !== "string") return null;

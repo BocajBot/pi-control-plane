@@ -66,6 +66,7 @@ import {
 import {
   countPayloadTokens,
   type JsonFetch,
+  serializeForCounting,
   type TokenCountResult,
 } from "../src/control-plane/token-counter.ts";
 import { evaluateToolCall, validatePolicy, type PathOps } from "../src/control-plane/tool-policy.ts";
@@ -215,6 +216,74 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       formatContextWarning(level, lastTokenCount.tokens, window),
       level === "urgent" ? "error" : "warning",
     );
+  };
+
+  // Forward-looking count: what the NEXT request will carry (system prompt +
+  // injection block + full history + active tool definitions), counted by the
+  // model's tokenizer while the agent is idle. The serialization approximates
+  // the provider wire format, so the value is shown with "~".
+  let prospectiveCount: { tokens: number; countedAt: string } | null = null;
+  let prospectiveInFlight = false;
+  /** Messages produced since the last provider request (assistant replies),
+   * appended to the real last payload for the forward-looking count. */
+  let messagesSinceLastRequest: Array<{ role: string; content: string }> = [];
+
+  const refreshProspectiveCount = async (
+    ctx: ExtensionContext | ExtensionCommandContext,
+  ): Promise<void> => {
+    if (prospectiveInFlight) return;
+    const model = ctx.model as { id?: string; baseUrl?: string } | undefined;
+    if (typeof model?.id !== "string" || typeof model.baseUrl !== "string") return;
+    let payload: unknown;
+    // Preferred: the REAL last request payload (pi's exact wire format) plus
+    // whatever arrived since — no reconstruction error. Falls back to
+    // rebuilding from scratch before the first request of a session.
+    if (lastProviderRequest !== null && lastProviderRequest.model === model.id) {
+      const base = lastProviderRequest.payload as { messages?: unknown[] };
+      if (Array.isArray(base.messages)) {
+        payload = {
+          ...(lastProviderRequest.payload as Record<string, unknown>),
+          messages: [...base.messages, ...messagesSinceLastRequest],
+        };
+      }
+    }
+    if (payload === undefined) {
+      try {
+        const system =
+          ctx.getSystemPrompt() + "\n\n" + buildInjectionBlock(state, policy !== null);
+        const messages: Array<{ role: string; content: string }> = [
+          { role: "system", content: system },
+        ];
+        for (const entry of ctx.sessionManager.getBranch() as unknown as Array<{
+          type: string;
+          message?: { role?: string; content?: unknown };
+        }>) {
+          if (entry.type === "message" && entry.message !== undefined) {
+            messages.push(serializeForCounting(entry.message));
+          }
+        }
+        const active = new Set(pi.getActiveTools());
+        const tools = pi
+          .getAllTools()
+          .filter((t) => active.has(t.name))
+          .map((t) => ({
+            type: "function",
+            function: { name: t.name, description: t.description, parameters: t.parameters },
+          }));
+        payload = { messages, tools };
+      } catch {
+        return;
+      }
+    }
+    prospectiveInFlight = true;
+    try {
+      const result = await countPayloadTokens(model.baseUrl, model.id, payload, jsonFetch);
+      if (result !== null) {
+        prospectiveCount = { tokens: result.tokens, countedAt: result.countedAt };
+      }
+    } finally {
+      prospectiveInFlight = false;
+    }
   };
 
   const refreshTokenCount = async (
@@ -467,11 +536,16 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           } catch {
             draft = "";
           }
-          // What accompanies the draft when it is sent: exact when the model's
-          // tokenizer counted the last request, otherwise pi's estimate.
+          // What accompanies the draft when it is sent. Preferred source: the
+          // forward-looking pre-send count (model tokenizer over the NEXT
+          // request's content, "~" because the serialization approximates the
+          // wire format). Fallbacks: exact count of the last request, then
+          // pi's estimate.
           let added: number | null = null;
           let exact = false;
-          if (lastTokenCount !== null) {
+          if (prospectiveCount !== null) {
+            added = prospectiveCount.tokens;
+          } else if (lastTokenCount !== null) {
             added = lastTokenCount.tokens;
             exact = true;
           } else {
@@ -673,6 +747,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       persist();
       updateStatus(ctx);
       ctx.ui.notify(`Profile "all": every tool enabled (${allTools.length}).`, "info");
+      void refreshProspectiveCount(ctx);
       return true;
     }
     const profile = profilesConfig?.profiles[name];
@@ -694,6 +769,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       `Profile "${name}": ${result.enabled.length} tool(s) enabled, ${result.disabled.length} disabled.${missingNote}`,
       "info",
     );
+    void refreshProspectiveCount(ctx);
     return true;
   };
 
@@ -790,11 +866,17 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     lastBaseSystemPrompt = null;
     lastProviderRequest = null;
     lastTokenCount = null;
+    prospectiveCount = null;
+    messagesSinceLastRequest = [];
     contextWarnedLevel = null;
+    void refreshProspectiveCount(ctx);
     updateStatus(ctx);
   });
 
-  pi.on("agent_settled", (_event, ctx) => updateStatus(ctx));
+  pi.on("agent_settled", (_event, ctx) => {
+    updateStatus(ctx);
+    void refreshProspectiveCount(ctx);
+  });
   pi.on("model_select", (_event, ctx) => updateStatus(ctx));
 
   // ---- context capture ----
@@ -831,6 +913,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     const model = ctx.model as { id?: string; baseUrl?: string } | undefined;
     if (typeof model?.id === "string" && typeof model.baseUrl === "string") {
       lastProviderRequest = { payload: event.payload, model: model.id, baseUrl: model.baseUrl };
+      messagesSinceLastRequest = [];
       void refreshTokenCount(ctx);
     }
   });
@@ -897,6 +980,12 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // ---- interpretation completion ----
 
   pi.on("agent_end", (event, ctx) => {
+    // For the forward-looking count: the turn's final assistant reply is the
+    // one message the last provider request has not seen yet.
+    const tail = event.messages.at(-1) as { role?: string; content?: unknown } | undefined;
+    if (tail?.role === "assistant") {
+      messagesSinceLastRequest.push(serializeForCounting(tail));
+    }
     const guard = state.interpretGuard;
     if (!guard?.active) return;
     if (!interpretTurnStarted) return; // stale agent_end from an earlier turn

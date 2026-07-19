@@ -5,7 +5,24 @@ import {
   detectPayloadFormat,
   type JsonFetch,
   providerOrigin,
+  serializeForCounting,
 } from "../src/control-plane/token-counter.ts";
+
+test("serializeForCounting: text verbatim, non-text as JSON, toolResult as user", () => {
+  assert.deepEqual(serializeForCounting({ role: "user", content: "hi" }), { role: "user", content: "hi" });
+  const assistant = serializeForCounting({
+    role: "assistant",
+    content: [
+      { type: "text", text: "doing it" },
+      { type: "toolCall", name: "write", arguments: { path: "f.txt" } },
+    ],
+  });
+  assert.equal(assistant.role, "assistant");
+  assert.ok(assistant.content.includes("doing it"));
+  assert.ok(assistant.content.includes('"f.txt"'), "tool-call payload included in the count");
+  assert.equal(serializeForCounting({ role: "toolResult", content: "output" }).role, "user");
+  assert.deepEqual(serializeForCounting({}), { role: "user", content: "" });
+});
 
 test("detectPayloadFormat", () => {
   assert.equal(
@@ -69,6 +86,25 @@ test("openai payloads go through apply-template then tokenize", async () => {
   assert.equal(result?.tokens, 5);
   assert.equal(result?.source, "llama-server-tokenize");
   assert.equal(calls.length, 2);
+});
+
+test("openai payloads pass tool definitions into apply-template", async () => {
+  const bodies: Record<string, unknown> = {};
+  const fetch: JsonFetch = async (url, body) => {
+    const path = new URL(url).pathname;
+    bodies[path] = body;
+    if (path.endsWith("apply-template")) return { ok: true, json: async () => ({ prompt: "p" }) };
+    return { ok: true, json: async () => ({ tokens: [1, 2] }) };
+  };
+  const tools = [{ type: "function", function: { name: "write", parameters: {} } }];
+  const result = await countPayloadTokens(
+    "http://localhost:9292/v1",
+    "m",
+    { messages: [{ role: "user", content: "hi" }], tools },
+    fetch,
+  );
+  assert.equal(result?.tokens, 2);
+  assert.deepEqual((bodies["/upstream/m/apply-template"] as { tools?: unknown }).tools, tools);
 });
 
 test("failures return null, never throw", async () => {
