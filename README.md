@@ -38,7 +38,7 @@ If anything fails to load or validate (saved state, the Restricted policy), the 
 The footer shows a live status segment:
 
 ```text
-CP: Discuss | Read-only | Task: none | Ctx: 12%
+Phase: Discuss | Mode: Read-only | No task | Context 12% full
 ```
 
 Pi's own footer already shows token throughput and model info; the control plane does not duplicate it.
@@ -100,7 +100,7 @@ Your request text is wrapped in delimiters and treated as data — it cannot mas
 | `alt+a` | Cycle autonomy: Read-only → Attended → Restricted |
 | `alt+h` | Hotkey cheat sheet as a centered modal (any key closes; `/hotkeys` lists everything) |
 
-`alt+s` is `alt+e` plus two things: lines prefixed `#> ` show the control-plane state block exactly as it will be appended to the system prompt (read-only — edits to them are ignored), and a `DRAFT` section holds your unsent message — editing it rewrites the input box on save. Context edits behave identically to `alt+e` (override, `CTX-EDITED`, `/context restore`).
+`alt+s` is `alt+e` plus two things: lines prefixed `#> ` show the control-plane state block exactly as it will be appended to the system prompt (read-only — edits to them are ignored), and a `DRAFT` section holds your unsent message — editing it rewrites the input box on save. Context edits behave identically to `alt+e` (override, `Context edited`, `/context restore`).
 
 ### The context editor (`alt+e`)
 
@@ -108,7 +108,7 @@ Your request text is wrapped in delimiters and treated as data — it cannot mas
 
 - Edits become an **override for future turns in this session**: the model sees your edited history instead of the original. The session file is never rewritten — the chat scrollback still shows what really happened.
 - Tool calls, tool results, thinking, and images appear as `[non-text: …]` placeholders and are preserved exactly; only text is editable. (Deleting one half of a tool call/result pair can make the provider reject the request — if that happens, `alt+e` again or restore.)
-- `/context restore` removes the override. The footer shows `CTX-EDITED` while one is active.
+- `/context restore` removes the override. The footer shows `Context edited` while one is active.
 - The override lives in memory only: it does not survive quitting, `/reload`, or compaction (compaction invalidates it with a notification, since the conversation no longer lines up).
 - Malformed edits (broken markers, missing system-prompt section) are rejected whole — nothing half-applies.
 

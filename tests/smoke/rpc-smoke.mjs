@@ -91,7 +91,7 @@ async function main() {
 
   // Wait for startup (session_start status set).
   await pi.waitFor((m) => m.type === "extension_ui_request" && m.method === "setStatus", 30000, "startup status");
-  pass("startup: control-plane status set", statuses.some((s) => /CP: Discuss \| Read-only \| Task: none/.test(s)), statuses.at(-1));
+  pass("startup: control-plane status set", statuses.some((s) => /Phase: Discuss \| Mode: Read-only \| No task/.test(s)), statuses.at(-1));
 
   // Phase + autonomy commands.
   pi.send({ id: "c1", type: "prompt", message: "/phase execute" });
@@ -99,7 +99,7 @@ async function main() {
   pi.send({ id: "c2", type: "prompt", message: "/autonomy attended" });
   await pi.waitFor((m) => m.type === "response" && m.id === "c2", 20000, "/autonomy response");
   await sleep(300);
-  pass("commands: status shows Execute | Attended", statuses.some((s) => /CP: Execute \| Attended/.test(s)), statuses.at(-1));
+  pass("commands: status shows Execute | Attended", statuses.some((s) => /Phase: Execute \| Mode: Attended/.test(s)), statuses.at(-1));
 
   // Attended write, DENIED.
   confirmAnswer = false;
@@ -180,7 +180,7 @@ async function main() {
   pi2.onEvery((m) => { if (m.type === "extension_ui_request" && m.method === "setStatus") statuses2.push(m.statusText ?? ""); });
   await pi2.waitFor((m) => m.type === "extension_ui_request" && m.method === "setStatus", 30000, "restore status");
   await sleep(500);
-  pass("restore: phase/autonomy/task restored after relaunch", statuses2.some((s) => /CP: Execute \| Read-only \| Task: (set|none)/.test(s)), statuses2.at(-1));
+  pass("restore: phase/autonomy/task restored after relaunch", statuses2.some((s) => /Phase: Execute \| Mode: Read-only \| (Task accepted|No task)/.test(s)), statuses2.at(-1));
   pi2.child.kill();
 
   fs.rmSync(`${REPO}/rpc-smoke-approved.txt`, { force: true });

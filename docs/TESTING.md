@@ -40,10 +40,10 @@ Drives a **real pi session** over RPC mode against the local llama-swap provider
 
 Most items below are covered headlessly by the RPC suite; the TUI-only remainder is dialog/widget rendering (steps 8, `alt+c`) and hotkey delivery.
 
-1. `pi` in any project → footer shows `CP: Discuss | Read-only | Task: none | Ctx: …`.
+1. `pi` in any project → footer shows `Phase: Discuss | Mode: Read-only | No task | Context …% full`.
 2. `/context` → summary renders; values are labeled, unknowns say `Unavailable`.
 3. `/context diff` → first run states no previous snapshot exists and sets the baseline.
-4. `/task set try things` → status shows `Task: set`.
+4. `/task set try things` → status shows `Task accepted`.
 5. `/phase plan`, `/phase execute`, `/phase verify`, `alt+p` → status follows; invalid input (`/phase yolo`) prints usage.
 6. In Discuss, ask the model to write a file → blocked with rule `phase:discuss` and an actionable hint.
 7. `/phase execute` (still Read-only) → same write blocked with rule `autonomy:read-only`.

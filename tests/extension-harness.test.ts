@@ -148,7 +148,7 @@ test("defaults after session_start: Discuss + Read-only shown in status", async 
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /CP: Discuss \| Read-only \| Task: none/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Phase: Discuss \| Mode: Read-only \| No task/);
 });
 
 test("write blocked in Discuss; read allowed", async () => {
@@ -228,7 +228,7 @@ test("/interpret guards the turn: all tools blocked, diagnostic recorded, state 
 
   await pi.commands.get("interpret")!.handler("Refactor the loader and encourage tool use", ctx);
   assert.equal(pi.sentUserMessages.length, 1);
-  assert.match(ctx.statuses["control-plane"] ?? "", /INTERPRET/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Interpreting \(tools disabled\)/);
 
   // Even a read is blocked during interpretation, and a diagnostic is recorded.
   const blocked = (await pi.emit(
@@ -250,11 +250,11 @@ test("/interpret guards the turn: all tools blocked, diagnostic recorded, state 
     },
     ctx,
   );
-  assert.match(ctx.statuses["control-plane"] ?? "", /CP: Execute \| Attended \| Task: pending/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Phase: Execute \| Mode: Attended \| Task pending review/);
 
   // Accept adopts the brief.
   await pi.commands.get("task")!.handler("accept", ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Task: set/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Task accepted/);
   const write = (await pi.emit(
     "tool_call",
     { type: "tool_call", toolCallId: "2", toolName: "read", input: { path: "f.txt" } },
@@ -279,7 +279,7 @@ test("invalid interpretation cannot be accepted", async () => {
     ctx.notifications.some((n) => /invalid/i.test(n.message) && /cannot be accepted/i.test(n.message)),
     "accept must be refused for invalid interpretations",
   );
-  assert.match(ctx.statuses["control-plane"] ?? "", /Task: pending/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Task pending review/);
 });
 
 test("a stale agent_end before the interpretation turn starts does not consume the guard", async () => {
@@ -293,7 +293,7 @@ test("a stale agent_end before the interpretation turn starts does not consume t
     { type: "agent_end", messages: [{ role: "assistant", content: "stale prior-turn response" }] },
     ctx,
   );
-  assert.match(ctx.statuses["control-plane"] ?? "", /INTERPRET/, "guard must survive the stale agent_end");
+  assert.match(ctx.statuses["control-plane"] ?? "", /Interpreting \(tools disabled\)/, "guard must survive the stale agent_end");
   // The real interpretation turn then runs and completes normally.
   await startInterpretTurn(pi, ctx);
   await pi.emit(
@@ -301,8 +301,8 @@ test("a stale agent_end before the interpretation turn starts does not consume t
     { type: "agent_end", messages: [{ role: "assistant", content: validInterpretationResponse() }] },
     ctx,
   );
-  assert.doesNotMatch(ctx.statuses["control-plane"] ?? "", /INTERPRET/);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Task: pending/);
+  assert.doesNotMatch(ctx.statuses["control-plane"] ?? "", /Interpreting \(tools disabled\)/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Task pending review/);
 });
 
 test("state restores across sessions from persisted entries (phase, autonomy, toggles)", async () => {
@@ -320,7 +320,7 @@ test("state restores across sessions from persisted entries (phase, autonomy, to
   await controlPlaneExtension(pi2 as never);
   const ctx2 = makeCtx({ cwd: root, branchEntries: pi.entries.filter((e) => e.customType === STATE_ENTRY_TYPE) });
   await pi2.emit("session_start", { type: "session_start", reason: "resume" }, ctx2);
-  assert.match(ctx2.statuses["control-plane"] ?? "", /CP: Plan \| Attended/);
+  assert.match(ctx2.statuses["control-plane"] ?? "", /Phase: Plan \| Mode: Attended/);
   assert.ok(!pi2.activeTools.includes("bash"), "tool toggle reapplied after restore");
 });
 
@@ -333,7 +333,7 @@ test("malformed persisted state falls back to safe defaults with a warning", asy
     ],
   });
   await pi.emit("session_start", { type: "session_start", reason: "resume" }, ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /CP: Discuss \| Read-only/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Phase: Discuss \| Mode: Read-only/);
   assert.ok(ctx.notifications.some((n) => /malformed/i.test(n.message)));
 });
 
@@ -408,11 +408,11 @@ test("/task clear force clears without UI; /task set stores objective only", asy
   const ctx = makeCtx({ cwd: tmpRoot(), hasUI: false });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
   await pi.commands.get("task")!.handler("set build the thing", ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Task: set/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Task accepted/);
   await pi.commands.get("task")!.handler("clear", ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Task: set/, "clear without force and without UI must not clear");
+  assert.match(ctx.statuses["control-plane"] ?? "", /Task accepted/, "clear without force and without UI must not clear");
   await pi.commands.get("task")!.handler("clear force", ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Task: none/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /No task/);
 });
 
 test("context overlay: /context restore with no override says so; alt+e registered", async () => {
@@ -479,9 +479,9 @@ test("phase and autonomy cycle hotkeys advance in order", async () => {
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
   await pi.shortcuts.get("alt+p")!(ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /CP: Plan/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Phase: Plan/);
   await pi.shortcuts.get("alt+p")!(ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /CP: Execute/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Phase: Execute/);
   await pi.shortcuts.get("alt+a")!(ctx);
   assert.match(ctx.statuses["control-plane"] ?? "", /Attended/);
 });

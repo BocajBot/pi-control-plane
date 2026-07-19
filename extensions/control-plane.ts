@@ -105,6 +105,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let formatSkillsForPrompt: ((skills: { name: string; description: string }[]) => string) | null = null;
   let Box: (new (px?: number, py?: number) => { addChild(c: unknown): void }) | null = null;
   let Text: (new (text: string, px?: number, py?: number) => unknown) | null = null;
+  let matchesKey: ((data: string, keyId: string) => boolean) | null = null;
   try {
     const piPkg = (await import("@earendil-works/pi-coding-agent")) as unknown as {
       formatSkillsForPrompt: typeof formatSkillsForPrompt;
@@ -114,13 +115,33 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     formatSkillsForPrompt = null;
   }
   try {
-    const tui = (await import("@earendil-works/pi-tui")) as unknown as { Box: typeof Box; Text: typeof Text };
+    const tui = (await import("@earendil-works/pi-tui")) as unknown as {
+      Box: typeof Box;
+      Text: typeof Text;
+      matchesKey: (data: string, keyId: string) => boolean;
+    };
     Box = tui.Box;
     Text = tui.Text;
+    matchesKey = tui.matchesKey;
   } catch {
     Box = null;
     Text = null;
+    matchesKey = null;
   }
+
+  /** Key matching that works under both legacy escape codes and the kitty
+   * keyboard protocol (pi enables kitty in supporting terminals, where e.g.
+   * escape arrives as a CSI-u sequence, not a bare \x1b). */
+  const keyIs = (data: string, keyId: string, legacy: string[]): boolean => {
+    if (matchesKey !== null) {
+      try {
+        if (matchesKey(data, keyId)) return true;
+      } catch {
+        // fall through to legacy comparison
+      }
+    }
+    return legacy.includes(data);
+  };
 
   let state: ControlPlaneState = defaultState();
   let policy: RestrictedPolicy | null = null;
@@ -192,7 +213,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   const updateStatus = (ctx: ExtensionContext) => {
     const percent = ctx.getContextUsage()?.percent ?? null;
     const base = formatStatus(state, percent, policy !== null);
-    ctx.ui.setStatus(STATUS_KEY, contextOverlay !== null ? `${base} | CTX-EDITED` : base);
+    ctx.ui.setStatus(STATUS_KEY, contextOverlay !== null ? `${base} | Context edited` : base);
   };
 
   const clearOverlay = (ctx: ExtensionContext, reason: string) => {
@@ -1232,15 +1253,19 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
             return {
               render: (width: number) => renderProfilePicker(items, selectedIndex, Math.min(width, 100)),
               handleInput: (data: string) => {
-                if (data === "\x1b[A" || data === "k") {
+                if (keyIs(data, "up", ["\x1b[A", "k"])) {
                   selectedIndex = (selectedIndex + items.length - 1) % items.length;
                   tui.requestRender();
-                } else if (data === "\x1b[B" || data === "j" || data === "\t") {
+                } else if (keyIs(data, "down", ["\x1b[B", "j", "\t"])) {
                   selectedIndex = (selectedIndex + 1) % items.length;
                   tui.requestRender();
-                } else if (data === "\r" || data === "\n") {
+                } else if (keyIs(data, "enter", ["\r", "\n"])) {
                   done(items[selectedIndex].name);
-                } else if (data === "\x1b" || data === "q" || data === "\x03") {
+                } else if (
+                  keyIs(data, "escape", ["\x1b"]) ||
+                  keyIs(data, "ctrl+c", ["\x03"]) ||
+                  data === "q"
+                ) {
                   done(null);
                 }
               },

@@ -56,10 +56,16 @@ export function formatStatus(
     state.autonomy === "restricted" && !policyValid
       ? "Read-only (policy fallback)"
       : displayAutonomy(state.autonomy);
-  const task = state.acceptedTask !== null ? "set" : state.pendingInterpretation !== null ? "pending" : "none";
-  const ctx = contextPercent !== null ? `${Math.round(contextPercent)}%` : "n/a";
-  const guard = state.interpretGuard?.active ? " | INTERPRET (tools off)" : "";
-  return `CP: ${displayPhase(state.phase)} | ${autonomy} | Task: ${task} | Ctx: ${ctx}${guard}`;
+  const task =
+    state.acceptedTask !== null
+      ? "Task accepted"
+      : state.pendingInterpretation !== null
+        ? "Task pending review"
+        : "No task";
+  const ctx =
+    contextPercent !== null ? `Context ${Math.round(contextPercent)}% full` : "Context unknown";
+  const guard = state.interpretGuard?.active ? " | Interpreting (tools disabled)" : "";
+  return `Phase: ${displayPhase(state.phase)} | Mode: ${autonomy} | ${task} | ${ctx}${guard}`;
 }
 
 function unavailable(value: string | number | null | undefined): string {

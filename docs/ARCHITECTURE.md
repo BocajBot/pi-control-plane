@@ -56,7 +56,7 @@ Three mechanisms, by kind:
 
 `context-editor.ts` (pure) serializes the effective context — system prompt + messages captured from the `context` event — into a marker-delimited document, parses the edited result, and splices text edits back while preserving non-text blocks verbatim. The entry suspends the TUI with the same `tui.stop()` → spawn (stdio inherit) → `tui.start()` pattern Pi's own external-editor support uses, launching nvim (vim fallback) on a mode-0600 temp file that is always unlinked.
 
-An accepted edit becomes an in-memory `Overlay { messages, baseCount, systemPrompt }`. On every `context` event the overlay replaces the first `baseCount` live messages and newer messages are appended unchanged (`mergeOverlay`); if the live conversation shrinks below `baseCount` (compaction, tree navigation) the overlay is invalidated with a notification. The system-prompt override substitutes the base prompt in `before_agent_start` before toggles and the control-plane block apply. `/context restore` clears it; the status segment shows `CTX-EDITED` while active. Nothing about the override is persisted.
+An accepted edit becomes an in-memory `Overlay { messages, baseCount, systemPrompt }`. On every `context` event the overlay replaces the first `baseCount` live messages and newer messages are appended unchanged (`mergeOverlay`); if the live conversation shrinks below `baseCount` (compaction, tree navigation) the overlay is invalidated with a notification. The system-prompt override substitutes the base prompt in `before_agent_start` before toggles and the control-plane block apply. `/context restore` clears it; the status segment shows `Context edited` while active. Nothing about the override is persisted.
 
 ## Command flow
 
