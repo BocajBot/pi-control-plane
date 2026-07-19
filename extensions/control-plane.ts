@@ -66,6 +66,7 @@ import { evaluateToolCall, validatePolicy, type PathOps } from "../src/control-p
 import {
   buildInjectionBlock,
   formatDenial,
+  formatFooterStats,
   formatStatus,
   LIMITS,
   type ProfilePickerItem,
@@ -106,6 +107,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let Box: (new (px?: number, py?: number) => { addChild(c: unknown): void }) | null = null;
   let Text: (new (text: string, px?: number, py?: number) => unknown) | null = null;
   let matchesKey: ((data: string, keyId: string) => boolean) | null = null;
+  let visibleWidth: ((text: string) => number) | null = null;
+  let truncateToWidth: ((text: string, width: number, ellipsis?: string) => string) | null = null;
   try {
     const piPkg = (await import("@earendil-works/pi-coding-agent")) as unknown as {
       formatSkillsForPrompt: typeof formatSkillsForPrompt;
@@ -119,14 +122,20 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       Box: typeof Box;
       Text: typeof Text;
       matchesKey: (data: string, keyId: string) => boolean;
+      visibleWidth: (text: string) => number;
+      truncateToWidth: (text: string, width: number, ellipsis?: string) => string;
     };
     Box = tui.Box;
     Text = tui.Text;
     matchesKey = tui.matchesKey;
+    visibleWidth = tui.visibleWidth;
+    truncateToWidth = tui.truncateToWidth;
   } catch {
     Box = null;
     Text = null;
     matchesKey = null;
+    visibleWidth = null;
+    truncateToWidth = null;
   }
 
   /** Key matching that works under both legacy escape codes and the kitty
@@ -214,6 +223,148 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     const percent = ctx.getContextUsage()?.percent ?? null;
     const base = formatStatus(state, percent, policy !== null);
     ctx.ui.setStatus(STATUS_KEY, contextOverlay !== null ? `${base} | Context edited` : base);
+  };
+
+  // ---- readable footer ----
+  // Replaces pi's compact stats line ("↑4.2k ↓30 R4.2k CH99.2% 8.6%/49k")
+  // with plain words. Same data sources as pi's built-in footer; values the
+  // extension cannot observe (e.g. the auto-compact toggle) are omitted, not
+  // guessed.
+  let footerInstalled = false;
+
+  const installFooter = (ctx: ExtensionContext) => {
+    if (footerInstalled) return;
+    const ui = ctx.ui as unknown as {
+      setFooter?: (
+        factory: (
+          tui: unknown,
+          theme: { fg(color: string, text: string): string },
+          footerData: {
+            getGitBranch(): string | null;
+            getExtensionStatuses(): ReadonlyMap<string, string>;
+            getAvailableProviderCount(): number;
+          },
+        ) => { render(width: number): string[] },
+      ) => void;
+    };
+    if (typeof ui.setFooter !== "function") return;
+    const width = (text: string) => (visibleWidth !== null ? visibleWidth(text) : text.length);
+    const clip = (text: string, max: number, ellipsis: string) =>
+      truncateToWidth !== null ? truncateToWidth(text, max, ellipsis) : text.slice(0, max);
+    footerInstalled = true;
+    ui.setFooter((_tui, theme, footerData) => ({
+      render: (cols: number): string[] => {
+        // Cumulative token usage across the whole session, like pi's footer.
+        let input = 0;
+        let output = 0;
+        let cacheRead = 0;
+        let cacheWrite = 0;
+        let cost = 0;
+        let cacheHitPercent: number | null = null;
+        for (const entry of ctx.sessionManager.getEntries() as unknown as Array<{
+          type: string;
+          message?: {
+            role?: string;
+            usage?: {
+              input?: number;
+              output?: number;
+              cacheRead?: number;
+              cacheWrite?: number;
+              cost?: { total?: number };
+            };
+          };
+        }>) {
+          if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+          const u = entry.message.usage;
+          if (u === undefined) continue;
+          input += u.input ?? 0;
+          output += u.output ?? 0;
+          cacheRead += u.cacheRead ?? 0;
+          cacheWrite += u.cacheWrite ?? 0;
+          cost += u.cost?.total ?? 0;
+          const prompt = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+          cacheHitPercent = prompt > 0 ? ((u.cacheRead ?? 0) / prompt) * 100 : null;
+        }
+        const usage = ctx.getContextUsage();
+        const model = ctx.model as
+          | { id?: string; provider?: string; reasoning?: boolean; contextWindow?: number }
+          | undefined;
+        const contextWindow = usage?.contextWindow ?? model?.contextWindow ?? 0;
+        const contextPercent = usage?.percent ?? null;
+        const { stats, context } = formatFooterStats({
+          input,
+          output,
+          cacheRead,
+          cacheWrite,
+          cost,
+          cacheHitPercent,
+          contextPercent,
+          contextWindow,
+        });
+
+        // Line 1: cwd (+ git branch), like pi's footer.
+        const home = process.env.HOME ?? "";
+        let cwd = ctx.sessionManager.getCwd();
+        if (home !== "" && (cwd === home || cwd.startsWith(`${home}/`))) {
+          cwd = cwd === home ? "~" : `~${cwd.slice(home.length)}`;
+        }
+        const branch = footerData.getGitBranch();
+        if (branch !== null) cwd = `${cwd} (${branch})`;
+        const sessionName = ctx.sessionManager.getSessionName();
+        if (sessionName !== undefined && sessionName !== "") cwd = `${cwd} • ${sessionName}`;
+        const pwdLine = clip(
+          theme.fg("dim", cwd),
+          cols,
+          theme.fg("dim", "..."),
+        );
+
+        // Line 2: stats left, model right.
+        const leftPlain = stats.length > 0 ? `${stats} · ${context}` : context;
+        const pct = contextPercent ?? 0;
+        const contextColored =
+          pct > 90 ? theme.fg("error", context) : pct > 70 ? theme.fg("warning", context) : null;
+        let left =
+          contextColored !== null
+            ? (stats.length > 0 ? theme.fg("dim", `${stats} · `) : "") + contextColored
+            : theme.fg("dim", leftPlain);
+        let leftWidth = width(leftPlain);
+        if (leftWidth > cols) {
+          left = clip(theme.fg("dim", leftPlain), cols, theme.fg("dim", "..."));
+          leftWidth = cols;
+        }
+        let right = model?.id ?? "no-model";
+        if (model?.reasoning === true) {
+          let level = "off";
+          try {
+            level = pi.getThinkingLevel();
+          } catch {
+            level = "off";
+          }
+          right = `${right} · thinking ${level}`;
+        }
+        if (footerData.getAvailableProviderCount() > 1 && model?.provider !== undefined) {
+          const withProvider = `(${model.provider}) ${right}`;
+          if (leftWidth + 2 + width(withProvider) <= cols) right = withProvider;
+        }
+        let statsLine: string;
+        if (leftWidth + 2 + width(right) <= cols) {
+          const padding = " ".repeat(cols - leftWidth - width(right));
+          statsLine = left + theme.fg("dim", padding + right);
+        } else {
+          statsLine = left;
+        }
+
+        // Line 3: extension statuses (includes our own status segment).
+        const lines = [pwdLine, statsLine];
+        const statuses = Array.from(footerData.getExtensionStatuses().entries())
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([, text]) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim());
+        if (statuses.length > 0) {
+          lines.push(clip(statuses.join(" "), cols, theme.fg("dim", "...")));
+        }
+        return lines;
+      },
+    }));
   };
 
   const clearOverlay = (ctx: ExtensionContext, reason: string) => {
@@ -474,6 +625,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       ctx.ui.notify(`Control plane: ${policyLoadError}`, "warning");
     }
     reapplyToolToggles();
+    installFooter(ctx);
     // Editor state is process/session scoped; a new or resumed session starts clean.
     contextOverlay = null;
     lastContextMessages = null;

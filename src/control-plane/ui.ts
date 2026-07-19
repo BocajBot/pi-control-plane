@@ -47,6 +47,49 @@ function displayAutonomy(autonomy: Autonomy): string {
   }
 }
 
+/** Token counts formatted the way pi's built-in footer formats them. */
+export function formatTokenCount(count: number): string {
+  if (count < 1000) return count.toString();
+  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+  if (count < 1000000) return `${Math.round(count / 1000)}k`;
+  if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+  return `${Math.round(count / 1000000)}M`;
+}
+
+export interface FooterStats {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+  /** Cache hit rate of the latest turn, or null when unknown. */
+  cacheHitPercent: number | null;
+  contextPercent: number | null;
+  contextWindow: number;
+}
+
+/**
+ * Plain-words replacement for pi's compact footer stats line
+ * ("↑4.2k ↓30 R4.2k CH99.2% 8.6%/49k"). The context segment is returned
+ * separately so the caller can colorize it by usage level.
+ */
+export function formatFooterStats(s: FooterStats): { stats: string; context: string } {
+  const parts: string[] = [];
+  if (s.input > 0) parts.push(`sent ${formatTokenCount(s.input)}`);
+  if (s.output > 0) parts.push(`received ${formatTokenCount(s.output)}`);
+  if (s.cacheRead > 0 || s.cacheWrite > 0) {
+    const cache: string[] = [];
+    if (s.cacheRead > 0) cache.push(`${formatTokenCount(s.cacheRead)} reused`);
+    if (s.cacheWrite > 0) cache.push(`${formatTokenCount(s.cacheWrite)} stored`);
+    const hits = s.cacheHitPercent !== null ? ` (${s.cacheHitPercent.toFixed(1)}% hits)` : "";
+    parts.push(`cache ${cache.join(", ")}${hits}`);
+  }
+  if (s.cost > 0) parts.push(`cost $${s.cost.toFixed(3)}`);
+  const pct = s.contextPercent !== null ? `${s.contextPercent.toFixed(1)}%` : "?";
+  const context = `context ${pct} of ${formatTokenCount(s.contextWindow)}`;
+  return { stats: parts.join(" · "), context };
+}
+
 export function formatStatus(
   state: ControlPlaneState,
   contextPercent: number | null,

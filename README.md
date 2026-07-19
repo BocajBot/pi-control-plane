@@ -41,7 +41,18 @@ The footer shows a live status segment:
 Phase: Discuss | Mode: Read-only | No task | Context 12% full
 ```
 
-Pi's own footer already shows token throughput and model info; the control plane does not duplicate it.
+The extension also replaces pi's cryptic stats line (`↑4.2k ↓30 R4.2k CH99.2% 8.6%/49k`) with plain words:
+
+```text
+sent 4.2k · received 30 · cache 4.2k reused (99.2% hits) · context 8.6% of 49k
+```
+
+- **sent / received** — cumulative tokens sent to and received from the model this session.
+- **cache … reused / stored (…% hits)** — prompt-cache tokens read/written, and the latest turn's cache hit rate.
+- **cost $…** — cumulative API cost (shown only when nonzero).
+- **context …% of …** — how full the model's context window is (yellow above 70%, red above 90%).
+
+Pi's "(auto)" auto-compact indicator is not shown: extensions cannot observe that setting, and the control plane never guesses values it cannot verify.
 
 ## Commands
 
