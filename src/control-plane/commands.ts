@@ -14,6 +14,7 @@ export type ContextCommand =
   | { kind: "toggle"; name: string }
   | { kind: "restore" }
   | { kind: "profile"; name: string | null }
+  | { kind: "recount" }
   | { kind: "usage" };
 
 export function parseContextArgs(args: string): ContextCommand {
@@ -34,6 +35,8 @@ export function parseContextArgs(args: string): ContextCommand {
     case "profile":
       if (rest.length === 0) return { kind: "profile", name: null };
       return rest.length === 1 ? { kind: "profile", name: rest[0] } : { kind: "usage" };
+    case "recount":
+      return rest.length === 0 ? { kind: "recount" } : { kind: "usage" };
     default:
       return { kind: "usage" };
   }

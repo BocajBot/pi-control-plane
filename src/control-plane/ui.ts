@@ -66,6 +66,9 @@ export interface FooterStats {
   cacheHitPercent: number | null;
   contextPercent: number | null;
   contextWindow: number;
+  /** Exact token count of the last provider request from the model's own
+   * tokenizer (via llama-swap), or null when unavailable. */
+  exactTokens?: number | null;
 }
 
 /**
@@ -85,8 +88,15 @@ export function formatFooterStats(s: FooterStats): { stats: string; context: str
     parts.push(`cache ${cache.join(", ")}${hits}`);
   }
   if (s.cost > 0) parts.push(`cost $${s.cost.toFixed(3)}`);
-  const pct = s.contextPercent !== null ? `${s.contextPercent.toFixed(1)}%` : "?";
-  const context = `context ${pct} of ${formatTokenCount(s.contextWindow)}`;
+  let context: string;
+  if (s.exactTokens !== undefined && s.exactTokens !== null) {
+    const tokens = s.exactTokens.toLocaleString("en-US");
+    const window = s.contextWindow > 0 ? s.contextWindow.toLocaleString("en-US") : "?";
+    context = `context ${tokens} of ${window} tokens at last request (model tokenizer)`;
+  } else {
+    const pct = s.contextPercent !== null ? `~${s.contextPercent.toFixed(1)}%` : "?";
+    context = `context ${pct} of ${formatTokenCount(s.contextWindow)} (estimated)`;
+  }
   return { stats: parts.join(" · "), context };
 }
 
@@ -461,7 +471,7 @@ export function renderHotkeyCheatsheet(): string[] {
 
 export const USAGE = {
   context: [
-    "Usage: /context [diff|full|sources|toggle <name>|restore]",
+    "Usage: /context [diff|full|sources|toggle <name>|restore|profile [name]|recount]",
     "  /context          — redacted summary of the effective context",
     "  /context diff     — changes since the last /context or /context full",
     "  /context full     — detailed redacted view (size-limited)",
@@ -470,6 +480,7 @@ export const USAGE = {
     "  /context restore  — remove the alt+e context override (undo edits)",
     "  /context profile  — list tool profiles; /context profile <name> applies one",
     "                      (\"all\" re-enables every tool; edit policy/profiles.json to define profiles)",
+    "  /context recount  — re-count the last provider request with the model's own tokenizer",
   ],
   task: [
     "Usage: /task [set <text>|clear|accept|reject]",

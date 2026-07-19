@@ -62,6 +62,11 @@ import {
   type ProfilesConfig,
   validateProfiles,
 } from "../src/control-plane/profiles.ts";
+import {
+  countPayloadTokens,
+  type JsonFetch,
+  type TokenCountResult,
+} from "../src/control-plane/token-counter.ts";
 import { evaluateToolCall, validatePolicy, type PathOps } from "../src/control-plane/tool-policy.ts";
 import {
   buildInjectionBlock,
@@ -170,6 +175,32 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let lastIncomingCount = 0;
   let lastBaseSystemPrompt: string | null = null;
   let contextOverlay: Overlay | null = null;
+  // Exact token counting (memory only; raw payloads are never persisted).
+  let lastProviderRequest: { payload: unknown; model: string; baseUrl: string } | null = null;
+  let lastTokenCount: TokenCountResult | null = null;
+  let tokenCountInFlight = false;
+
+  const jsonFetch: JsonFetch = async (url, body) => {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60000),
+    });
+    return { ok: res.ok, json: () => res.json() as Promise<unknown> };
+  };
+
+  const refreshTokenCount = async (): Promise<void> => {
+    if (tokenCountInFlight || lastProviderRequest === null) return;
+    tokenCountInFlight = true;
+    try {
+      const req = lastProviderRequest;
+      const result = await countPayloadTokens(req.baseUrl, req.model, req.payload, jsonFetch);
+      if (result !== null) lastTokenCount = result;
+    } finally {
+      tokenCountInFlight = false;
+    }
+  };
 
   const pathOps: PathOps = {
     realpath: (p) => fs.realpathSync(p),
@@ -292,6 +323,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           | undefined;
         const contextWindow = usage?.contextWindow ?? model?.contextWindow ?? 0;
         const contextPercent = usage?.percent ?? null;
+        const exactTokens =
+          lastTokenCount !== null && lastTokenCount.model === model?.id ? lastTokenCount.tokens : null;
         const { stats, context } = formatFooterStats({
           input,
           output,
@@ -301,6 +334,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           cacheHitPercent,
           contextPercent,
           contextWindow,
+          exactTokens,
         });
 
         // Line 1: cwd (+ git branch), like pi's footer.
@@ -321,7 +355,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
         // Line 2: stats left, model right.
         const leftPlain = stats.length > 0 ? `${stats} · ${context}` : context;
-        const pct = contextPercent ?? 0;
+        const pct =
+          exactTokens !== null && contextWindow > 0
+            ? (exactTokens / contextWindow) * 100
+            : (contextPercent ?? 0);
         const contextColored =
           pct > 90 ? theme.fg("error", context) : pct > 70 ? theme.fg("warning", context) : null;
         let left =
@@ -709,6 +746,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     contextOverlay = null;
     lastContextMessages = null;
     lastBaseSystemPrompt = null;
+    lastProviderRequest = null;
+    lastTokenCount = null;
     updateStatus(ctx);
   });
 
@@ -735,7 +774,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     lastContextMessages = [...incoming];
   });
 
-  pi.on("before_provider_request", (event) => {
+  pi.on("before_provider_request", (event, ctx) => {
     try {
       const json = JSON.stringify(event.payload);
       const redacted = redactSecrets(json).text;
@@ -743,7 +782,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     } catch {
       lastPayloadMeta = null;
     }
-    // Never persist or return the payload; metadata only.
+    // Exact token counting: keep the payload in memory only (never persisted,
+    // never returned) and count it asynchronously against the provider's own
+    // llama-swap endpoints so the request itself is not delayed.
+    const model = ctx.model as { id?: string; baseUrl?: string } | undefined;
+    if (typeof model?.id === "string" && typeof model.baseUrl === "string") {
+      lastProviderRequest = { payload: event.payload, model: model.id, baseUrl: model.baseUrl };
+      void refreshTokenCount();
+    }
   });
 
   // ---- per-turn injection + source toggles ----
@@ -914,7 +960,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   pi.registerCommand("context", {
     description: "Inspect the effective context (summary, diff, full, sources, toggle)",
     getArgumentCompletions: (prefix) => {
-      const subs = ["diff", "full", "sources", "toggle ", "restore", "profile "];
+      const subs = ["diff", "full", "sources", "toggle ", "restore", "profile ", "recount"];
       const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
       return matches.length > 0 ? matches.map((s) => ({ value: s, label: s.trim() })) : null;
     },
@@ -990,6 +1036,44 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
             return;
           }
           clearOverlay(ctx, "restored by /context restore");
+          return;
+        }
+        case "recount": {
+          if (lastProviderRequest === null) {
+            ctx.ui.notify(
+              "No provider request observed yet this session — send a message first, then /context recount.",
+              "info",
+            );
+            return;
+          }
+          await refreshTokenCount();
+          if (lastTokenCount === null) {
+            emit("token recount", [
+              "Exact count unavailable: the provider did not answer the token-counting",
+              "endpoints (llama-swap /v1/messages/count_tokens or /upstream tokenize).",
+              "The footer keeps showing pi's estimate, labeled as such.",
+            ]);
+            return;
+          }
+          const usage = ctx.getContextUsage();
+          const window = usage?.contextWindow ?? 0;
+          const lines = [
+            `Exact tokens (last provider request): ${lastTokenCount.tokens.toLocaleString("en-US")}`,
+            `Counted by:  ${lastTokenCount.source} (model's own tokenizer)`,
+            `Model:       ${lastTokenCount.model}`,
+            `Counted at:  ${lastTokenCount.countedAt}`,
+            window > 0
+              ? `Of window:   ${((lastTokenCount.tokens / window) * 100).toFixed(1)}% of ${window.toLocaleString("en-US")}`
+              : "Of window:   Unavailable",
+            usage?.tokens !== undefined && usage?.tokens !== null
+              ? `Pi estimate: ${Number(usage.tokens).toLocaleString("en-US")} (for comparison)`
+              : "Pi estimate: Unavailable",
+            "",
+            "Note: this counts what was actually sent on the LAST request; messages",
+            "added since then are not included until the next request.",
+          ];
+          emit("token recount", lines);
+          updateStatus(ctx);
           return;
         }
         case "profile": {

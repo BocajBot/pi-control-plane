@@ -46,7 +46,19 @@ test("formatFooterStats spells out every segment in plain words", () => {
     stats,
     "sent 4.2k · received 30 · cache 4.2k reused, 1.0k stored (99.2% hits) · cost $0.123",
   );
-  assert.equal(context, "context 8.6% of 49k");
+  assert.equal(context, "context ~8.6% of 49k (estimated)");
+  const exact = formatFooterStats({
+    input: 4200,
+    output: 30,
+    cacheRead: 0,
+    cacheWrite: 0,
+    cost: 0,
+    cacheHitPercent: null,
+    contextPercent: 8.6,
+    contextWindow: 49152,
+    exactTokens: 17243,
+  });
+  assert.equal(exact.context, "context 17,243 of 49,152 tokens at last request (model tokenizer)");
 });
 
 test("formatFooterStats omits zero segments and unknown values", () => {
@@ -61,7 +73,7 @@ test("formatFooterStats omits zero segments and unknown values", () => {
     contextWindow: 49000,
   });
   assert.equal(empty.stats, "");
-  assert.equal(empty.context, "context ? of 49k");
+  assert.equal(empty.context, "context ? of 49k (estimated)");
 
   const noHit = formatFooterStats({
     input: 100,
@@ -74,5 +86,5 @@ test("formatFooterStats omits zero segments and unknown values", () => {
     contextWindow: 49000,
   });
   assert.equal(noHit.stats, "sent 100 · cache 500 reused");
-  assert.equal(noHit.context, "context 12.0% of 49k");
+  assert.equal(noHit.context, "context ~12.0% of 49k (estimated)");
 });

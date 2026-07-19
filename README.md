@@ -50,7 +50,8 @@ sent 4.2k · received 30 · cache 4.2k reused (99.2% hits) · context 8.6% of 49
 - **sent / received** — cumulative tokens sent to and received from the model this session.
 - **cache … reused / stored (…% hits)** — prompt-cache tokens read/written, and the latest turn's cache hit rate.
 - **cost $…** — cumulative API cost (shown only when nonzero).
-- **context …% of …** — how full the model's context window is (yellow above 70%, red above 90%).
+- **context … of … tokens at last request (model tokenizer)** — the exact size of the last provider request, counted by the model's own tokenizer through llama-swap (`/v1/messages/count_tokens` for Anthropic-shaped payloads, `/upstream/<model>/apply-template` + `/tokenize` for OpenAI-shaped ones). Yellow above 70%, red above 90% of the window.
+- **context ~…% of … (estimated)** — fallback when no exact count is available yet (before the first request, or when the provider does not answer the counting endpoints): pi's internal estimate, labeled as such.
 
 Pi's "(auto)" auto-compact indicator is not shown: extensions cannot observe that setting, and the control plane never guesses values it cannot verify.
 
@@ -65,6 +66,7 @@ A live `Token Counter: ~N` sits at the bottom right of the input box, estimating
 - `/context full` — detailed view including the redacted system prompt (size-limited, truncation marked). Prints a warning first: redaction is pattern-based and cannot guarantee every secret is caught.
 - `/context sources` — every prompt source with its toggle status: `enabled`, `disabled`, or `not toggleable`.
 - `/context restore` — remove the `alt+e` context override (see the context editor section below).
+- `/context recount` — re-count the last provider request with the model's own tokenizer (via llama-swap) and compare against pi's estimate. The same count feeds the footer's context segment automatically after every request.
 - `/context profile [name]` — tool profiles: named loadouts that enable exactly the listed tools and toggle everything else off (big context savings when many extensions are installed — e.g. `minimal` cut 19 of 26 tools in testing). No argument lists profiles and marks the active one; `all` re-enables everything. Ships with `minimal` (core coding tools) and `reading` (read-only tools). Define your own in `policy/profiles.json` — or just ask pi to "create a context profile for X": the bundled `create-context-profile` skill walks it through the schema, validation, and `/reload`. Applied profiles persist with the session like any toggle.
 - `/context toggle <name>` — turn a source on or off for subsequent turns:
   - `tool:<name>` — genuinely removed from the model's tool list.
