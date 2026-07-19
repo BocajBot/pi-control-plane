@@ -70,6 +70,8 @@ import {
 import { evaluateToolCall, validatePolicy, type PathOps } from "../src/control-plane/tool-policy.ts";
 import {
   buildInjectionBlock,
+  contextWarningLevel,
+  formatContextWarning,
   formatDenial,
   formatDraftCounter,
   formatFooterStats,
@@ -190,13 +192,40 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     return { ok: res.ok, json: () => res.json() as Promise<unknown> };
   };
 
-  const refreshTokenCount = async (): Promise<void> => {
+  // Highest warning level already notified; re-warned only after usage drops
+  // back below the warn threshold (e.g. after /compact) or on session start.
+  let contextWarnedLevel: "urgent" | "warn" | null = null;
+
+  const checkContextThreshold = (ctx: ExtensionContext | ExtensionCommandContext): void => {
+    if (lastTokenCount === null) return;
+    const window = ctx.getContextUsage()?.contextWindow ?? 0;
+    if (window <= 0) return;
+    const level = contextWarningLevel((lastTokenCount.tokens / window) * 100);
+    if (level === null) {
+      contextWarnedLevel = null;
+      return;
+    }
+    const rank = { warn: 1, urgent: 2 };
+    if (contextWarnedLevel !== null && rank[contextWarnedLevel] >= rank[level]) return;
+    contextWarnedLevel = level;
+    ctx.ui.notify(
+      formatContextWarning(level, lastTokenCount.tokens, window),
+      level === "urgent" ? "error" : "warning",
+    );
+  };
+
+  const refreshTokenCount = async (
+    ctx: ExtensionContext | ExtensionCommandContext | null = null,
+  ): Promise<void> => {
     if (tokenCountInFlight || lastProviderRequest === null) return;
     tokenCountInFlight = true;
     try {
       const req = lastProviderRequest;
       const result = await countPayloadTokens(req.baseUrl, req.model, req.payload, jsonFetch);
-      if (result !== null) lastTokenCount = result;
+      if (result !== null) {
+        lastTokenCount = result;
+        if (ctx !== null) checkContextThreshold(ctx);
+      }
     } finally {
       tokenCountInFlight = false;
     }
@@ -748,6 +777,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     lastBaseSystemPrompt = null;
     lastProviderRequest = null;
     lastTokenCount = null;
+    contextWarnedLevel = null;
     updateStatus(ctx);
   });
 
@@ -788,7 +818,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     const model = ctx.model as { id?: string; baseUrl?: string } | undefined;
     if (typeof model?.id === "string" && typeof model.baseUrl === "string") {
       lastProviderRequest = { payload: event.payload, model: model.id, baseUrl: model.baseUrl };
-      void refreshTokenCount();
+      void refreshTokenCount(ctx);
     }
   });
 
@@ -1046,7 +1076,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
             );
             return;
           }
-          await refreshTokenCount();
+          await refreshTokenCount(ctx);
           if (lastTokenCount === null) {
             emit("token recount", [
               "Exact count unavailable: the provider did not answer the token-counting",

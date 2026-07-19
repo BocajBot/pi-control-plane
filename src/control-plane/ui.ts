@@ -116,6 +116,30 @@ export function formatDraftCounter(text: string, width: number): string {
   return " ".repeat(width - label.length) + label;
 }
 
+/** Context-fullness warning thresholds, applied to the EXACT (model-tokenizer)
+ * count — pi's own auto-compaction watches its internal estimate instead,
+ * which can be off by a large margin (46% observed), so the control plane
+ * warns from the accurate number. */
+export const CONTEXT_WARN_THRESHOLDS = { warn: 75, urgent: 90 };
+
+export function contextWarningLevel(percent: number): "urgent" | "warn" | null {
+  if (percent >= CONTEXT_WARN_THRESHOLDS.urgent) return "urgent";
+  if (percent >= CONTEXT_WARN_THRESHOLDS.warn) return "warn";
+  return null;
+}
+
+export function formatContextWarning(
+  level: "urgent" | "warn",
+  tokens: number,
+  window: number,
+): string {
+  const pct = ((tokens / window) * 100).toFixed(1);
+  const counts = `${tokens.toLocaleString("en-US")} of ${window.toLocaleString("en-US")} tokens`;
+  return level === "urgent"
+    ? `Context ${pct}% full by the model's own tokenizer (${counts}). Pi's auto-compaction watches its own estimate and may not have triggered — run /compact now, or /new for a fresh session.`
+    : `Context ${pct}% full by the model's own tokenizer (${counts}). Consider /compact soon; pi's own meter may show a different number.`;
+}
+
 export function formatStatus(
   state: ControlPlaneState,
   contextPercent: number | null,

@@ -67,6 +67,8 @@ A live `Token Counter: ~N` sits at the bottom right of the input box, estimating
 - `/context sources` — every prompt source with its toggle status: `enabled`, `disabled`, or `not toggleable`.
 - `/context restore` — remove the `alt+e` context override (see the context editor section below).
 - `/context recount` — re-count the last provider request with the model's own tokenizer (via llama-swap) and compare against pi's estimate. The same count feeds the footer's context segment automatically after every request.
+
+The exact count also drives context-fullness warnings: a warning notification at 75% of the window and an error-level one at 90%, each fired once until usage drops back below 75% (e.g. after `/compact`). This matters because pi's built-in auto-compaction watches its own estimate, which can be off by a large margin (46% observed) — the control plane warns from the accurate number so you can `/compact` before the window actually overflows.
 - `/context profile [name]` — tool profiles: named loadouts that enable exactly the listed tools and toggle everything else off (big context savings when many extensions are installed — e.g. `minimal` cut 19 of 26 tools in testing). No argument lists profiles and marks the active one; `all` re-enables everything. Ships with `minimal` (core coding tools) and `reading` (read-only tools). Define your own in `policy/profiles.json` — or just ask pi to "create a context profile for X": the bundled `create-context-profile` skill walks it through the schema, validation, and `/reload`. Applied profiles persist with the session like any toggle.
 - `/context toggle <name>` — turn a source on or off for subsequent turns:
   - `tool:<name>` — genuinely removed from the model's tool list.

@@ -1,11 +1,33 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  contextWarningLevel,
   estimateTokens,
+  formatContextWarning,
   formatDraftCounter,
   formatFooterStats,
   formatTokenCount,
 } from "../src/control-plane/ui.ts";
+
+test("contextWarningLevel thresholds: warn at 75, urgent at 90", () => {
+  assert.equal(contextWarningLevel(74.9), null);
+  assert.equal(contextWarningLevel(75), "warn");
+  assert.equal(contextWarningLevel(89.9), "warn");
+  assert.equal(contextWarningLevel(90), "urgent");
+  assert.equal(contextWarningLevel(120), "urgent");
+});
+
+test("formatContextWarning states source, counts, and next step", () => {
+  const warn = formatContextWarning("warn", 38000, 49152);
+  assert.ok(warn.includes("77.3% full"));
+  assert.ok(warn.includes("model's own tokenizer"));
+  assert.ok(warn.includes("38,000 of 49,152"));
+  assert.ok(warn.includes("/compact"));
+  const urgent = formatContextWarning("urgent", 45000, 49152);
+  assert.ok(urgent.includes("91.6% full"));
+  assert.ok(urgent.includes("auto-compaction watches its own estimate"));
+  assert.ok(urgent.includes("/compact now"));
+});
 
 test("estimateTokens: ~4 chars per token, zero only for empty", () => {
   assert.equal(estimateTokens(""), 0);
