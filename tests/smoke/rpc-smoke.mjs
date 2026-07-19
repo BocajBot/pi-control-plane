@@ -91,15 +91,13 @@ async function main() {
 
   // Wait for startup (session_start status set).
   await pi.waitFor((m) => m.type === "extension_ui_request" && m.method === "setStatus", 30000, "startup status");
-  pass("startup: control-plane status set", statuses.some((s) => /Phase: Discuss \| Mode: Read-only \| No task/.test(s)), statuses.at(-1));
+  pass("startup: control-plane status set", statuses.some((s) => /Mode: Discuss \| No task/.test(s)), statuses.at(-1));
 
-  // Phase + autonomy commands.
-  pi.send({ id: "c1", type: "prompt", message: "/phase execute" });
-  await pi.waitFor((m) => m.type === "response" && m.id === "c1", 20000, "/phase response");
-  pi.send({ id: "c2", type: "prompt", message: "/autonomy attended" });
-  await pi.waitFor((m) => m.type === "response" && m.id === "c2", 20000, "/autonomy response");
+  // Mode command (merged phase+autonomy).
+  pi.send({ id: "c1", type: "prompt", message: "/mode execute" });
+  await pi.waitFor((m) => m.type === "response" && m.id === "c1", 20000, "/mode response");
   await sleep(300);
-  pass("commands: status shows Execute | Attended", statuses.some((s) => /Phase: Execute \| Mode: Attended/.test(s)), statuses.at(-1));
+  pass("commands: status shows Execute (attended)", statuses.some((s) => /Mode: Execute \(attended\)/.test(s)), statuses.at(-1));
 
   // Attended write, DENIED.
   confirmAnswer = false;
@@ -137,23 +135,24 @@ async function main() {
 
   const valid = /Interpretation ready/i.test(interpretNote);
   if (valid) {
-    pi.send({ id: "c6", type: "prompt", message: "/task accept" });
+    pi.send({ id: "c6", type: "prompt", message: "/brief accept" });
     await pi.waitFor((m) => m.type === "response" && m.id === "c6", 20000, "/task accept response");
     await sleep(300);
-    pass("task: accept adopts brief (status Task: set)", statuses.some((s) => /Task: set/.test(s)), statuses.at(-1));
+    pass("task: accept adopts brief (status Task accepted)", statuses.some((s) => /Task accepted/.test(s)), statuses.at(-1));
   } else {
-    pi.send({ id: "c6", type: "prompt", message: "/task accept" });
+    pi.send({ id: "c6", type: "prompt", message: "/brief accept" });
     await pi.waitFor((m) => m.type === "response" && m.id === "c6", 20000, "/task accept response");
+    await sleep(300);
     pass("task: invalid interpretation cannot be accepted", notifications.some((n) => /cannot be accepted/i.test(n)));
   }
 
   // Back to read-only; write must block with NO dialog.
-  pi.send({ id: "c7", type: "prompt", message: "/autonomy read-only" });
-  await pi.waitFor((m) => m.type === "response" && m.id === "c7", 20000, "/autonomy response");
+  pi.send({ id: "c7", type: "prompt", message: "/mode verify" });
+  await pi.waitFor((m) => m.type === "response" && m.id === "c7", 20000, "/mode response");
   const dialogsBeforeRO = confirmSeen;
   pi.send({ id: "p3", type: "prompt", message: "Use the write tool to create ro-blocked.txt containing hi. Report the error if blocked." });
   await idle();
-  pass("read-only in Execute: write blocked without dialog", confirmSeen === dialogsBeforeRO && !fs.existsSync(`${REPO}/ro-blocked.txt`));
+  pass("verify mode: write blocked without dialog", confirmSeen === dialogsBeforeRO && !fs.existsSync(`${REPO}/ro-blocked.txt`));
 
   pi.child.kill();
   await sleep(500);
@@ -168,7 +167,7 @@ async function main() {
   pass("persistence: state entries written", stateEntries.length >= 3, `${stateEntries.length} entries`);
   pass("persistence: /context output entries written", outputEntries.length >= 2, `${outputEntries.length} entries`);
   const last = stateEntries.at(-1)?.data ?? {};
-  pass("persistence: last state phase=execute autonomy=read-only", last.phase === "execute" && last.autonomy === "read-only", `${last.phase}/${last.autonomy}`);
+  pass("persistence: last state phase=verify autonomy=read-only", last.phase === "verify" && last.autonomy === "read-only", `${last.phase}/${last.autonomy}`);
   const ourJson = JSON.stringify(stateEntries) + JSON.stringify(outputEntries);
   pass("persistence: no raw provider payload in control-plane entries", !ourJson.includes('"payload"') && !/BEGIN [A-Z]* ?PRIVATE KEY/.test(ourJson));
   const snap = last.previousContextSnapshot;
@@ -180,7 +179,7 @@ async function main() {
   pi2.onEvery((m) => { if (m.type === "extension_ui_request" && m.method === "setStatus") statuses2.push(m.statusText ?? ""); });
   await pi2.waitFor((m) => m.type === "extension_ui_request" && m.method === "setStatus", 30000, "restore status");
   await sleep(500);
-  pass("restore: phase/autonomy/task restored after relaunch", statuses2.some((s) => /Phase: Execute \| Mode: Read-only \| (Task accepted|No task)/.test(s)), statuses2.at(-1));
+  pass("restore: mode/task restored after relaunch", statuses2.some((s) => /Mode: Verify \| (Task accepted|Task pending review|No task)/.test(s)), statuses2.at(-1));
   pi2.child.kill();
 
   fs.rmSync(`${REPO}/rpc-smoke-approved.txt`, { force: true });

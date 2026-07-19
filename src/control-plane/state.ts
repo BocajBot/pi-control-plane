@@ -71,6 +71,57 @@ export function cycleAutonomy(current: Autonomy): Autonomy {
   return AUTONOMY_LEVELS[(index + 1) % AUTONOMY_LEVELS.length];
 }
 
+/**
+ * The user-facing merged setting. Internally phase and autonomy stay separate
+ * (enforcement precedence is unchanged), but only these five combinations are
+ * reachable: Discuss/Plan/Verify imply read-only, and Execute chooses between
+ * attended and restricted.
+ */
+export const MODES = ["discuss", "plan", "execute", "execute-restricted", "verify"] as const;
+export type Mode = (typeof MODES)[number];
+
+export function stateForMode(mode: Mode): { phase: Phase; autonomy: Autonomy } {
+  switch (mode) {
+    case "discuss":
+      return { phase: "discuss", autonomy: "read-only" };
+    case "plan":
+      return { phase: "plan", autonomy: "read-only" };
+    case "execute":
+      return { phase: "execute", autonomy: "attended" };
+    case "execute-restricted":
+      return { phase: "execute", autonomy: "restricted" };
+    case "verify":
+      return { phase: "verify", autonomy: "read-only" };
+  }
+}
+
+/** The mode a phase/autonomy pair corresponds to, or null for legacy combos. */
+export function modeOf(phase: Phase, autonomy: Autonomy): Mode | null {
+  if (phase === "execute") {
+    if (autonomy === "attended") return "execute";
+    if (autonomy === "restricted") return "execute-restricted";
+    return null;
+  }
+  return autonomy === "read-only" ? (phase as Mode) : null;
+}
+
+/**
+ * Coerce a legacy phase/autonomy combo (from a session saved before phase and
+ * autonomy were merged) to the nearest mode WITHOUT escalating permissions:
+ * non-execute phases drop elevated autonomy to read-only; execute+read-only
+ * (which allowed nothing mutating anyway) becomes discuss.
+ */
+export function coerceToMode(phase: Phase, autonomy: Autonomy): Mode {
+  const mode = modeOf(phase, autonomy);
+  if (mode !== null) return mode;
+  return phase === "execute" ? "discuss" : (phase as Mode);
+}
+
+export function cycleMode(current: Mode): Mode {
+  const index = MODES.indexOf(current);
+  return MODES[(index + 1) % MODES.length];
+}
+
 function isString(value: unknown): value is string {
   return typeof value === "string";
 }
@@ -232,7 +283,9 @@ export function restoreFromEntries(
   return { state: defaultState(now), restored: false, ignoredMalformed };
 }
 
-/** A restored session must never resume with an active interpretation guard. */
+/** A restored session must never resume with an active interpretation guard,
+ * and legacy phase/autonomy combos are coerced to a mode without escalation. */
 export function sanitizeRestoredState(state: ControlPlaneState): ControlPlaneState {
-  return { ...state, interpretGuard: null };
+  const { phase, autonomy } = stateForMode(coerceToMode(state.phase, state.autonomy));
+  return { ...state, phase, autonomy, interpretGuard: null };
 }

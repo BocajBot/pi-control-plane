@@ -26,7 +26,7 @@ All secrets in tests are fabricated (`sk-FAKE…`, `AKIAIOSFODNN7EXAMPLE`, dummy
 
 ## Loader smoke (headless, already run)
 
-Loading the entry through Pi's real extension loader must produce zero errors and register: commands `context, task, phase, autonomy, interpret`; shortcuts `alt+c, alt+p, alt+a`; handlers `session_start, before_agent_start, before_provider_request, tool_call, agent_end, agent_settled, model_select`; two entry renderers. Reproduce with a small script calling `loadExtensions([...control-plane.ts], repoRoot)` from `@earendil-works/pi-coding-agent`'s loader module.
+Loading the entry through Pi's real extension loader must produce zero errors and register: commands `context, task, brief, mode, interpret`; shortcuts `alt+c, alt+p`; handlers `session_start, before_agent_start, before_provider_request, tool_call, agent_end, agent_settled, model_select`; two entry renderers. Reproduce with a small script calling `loadExtensions([...control-plane.ts], repoRoot)` from `@earendil-works/pi-coding-agent`'s loader module.
 
 ## Live smoke suite (headless, automated)
 
@@ -34,7 +34,7 @@ Loading the entry through Pi's real extension loader must produce zero errors an
 node tests/smoke/rpc-smoke.mjs
 ```
 
-Drives a **real pi session** over RPC mode against the local llama-swap provider (`~/.pi/agent/models.json`, provider `llama-swap` on :9292). Override with `CP_SMOKE_MODEL=provider/model` or `CP_SMOKE_REPO=/path`. 17 checks: startup defaults, phase/autonomy commands and status, Attended confirm dialog (denied blocks + nothing on disk; approved writes), dialog detail content, the `/interpret` guard (no tools, no dialogs, no files, completion notification), `/task accept`, Read-only blocking without dialogs, state persistence in the session file (entries present, content-free snapshot, no raw payloads), and restoration via `pi --continue`. Expected: `17/17 smoke checks passed`. Requires llama-swap running; each run costs a handful of short local-model turns.
+Drives a **real pi session** over RPC mode against the local llama-swap provider (`~/.pi/agent/models.json`, provider `llama-swap` on :9292). Override with `CP_SMOKE_MODEL=provider/model` or `CP_SMOKE_REPO=/path`. 17 checks: startup defaults, the /mode command and status, Attended confirm dialog (denied blocks + nothing on disk; approved writes), dialog detail content, the `/interpret` guard (no tools, no dialogs, no files, completion notification), `/brief accept` (the collision-free /task alias), verify-mode blocking without dialogs, state persistence in the session file (entries present, content-free snapshot, no raw payloads), and restoration via `pi --continue`. Expected: `17/17 smoke checks passed`. Requires llama-swap running; each run costs a handful of short local-model turns.
 
 ## Manual smoke checklist (interactive TUI)
 
@@ -44,15 +44,14 @@ Most items below are covered headlessly by the RPC suite; the TUI-only remainder
 2. `/context` → summary renders; values are labeled, unknowns say `Unavailable`.
 3. `/context diff` → first run states no previous snapshot exists and sets the baseline.
 4. `/task set try things` → status shows `Task accepted`.
-5. `/phase plan`, `/phase execute`, `/phase verify`, `alt+p` → status follows; invalid input (`/phase yolo`) prints usage.
+5. `/mode plan`, `/mode execute`, `/mode verify`, `alt+p` → status follows; invalid input (`/mode yolo`) prints usage.
 6. In Discuss, ask the model to write a file → blocked with rule `phase:discuss` and an actionable hint.
-7. `/phase execute` (still Read-only) → same write blocked with rule `autonomy:read-only`.
-8. `/autonomy attended` → the write pops a confirmation showing tool, risk, target, in-root flag. **Deny** → nothing on disk, model receives the denial.
+7. `/mode execute` → the write pops a confirmation showing tool, risk, target, in-root flag. **Deny** → nothing on disk, model receives the denial.
 9. Approve a retry → file written.
 10. `/interpret <request that encourages tool use>` → no tool runs; blocked attempts appear as dim diagnostic lines; afterwards a notification says accept/reject.
-11. `/task accept` → `Task: set`; next turn's behavior reflects the injected brief.
+11. `/task accept` (or `/brief accept`) → `Task accepted`; next turn's behavior reflects the injected brief.
 12. `/context toggle tool:bash` → bash disappears from the model's tool list (ask the model to run a command; it reports the tool unavailable).
-13. Quit, `pi /resume` the session → phase, autonomy, task, and toggles restored.
+13. Quit, `pi /resume` the session → mode, task, and toggles restored.
 14. Put `FAKE_API_KEY=sk-FAKEFAKEFAKEFAKEFAKE1` in a project file, `/context full` → shows `[REDACTED:…]`.
 15. `grep -r "systemPrompt" ~/.pi/sessions/<session>.jsonl` → no raw system prompt/payload stored by the control plane (only hashes/lengths in its entries).
 

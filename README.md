@@ -4,10 +4,9 @@ A control-plane extension for the [Pi coding agent](https://github.com/earendil-
 
 1. **What the model can see** (context files, skills, tools, system prompt, token usage) — `/context`
 2. **What the model thinks it is doing** (an explicit, reviewable task brief) — `/task`, `/interpret`
-3. **What stage of work is active** (Discuss / Plan / Execute / Verify) — `/phase`
-4. **What the model is allowed to do** (Read-only / Attended / Restricted) — `/autonomy`
+3. **What the model is allowed to do right now** (one merged setting: Discuss / Plan / Execute (attended) / Execute (restricted) / Verify) — `/mode`
 
-The central rule: **you can inspect and correct Pi's context and task interpretation before Pi is permitted to modify anything.** Enforcement is real — a phase or autonomy setting that would only change a label is treated as a bug.
+The central rule: **you can inspect and correct Pi's context and task interpretation before Pi is permitted to modify anything.** Enforcement is real — a mode that would only change a label is treated as a bug.
 
 ## Installation
 
@@ -29,8 +28,7 @@ Every new session starts as:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| Phase | **Discuss** | No file writes, no shell, no mutation of any kind |
-| Autonomy | **Read-only** | Only `read`, `grep`, `find`, `ls` are allowed |
+| Mode | **Discuss** | No file writes, no shell, no mutation of any kind; only `read`, `grep`, `find`, `ls` run |
 | Task | none | No task brief accepted |
 
 If anything fails to load or validate (saved state, the Restricted policy), the extension falls back to these defaults — never to a more permissive mode.
@@ -38,7 +36,7 @@ If anything fails to load or validate (saved state, the Restricted policy), the 
 The footer shows a live status segment:
 
 ```text
-Phase: Discuss | Mode: Read-only | No task | Context 12% full
+Mode: Discuss | No task | Context 12% full
 ```
 
 The extension also replaces pi's cryptic stats line (`↑4.2k ↓30 R4.2k CH99.2% 8.6%/49k`) with plain words:
@@ -85,25 +83,28 @@ When context usage passes 75%, `/context` reminds you that Pi's built-in `/compa
 - `/task accept` — adopt the pending `/interpret` result as the active brief. Refused if the interpretation was invalid.
 - `/task reject` — discard the pending interpretation, leaving the accepted task unchanged.
 - `/task clear` — clear both (asks for confirmation; `/task clear force` skips the dialog).
+- `/brief` — collision-free alias for `/task`. Other extensions may also register `/task` (e.g. pi-task); when the name is ambiguous, pi's TUI shows a picker but non-interactive modes route unpredictably — `/brief` always reaches the control plane.
 
 The accepted brief is injected into the system prompt each turn (objective, scope, constraints, unknowns, completion criteria, approval boundaries) together with behavioral requirements — including "do not claim completion without verification evidence".
 
 ### `/interpret <request>` — the interpretation gate
 
-Runs one **no-tools turn** in which the model must restate the task as twelve required sections (Objective, Deliverables, Included/Excluded scope, Constraints, Assumptions, Unknowns, Proposed actions, Completion criteria, Approval boundaries, …). During this turn **every** tool call is blocked, and blocked attempts are recorded as diagnostic entries. Afterwards, phase and autonomy are restored and you decide: `/task accept` or `/task reject`. A response missing required sections is kept for display but cannot be accepted.
+Runs one **no-tools turn** in which the model must restate the task as twelve required sections (Objective, Deliverables, Included/Excluded scope, Constraints, Assumptions, Unknowns, Proposed actions, Completion criteria, Approval boundaries, …). During this turn **every** tool call is blocked, and blocked attempts are recorded as diagnostic entries. Afterwards, the previous mode is restored and you decide: `/task accept` or `/task reject`. A response missing required sections is kept for display but cannot be accepted.
 
 Your request text is wrapped in delimiters and treated as data — it cannot masquerade as control-plane instructions.
 
-### `/phase` — what stage of work is active?
+### `/mode` — what is the model allowed to do right now?
 
-`discuss`, `plan`, `execute`, `verify`. **Discuss, Plan, and Verify block every mutating tool call regardless of autonomy.** Execute is the only phase where mutation is possible, and there autonomy decides. When verification reveals a needed change, switch back to Execute to apply it.
+One merged setting (workflow stage and permissions used to be two separate settings — `/phase` and `/autonomy` — which allowed contradictory combos like Execute + Read-only; they are now one):
 
-### `/autonomy` — what is the model allowed to do?
+- `discuss` — talk only. Every mutating tool blocked; reads (`read`, `grep`, `find`, `ls`) allowed. Shell is blocked entirely — commands are never parsed to guess whether they are "safe" (pattern-level command filtering proved unreliable in practice; whole-tool denial is reliable).
+- `plan` — same permissions as discuss, framed for planning.
+- `execute` — changes allowed, **attended**: reads inside the project run freely; anything risky (writes, edits, shell, unknown tools, reads outside the project root) pops a confirmation dialog showing the tool, risk category, target/command, and whether it is inside the project root. Denying blocks the call. If no confirmation UI exists (e.g. print mode), risky calls are blocked — never silently allowed.
+- `execute-restricted` — changes allowed under policy, no confirmations: writes only inside the project root (paths canonicalized, symlinks resolved, `..` traversal caught), credential paths blocked (`.env`, `.ssh`, `.aws`, etc. — see `policy/default-policy.json`), shell blocked by default, unknown tools always blocked. If the policy file is missing or invalid, enforcement falls back to read-only. (`restricted` is accepted as shorthand.)
+- `verify` — read-only again, framed for checking the work. When verification reveals a needed change, switch back to `execute`.
+- `sandboxed` is accepted only as an alias for `execute-restricted` and prints: *"This mode provides Pi-level policy restrictions, not operating-system isolation. It is not a security sandbox."* The status bar never displays "Sandboxed". See `docs/SECURITY.md` for why this distinction matters.
 
-- `read-only` — only classified read tools (`read`, `grep`, `find`, `ls`). Shell is blocked entirely — commands are never parsed to guess whether they are "safe" (pattern-level command filtering proved unreliable in practice; whole-tool denial is reliable).
-- `attended` — reads inside the project run freely; anything risky (writes, edits, shell, unknown tools, reads outside the project root) pops a confirmation dialog showing the tool, risk category, target/command, and whether it is inside the project root. Denying blocks the call. If no confirmation UI exists (e.g. print mode), risky calls are blocked — never silently allowed.
-- `restricted` — policy-enforced mode: writes only inside the project root (paths canonicalized, symlinks resolved, `..` traversal caught), credential paths blocked (`.env`, `.ssh`, `.aws`, etc. — see `policy/default-policy.json`), shell blocked by default, unknown tools always blocked. If the policy file is missing or invalid, enforcement falls back to Read-only.
-- `sandboxed` is accepted only as an alias for `restricted` and prints: *"This mode provides Pi-level policy restrictions, not operating-system isolation. It is not a security sandbox."* The status bar never displays "Sandboxed". See `docs/SECURITY.md` for why this distinction matters.
+Sessions saved before the merge restore safely: a legacy combination that no longer exists is coerced to the nearest mode **without ever escalating permissions** (e.g. Plan + Attended restores as Plan; Execute + Read-only restores as Discuss).
 
 ## Hotkeys
 
@@ -113,8 +114,7 @@ Your request text is wrapped in delimiters and treated as data — it cannot mas
 | `alt+e` | Open the session context in **nvim** to view and edit it |
 | `alt+s` | **Send preview**: everything the next message will send — system prompt (with the auto-appended control-plane block shown read-only), full history, and your unsent draft — in nvim, editable |
 | `alt+t` | Tool-profile picker: modal with profile names in a left column (1/5 width) and, on the right, the selected profile's description over its tool list. ↑/↓ or j/k select, **enter** applies for this session only, **space** also saves it as the default for new sessions (written to `policy/profiles.json` as `defaultProfile`), esc closes; `*` marks the active profile, `(default)` the default one |
-| `alt+p` | Cycle phase: Discuss → Plan → Execute → Verify |
-| `alt+a` | Cycle autonomy: Read-only → Attended → Restricted |
+| `alt+p` | Cycle mode: Discuss → Plan → Execute (attended) → Execute (restricted) → Verify |
 | `alt+h` | Hotkey cheat sheet as a centered modal (any key closes; `/hotkeys` lists everything) |
 
 `alt+s` is `alt+e` plus two things: lines prefixed `#> ` show the control-plane state block exactly as it will be appended to the system prompt (read-only — edits to them are ignored), and a `DRAFT` section holds your unsent message — editing it rewrites the input box on save. Context edits behave identically to `alt+e` (override, `Context edited`, `/context restore`).
@@ -129,7 +129,7 @@ Your request text is wrapped in delimiters and treated as data — it cannot mas
 - The override lives in memory only: it does not survive quitting, `/reload`, or compaction (compaction invalidates it with a notification, since the conversation no longer lines up).
 - Malformed edits (broken markers, missing system-prompt section) are rejected whole — nothing half-applies.
 
-**Why not shift+tab?** Pi already binds `shift+tab` to cycling the thinking level, so these default elsewhere. If you prefer Claude-Code-style `shift+tab` for the phase cycle, add this to `~/.pi/agent/keybindings.json` to move the *thinking* cycle somewhere else first, then the control plane's binding can take its place — see Pi's `docs/keybindings.md` for the file format:
+**Why not shift+tab?** Pi already binds `shift+tab` to cycling the thinking level, so these default elsewhere. If you prefer Claude-Code-style `shift+tab` for the mode cycle, add this to `~/.pi/agent/keybindings.json` to move the *thinking* cycle somewhere else first, then the control plane's binding can take its place — see Pi's `docs/keybindings.md` for the file format:
 
 ```json
 {
@@ -145,21 +145,20 @@ Then edit `extensions/control-plane.ts` in this repo and change `"alt+p"` to `"s
 /context
 /interpret Refactor the configuration loader and verify backward compatibility.
 /task accept
-/phase plan
-/phase execute
-/autonomy attended
+/mode plan
+/mode execute
 ...
-/phase verify
+/mode verify
 ```
 
-Note: phase and autonomy control what *tools* may do. They do not change the model or its thinking level.
+Note: the mode controls what *tools* may do. It does not change the model or its thinking level.
 
 ## What each file does
 
 | File | What it is |
 |---|---|
 | `extensions/control-plane.ts` | The extension entry point Pi loads. Pure wiring: registers commands, hotkeys, event hooks. The logic lives in `src/`. |
-| `src/control-plane/types.ts` | Shared type definitions and constants (phases, autonomy levels, state shape). |
+| `src/control-plane/types.ts` | Shared type definitions and constants (modes, state shape). |
 | `src/control-plane/state.ts` | Safe defaults, validation, and restoration of saved state. Anything malformed falls back to Discuss + Read-only. |
 | `src/control-plane/tool-policy.ts` | The authorization engine: tool classification, path canonicalization, and the allow/confirm/block decision. |
 | `src/control-plane/redaction.ts` | Pattern-based secret redaction applied before any context is displayed or hashed. |

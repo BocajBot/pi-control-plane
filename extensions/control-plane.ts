@@ -23,10 +23,9 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import {
-  parseAutonomyArgs,
   parseContextArgs,
   parseInterpretArgs,
-  parsePhaseArgs,
+  parseModeArgs,
   parseTaskArgs,
 } from "../src/control-plane/commands.ts";
 import { diffIsEmpty, diffSnapshots } from "../src/control-plane/context-diff.ts";
@@ -48,10 +47,12 @@ import {
 import { redactSecrets } from "../src/control-plane/redaction.ts";
 import {
   type CustomEntryLike,
-  cycleAutonomy,
-  cyclePhase,
+  cycleMode,
   defaultState,
+  type Mode,
+  modeOf,
   restoreFromEntries,
+  stateForMode,
 } from "../src/control-plane/state.ts";
 import { applyContextFileToggles, replaceSkillsBlock, toggleName } from "../src/control-plane/toggles.ts";
 import {
@@ -71,6 +72,7 @@ import { evaluateToolCall, validatePolicy, type PathOps } from "../src/control-p
 import {
   buildInjectionBlock,
   contextWarningLevel,
+  displayMode,
   formatContextWarning,
   formatDenial,
   formatDraftCounter,
@@ -591,34 +593,29 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     pi.setActiveTools(active);
   };
 
-  const setPhase = (ctx: ExtensionContext, phase: ControlPlaneState["phase"]) => {
+  const setMode = (ctx: ExtensionContext, mode: Mode, sandboxAlias: boolean) => {
+    const { phase, autonomy } = stateForMode(mode);
     state.phase = phase;
-    persist();
-    updateStatus(ctx);
-    const note =
-      phase === "execute"
-        ? state.acceptedTask === null
-          ? " (note: no accepted task brief — consider /interpret or /task set)"
-          : ""
-        : " (mutating tools are blocked in this phase)";
-    ctx.ui.notify(`Phase: ${phase}${note}`, "info");
-  };
-
-  const setAutonomy = (ctx: ExtensionContext, autonomy: ControlPlaneState["autonomy"], sandboxAlias: boolean) => {
     state.autonomy = autonomy;
     persist();
     updateStatus(ctx);
     if (sandboxAlias) {
       ctx.ui.notify(SANDBOX_ALIAS_WARNING, "warning");
     }
-    if (autonomy === "restricted" && policy === null) {
+    if (mode === "execute-restricted" && policy === null) {
       ctx.ui.notify(
-        "Restricted selected but the policy failed to load/validate — enforcement falls back to Read-only.",
+        "Execute (restricted) selected but the policy failed to load/validate — enforcement falls back to read-only.",
         "warning",
       );
-    } else {
-      ctx.ui.notify(`Autonomy: ${autonomy}`, "info");
+      return;
     }
+    const note =
+      phase === "execute"
+        ? state.acceptedTask === null
+          ? " (note: no accepted task brief — consider /interpret or /task set)"
+          : ""
+        : " (mutating tools are blocked in this mode)";
+    ctx.ui.notify(`Mode: ${displayMode(phase, autonomy, policy !== null)}${note}`, "info");
   };
 
   const knownToggleTargets = (ctx: ExtensionCommandContext): SnapshotItem[] =>
@@ -1176,14 +1173,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("task", {
+  const taskCommand = {
     description: "Show, set, accept, reject, or clear the control-plane task brief",
-    getArgumentCompletions: (prefix) => {
+    getArgumentCompletions: (prefix: string) => {
       const subs = ["set ", "accept", "reject", "clear"];
       const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
       return matches.length > 0 ? matches.map((s) => ({ value: s, label: s.trim() })) : null;
     },
-    handler: async (args, ctx) => {
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
       const command = parseTaskArgs(args);
       switch (command.kind) {
         case "usage":
@@ -1258,55 +1255,38 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         }
       }
     },
+  };
+  pi.registerCommand("task", taskCommand);
+  // Other installed extensions may also register /task (e.g. pi-task), which
+  // makes the bare name ambiguous — pi then routes it unpredictably outside
+  // the TUI's disambiguation menu. /brief is the collision-free alias.
+  pi.registerCommand("brief", {
+    ...taskCommand,
+    description: `${taskCommand.description} (alias of /task)`,
   });
 
-  pi.registerCommand("phase", {
-    description: "Show or set the workflow phase (discuss/plan/execute/verify)",
+  pi.registerCommand("mode", {
+    description: "Show or set the mode (discuss/plan/execute/execute-restricted/verify)",
     getArgumentCompletions: (prefix) => {
-      const subs = ["discuss", "plan", "execute", "verify"];
+      const subs = ["discuss", "plan", "execute", "execute-restricted", "verify"];
       const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
       return matches.length > 0 ? matches.map((s) => ({ value: s, label: s })) : null;
     },
     handler: async (args, ctx) => {
-      const command = parsePhaseArgs(args);
+      const command = parseModeArgs(args);
       if (command.kind === "usage") {
-        emit("usage", [`Unknown phase "${command.attempted ?? ""}".`, ...USAGE.phase]);
+        emit("usage", [`Unknown mode "${command.attempted ?? ""}".`, ...USAGE.mode]);
         return;
       }
       if (command.kind === "show") {
-        emit("phase", [
-          `Current phase: ${state.phase}`,
+        emit("mode", [
+          `Current mode: ${displayMode(state.phase, state.autonomy, policy !== null)}`,
           "",
-          ...USAGE.phase,
+          ...USAGE.mode,
         ]);
         return;
       }
-      setPhase(ctx, command.phase);
-    },
-  });
-
-  pi.registerCommand("autonomy", {
-    description: "Show or set the autonomy level (read-only/attended/restricted)",
-    getArgumentCompletions: (prefix) => {
-      const subs = ["read-only", "attended", "restricted"];
-      const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
-      return matches.length > 0 ? matches.map((s) => ({ value: s, label: s })) : null;
-    },
-    handler: async (args, ctx) => {
-      const command = parseAutonomyArgs(args);
-      if (command.kind === "usage") {
-        emit("usage", [`Unknown autonomy level "${command.attempted ?? ""}".`, ...USAGE.autonomy]);
-        return;
-      }
-      if (command.kind === "show") {
-        emit("autonomy", [
-          `Current autonomy: ${state.autonomy}${state.autonomy === "restricted" && policy === null ? " (policy invalid — enforcing Read-only)" : ""}`,
-          "",
-          ...USAGE.autonomy,
-        ]);
-        return;
-      }
-      setAutonomy(ctx, command.autonomy, command.sandboxAlias);
+      setMode(ctx, command.mode, command.sandboxAlias);
     },
   });
 
@@ -1639,16 +1619,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   });
 
   pi.registerShortcut("alt+p", {
-    description: "Control plane: cycle workflow phase",
+    description: "Control plane: cycle mode",
     handler: (ctx) => {
-      setPhase(ctx, cyclePhase(state.phase));
-    },
-  });
-
-  pi.registerShortcut("alt+a", {
-    description: "Control plane: cycle autonomy level",
-    handler: (ctx) => {
-      setAutonomy(ctx, cycleAutonomy(state.autonomy), false);
+      // Legacy combos (restored old sessions) enter the cycle at discuss.
+      const current = modeOf(state.phase, state.autonomy) ?? "discuss";
+      setMode(ctx, cycleMode(current), false);
     },
   });
 }

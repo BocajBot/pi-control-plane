@@ -47,6 +47,21 @@ function displayAutonomy(autonomy: Autonomy): string {
   }
 }
 
+/** One label for the merged mode setting. Legacy combos are shown honestly. */
+export function displayMode(phase: Phase, autonomy: Autonomy, policyValid: boolean): string {
+  if (phase === "execute") {
+    if (autonomy === "attended") return "Execute (attended)";
+    if (autonomy === "restricted") {
+      return policyValid
+        ? "Execute (restricted)"
+        : "Execute (restricted — policy invalid, enforcing read-only)";
+    }
+    return "Execute (read-only)";
+  }
+  const base = displayPhase(phase);
+  return autonomy === "read-only" ? base : `${base} (${displayAutonomy(autonomy)})`;
+}
+
 /** Token counts formatted the way pi's built-in footer formats them. */
 export function formatTokenCount(count: number): string {
   if (count < 1000) return count.toString();
@@ -145,10 +160,6 @@ export function formatStatus(
   contextPercent: number | null,
   policyValid: boolean,
 ): string {
-  const autonomy =
-    state.autonomy === "restricted" && !policyValid
-      ? "Read-only (policy fallback)"
-      : displayAutonomy(state.autonomy);
   const task =
     state.acceptedTask !== null
       ? "Task accepted"
@@ -158,7 +169,7 @@ export function formatStatus(
   const ctx =
     contextPercent !== null ? `Context ${Math.round(contextPercent)}% full` : "Context unknown";
   const guard = state.interpretGuard?.active ? " | Interpreting (tools disabled)" : "";
-  return `Phase: ${displayPhase(state.phase)} | Mode: ${autonomy} | ${task} | ${ctx}${guard}`;
+  return `Mode: ${displayMode(state.phase, state.autonomy, policyValid)} | ${task} | ${ctx}${guard}`;
 }
 
 function unavailable(value: string | number | null | undefined): string {
@@ -197,8 +208,7 @@ export function renderContextSummary(
   for (const t of templates) lines.push(`  ${t.name}`);
   lines.push(`Active tools (${snapshot.tools.length}): ${snapshot.tools.join(", ") || "Unavailable"}`);
   lines.push("");
-  lines.push(`Phase:           ${displayPhase(snapshot.phase)}`);
-  lines.push(`Autonomy:        ${displayAutonomy(snapshot.autonomy)}`);
+  lines.push(`Mode:            ${displayMode(snapshot.phase, snapshot.autonomy, true)}`);
   lines.push(`Accepted task:   ${snapshot.hasAcceptedTask ? "yes" : "no"}`);
   lines.push("");
   lines.push(
@@ -340,12 +350,16 @@ export function buildInjectionBlock(state: ControlPlaneState, policyValid: boole
   const lines: string[] = [];
   lines.push("[PI CONTROL PLANE]");
   lines.push("");
-  lines.push(`Phase: ${displayPhase(state.phase)}`);
-  const autonomyLine =
-    state.autonomy === "restricted" && !policyValid
-      ? "Read-only (Restricted policy failed validation; fail-closed)"
-      : displayAutonomy(state.autonomy);
-  lines.push(`Autonomy: ${autonomyLine}`);
+  lines.push(`Mode: ${displayMode(state.phase, state.autonomy, policyValid)}`);
+  lines.push(
+    state.phase === "execute"
+      ? state.autonomy === "restricted" && policyValid
+        ? "Mutating tools are policy-enforced: project-root writes only, credential paths and shell blocked."
+        : state.autonomy === "attended"
+          ? "Risky tool calls (writes, shell, out-of-root reads) require user confirmation."
+          : "Mutating tools are blocked in this mode."
+      : "Mutating tools are blocked in this mode.",
+  );
   const taskStatus =
     state.acceptedTask !== null ? "Accepted" : state.pendingInterpretation !== null ? "Pending" : "None";
   lines.push(`Task status: ${taskStatus}`);
@@ -368,8 +382,7 @@ export function buildInjectionBlock(state: ControlPlaneState, policyValid: boole
   }
   lines.push("");
   lines.push("Behavioral requirements:");
-  lines.push("- Obey the active phase.");
-  lines.push("- Obey the active autonomy policy.");
+  lines.push("- Obey the active mode's restrictions.");
   lines.push("- Do not broaden the accepted task.");
   lines.push("- Distinguish observations, inferences, assumptions, and recommendations.");
   lines.push(
@@ -475,8 +488,7 @@ export function renderHotkeyCheatsheet(): string[] {
     "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",
     "  alt+s  send preview: everything the next message will send, editable, incl. your draft",
     "  alt+t  tool-profile picker (enter: apply this session · space: set as default)",
-    "  alt+p  cycle phase: Discuss > Plan > Execute > Verify",
-    "  alt+a  cycle autonomy: Read-only > Attended > Restricted",
+    "  alt+p  cycle mode: Discuss > Plan > Execute (attended) > Execute (restricted) > Verify",
     "  alt+h  this cheat sheet",
     "",
     "Pi essentials:",
@@ -489,7 +501,7 @@ export function renderHotkeyCheatsheet(): string[] {
     "  ctrl+x     copy last assistant message",
     "  escape     interrupt         ctrl+c  clear editor   ctrl+d  exit",
     "",
-    "Commands: /context /task /phase /autonomy /interpret /hotkeys /compact /new",
+    "Commands: /context /task /mode /interpret /hotkeys /compact /new",
   ];
 }
 
@@ -514,16 +526,16 @@ export const USAGE = {
     "  /task reject      — discard the pending /interpret result",
     "  /task clear       — clear accepted and pending task state (asks to confirm)",
   ],
-  phase: [
-    "Usage: /phase [discuss|plan|execute|verify]",
-    "  Discuss/Plan/Verify block all mutating tools. Execute defers to /autonomy.",
-  ],
-  autonomy: [
-    "Usage: /autonomy [read-only|attended|restricted]",
-    "  read-only  — only read/grep/find/ls; everything else blocked",
-    "  attended   — risky operations require your confirmation",
-    "  restricted — project-bound policy from policy/default-policy.json",
-    "  (\"sandboxed\" is accepted as an alias for restricted, with a warning)",
+  mode: [
+    "Usage: /mode [discuss|plan|execute|execute-restricted|verify]",
+    "  discuss             — talk only; every mutating tool blocked, reads allowed",
+    "  plan                — same permissions as discuss, framed for planning",
+    "  execute             — changes allowed; risky operations ask for confirmation",
+    "  execute-restricted  — changes allowed inside the project root under",
+    "                        policy/default-policy.json; no confirmations, shell blocked",
+    "  verify              — read-only again, framed for checking the work",
+    "  (\"restricted\" means execute-restricted; \"sandboxed\" too, with a warning:",
+    "   it is policy enforcement, not an OS sandbox)",
   ],
   interpret: [
     "Usage: /interpret <task request>",

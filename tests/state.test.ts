@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  coerceToMode,
   cycleAutonomy,
+  cycleMode,
   cyclePhase,
   defaultState,
+  modeOf,
+  sanitizeRestoredState,
+  stateForMode,
   normalizePhase,
   resolveAutonomyInput,
   restoreFromEntries,
@@ -139,4 +144,38 @@ test("task brief validation rejects fabricated shapes", () => {
   assert.equal(validateTaskBrief({ id: "", objective: "x" }), null);
   assert.equal(validateTaskBrief({ ...directBrief("x"), source: "guessed" }), null);
   assert.notEqual(validateTaskBrief(directBrief("x")), null);
+});
+
+test("mode mapping: five modes round-trip; legacy combos are null", () => {
+  assert.deepEqual(stateForMode("discuss"), { phase: "discuss", autonomy: "read-only" });
+  assert.deepEqual(stateForMode("execute"), { phase: "execute", autonomy: "attended" });
+  assert.deepEqual(stateForMode("execute-restricted"), { phase: "execute", autonomy: "restricted" });
+  for (const mode of ["discuss", "plan", "execute", "execute-restricted", "verify"] as const) {
+    const { phase, autonomy } = stateForMode(mode);
+    assert.equal(modeOf(phase, autonomy), mode);
+  }
+  assert.equal(modeOf("execute", "read-only"), null);
+  assert.equal(modeOf("plan", "attended"), null);
+});
+
+test("coerceToMode never escalates legacy combos", () => {
+  assert.equal(coerceToMode("execute", "read-only"), "discuss");
+  assert.equal(coerceToMode("plan", "attended"), "plan");
+  assert.equal(coerceToMode("verify", "restricted"), "verify");
+  assert.equal(coerceToMode("execute", "attended"), "execute");
+});
+
+test("cycleMode walks all five modes", () => {
+  assert.equal(cycleMode("discuss"), "plan");
+  assert.equal(cycleMode("plan"), "execute");
+  assert.equal(cycleMode("execute"), "execute-restricted");
+  assert.equal(cycleMode("execute-restricted"), "verify");
+  assert.equal(cycleMode("verify"), "discuss");
+});
+
+test("sanitizeRestoredState coerces legacy combos without escalation", () => {
+  const legacy = { ...defaultState(), phase: "plan" as const, autonomy: "attended" as const };
+  const cleaned = sanitizeRestoredState(legacy);
+  assert.equal(cleaned.phase, "plan");
+  assert.equal(cleaned.autonomy, "read-only");
 });

@@ -3,8 +3,7 @@
  * separated from execution so invalid-argument handling is unit-testable.
  */
 
-import { normalizePhase, resolveAutonomyInput } from "./state.ts";
-import type { Autonomy, Phase } from "./types.ts";
+import { type Mode, MODES } from "./state.ts";
 
 export type ContextCommand =
   | { kind: "summary" }
@@ -72,29 +71,29 @@ export function parseTaskArgs(args: string): TaskCommand {
   }
 }
 
-export type PhaseCommand =
+export type ModeCommand =
   | { kind: "show" }
-  | { kind: "set"; phase: Phase }
+  | { kind: "set"; mode: Mode; sandboxAlias: boolean }
   | { kind: "usage"; attempted?: string };
 
-export function parsePhaseArgs(args: string): PhaseCommand {
-  const trimmed = args.trim();
+export function parseModeArgs(args: string): ModeCommand {
+  const trimmed = args.trim().toLowerCase();
   if (trimmed.length === 0) return { kind: "show" };
-  const phase = normalizePhase(trimmed);
-  return phase !== null ? { kind: "set", phase } : { kind: "usage", attempted: trimmed };
-}
-
-export type AutonomyCommand =
-  | { kind: "show" }
-  | { kind: "set"; autonomy: Autonomy; sandboxAlias: boolean }
-  | { kind: "usage"; attempted?: string };
-
-export function parseAutonomyArgs(args: string): AutonomyCommand {
-  const trimmed = args.trim();
-  if (trimmed.length === 0) return { kind: "show" };
-  const resolved = resolveAutonomyInput(trimmed);
-  if (resolved === null) return { kind: "usage", attempted: trimmed };
-  return { kind: "set", autonomy: resolved.autonomy, sandboxAlias: resolved.sandboxAliasUsed };
+  // Aliases: attended is the plain "execute"; "restricted" alone means
+  // execute-restricted; "sandboxed" keeps its honesty warning.
+  if (trimmed === "execute-attended" || trimmed === "attended") {
+    return { kind: "set", mode: "execute", sandboxAlias: false };
+  }
+  if (trimmed === "restricted") {
+    return { kind: "set", mode: "execute-restricted", sandboxAlias: false };
+  }
+  if (trimmed === "sandboxed" || trimmed === "execute-sandboxed") {
+    return { kind: "set", mode: "execute-restricted", sandboxAlias: true };
+  }
+  if ((MODES as readonly string[]).includes(trimmed)) {
+    return { kind: "set", mode: trimmed as Mode, sandboxAlias: false };
+  }
+  return { kind: "usage", attempted: args.trim() };
 }
 
 export type InterpretCommand = { kind: "run"; request: string } | { kind: "usage" };

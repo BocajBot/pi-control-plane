@@ -134,21 +134,22 @@ async function startInterpretTurn(pi: FakePi, ctx: unknown) {
   );
 }
 
-test("registers the five commands and three shortcuts", async () => {
+test("registers the four commands and the shortcuts", async () => {
   const pi = await boot();
-  for (const name of ["context", "task", "phase", "autonomy", "interpret"]) {
+  for (const name of ["context", "task", "mode", "interpret"]) {
     assert.ok(pi.commands.has(name), `missing /${name}`);
   }
-  for (const key of ["alt+c", "alt+p", "alt+a"]) {
+  assert.ok(!pi.commands.has("phase") && !pi.commands.has("autonomy"), "phase/autonomy merged into /mode");
+  for (const key of ["alt+c", "alt+p"]) {
     assert.ok(pi.shortcuts.has(key), `missing shortcut ${key}`);
   }
 });
 
-test("defaults after session_start: Discuss + Read-only shown in status", async () => {
+test("defaults after session_start: Discuss mode shown in status", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Phase: Discuss \| Mode: Read-only \| No task/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Discuss \| No task/);
 });
 
 test("write blocked in Discuss; read allowed", async () => {
@@ -171,20 +172,12 @@ test("write blocked in Discuss; read allowed", async () => {
   assert.equal(readResult, undefined, "read must pass through");
 });
 
-test("Execute + Read-only still blocks writes; Execute + Attended denied confirmation blocks execution", async () => {
+test("Execute (attended) denied confirmation blocks execution", async () => {
   const pi = await boot();
   const root = tmpRoot();
   const ctx = makeCtx({ cwd: root, confirmResult: false });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await pi.commands.get("phase")!.handler("execute", ctx);
-  const stillBlocked = (await pi.emit(
-    "tool_call",
-    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "f.txt", content: "x" } },
-    ctx,
-  )) as { block?: boolean };
-  assert.equal(stillBlocked?.block, true, "read-only must block writes even in Execute");
-
-  await pi.commands.get("autonomy")!.handler("attended", ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
   const denied = (await pi.emit(
     "tool_call",
     { type: "tool_call", toolCallId: "2", toolName: "write", input: { path: "f.txt", content: "x" } },
@@ -194,13 +187,12 @@ test("Execute + Read-only still blocks writes; Execute + Attended denied confirm
   assert.match(denied?.reason ?? "", /Denied by user confirmation/);
 });
 
-test("Execute + Attended approved confirmation allows the call; no-UI fails closed", async () => {
+test("Execute (attended) approved confirmation allows the call; no-UI fails closed", async () => {
   const pi = await boot();
   const root = tmpRoot();
   const approvingCtx = makeCtx({ cwd: root, confirmResult: true });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, approvingCtx);
-  await pi.commands.get("phase")!.handler("execute", approvingCtx);
-  await pi.commands.get("autonomy")!.handler("attended", approvingCtx);
+  await pi.commands.get("mode")!.handler("execute", approvingCtx);
   const allowed = await pi.emit(
     "tool_call",
     { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "f.txt", content: "x" } },
@@ -223,8 +215,7 @@ test("/interpret guards the turn: all tools blocked, diagnostic recorded, state 
   const root = tmpRoot();
   const ctx = makeCtx({ cwd: root });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await pi.commands.get("phase")!.handler("execute", ctx);
-  await pi.commands.get("autonomy")!.handler("attended", ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
 
   await pi.commands.get("interpret")!.handler("Refactor the loader and encourage tool use", ctx);
   assert.equal(pi.sentUserMessages.length, 1);
@@ -250,7 +241,7 @@ test("/interpret guards the turn: all tools blocked, diagnostic recorded, state 
     },
     ctx,
   );
-  assert.match(ctx.statuses["control-plane"] ?? "", /Phase: Execute \| Mode: Attended \| Task pending review/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(attended\) \| Task pending review/);
 
   // Accept adopts the brief.
   await pi.commands.get("task")!.handler("accept", ctx);
@@ -310,8 +301,7 @@ test("state restores across sessions from persisted entries (phase, autonomy, to
   const root = tmpRoot();
   const ctx = makeCtx({ cwd: root });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await pi.commands.get("phase")!.handler("plan", ctx);
-  await pi.commands.get("autonomy")!.handler("attended", ctx);
+  await pi.commands.get("mode")!.handler("plan", ctx);
   await pi.commands.get("context")!.handler("toggle tool:bash", ctx);
   assert.ok(!pi.activeTools.includes("bash"), "bash removed from active tools");
 
@@ -320,7 +310,7 @@ test("state restores across sessions from persisted entries (phase, autonomy, to
   await controlPlaneExtension(pi2 as never);
   const ctx2 = makeCtx({ cwd: root, branchEntries: pi.entries.filter((e) => e.customType === STATE_ENTRY_TYPE) });
   await pi2.emit("session_start", { type: "session_start", reason: "resume" }, ctx2);
-  assert.match(ctx2.statuses["control-plane"] ?? "", /Phase: Plan \| Mode: Attended/);
+  assert.match(ctx2.statuses["control-plane"] ?? "", /Mode: Plan/);
   assert.ok(!pi2.activeTools.includes("bash"), "tool toggle reapplied after restore");
 });
 
@@ -333,20 +323,20 @@ test("malformed persisted state falls back to safe defaults with a warning", asy
     ],
   });
   await pi.emit("session_start", { type: "session_start", reason: "resume" }, ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Phase: Discuss \| Mode: Read-only/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Discuss/);
   assert.ok(ctx.notifications.some((n) => /malformed/i.test(n.message)));
 });
 
-test("sandboxed resolves to Restricted with the required warning and honest status", async () => {
+test("sandboxed resolves to Execute (restricted) with the required warning and honest status", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await pi.commands.get("autonomy")!.handler("sandboxed", ctx);
+  await pi.commands.get("mode")!.handler("sandboxed", ctx);
   assert.ok(
     ctx.notifications.some((n) => /not a security sandbox/i.test(n.message)),
     "sandbox warning required",
   );
-  assert.match(ctx.statuses["control-plane"] ?? "", /Restricted/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Execute \(restricted\)/i);
   assert.doesNotMatch(ctx.statuses["control-plane"] ?? "", /Sandboxed/);
 });
 
@@ -371,7 +361,7 @@ test("injected system prompt carries the control-plane block and applies verifie
     ctx,
   )) as { systemPrompt?: string };
   assert.ok(result?.systemPrompt?.includes("[PI CONTROL PLANE]"));
-  assert.ok(result?.systemPrompt?.includes("Phase: Discuss"));
+  assert.ok(result?.systemPrompt?.includes("Mode: Discuss"));
   assert.ok(!result?.systemPrompt?.includes("AGENTS FILE CONTENT"), "disabled file must be excised");
 });
 
@@ -474,14 +464,18 @@ test("applied profile persists and is restored in a new session", async () => {
   assert.deepEqual([...pi2.activeTools].sort(), ["find", "grep", "ls", "read"], "profile toggles reapplied on restore");
 });
 
-test("phase and autonomy cycle hotkeys advance in order", async () => {
+test("mode cycle hotkey advances through all five modes", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
   await pi.shortcuts.get("alt+p")!(ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Phase: Plan/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Plan/);
   await pi.shortcuts.get("alt+p")!(ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Phase: Execute/);
-  await pi.shortcuts.get("alt+a")!(ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Attended/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(attended\)/);
+  await pi.shortcuts.get("alt+p")!(ctx);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(restricted\)/);
+  await pi.shortcuts.get("alt+p")!(ctx);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Verify/);
+  await pi.shortcuts.get("alt+p")!(ctx);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Discuss/);
 });

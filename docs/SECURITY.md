@@ -22,7 +22,7 @@ Everything runs inside Pi's Node process with the user's full privileges. The `t
 
 ## Restricted is not a sandbox
 
-`/autonomy restricted` (and its alias `sandboxed`) is Pi-level policy interception. It is not equivalent to a container, a VM, a restricted Unix user, Linux namespaces, seccomp, AppArmor, SELinux, Bubblewrap, Firejail, or filesystem virtualization. A process that escapes cooperation (native code, a compromised dependency, a Pi bug) is not contained by it. That is why the alias prints a warning and the status bar never says "Sandboxed". For real isolation, run Pi inside an OS-level sandbox.
+`/mode execute-restricted` (and its alias `sandboxed`) is Pi-level policy interception. It is not equivalent to a container, a VM, a restricted Unix user, Linux namespaces, seccomp, AppArmor, SELinux, Bubblewrap, Firejail, or filesystem virtualization. A process that escapes cooperation (native code, a compromised dependency, a Pi bug) is not contained by it. That is why the alias prints a warning and the status bar never says "Sandboxed". For real isolation, run Pi inside an OS-level sandbox.
 
 ## Why shell is blocked entirely in Read-only (and by default in Restricted)
 
@@ -46,7 +46,7 @@ Targets are canonicalized before comparison: resolved absolute, symlinks resolve
 | Path unresolvable | Blocked |
 | Tool unknown | Blocked (or confirm in Attended) |
 | Source excision unverifiable | Source re-enabled and reported as enabled |
-| Restart during /interpret | Guard cleared; phase/autonomy from last persisted state |
+| Restart during /interpret | Guard cleared; mode from last persisted state |
 
 ## Secret redaction and its limits
 

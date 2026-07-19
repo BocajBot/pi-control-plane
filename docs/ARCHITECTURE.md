@@ -21,7 +21,7 @@ Verified against pi 0.80.10 (`dist/core/extensions/types.d.ts`):
 | `before_agent_start` | Apply source toggles (verified excision), append the control-plane block to the system prompt (ephemeral, per-turn) |
 | `before_provider_request` | Capture redacted payload length + sha256 (metadata only; payload never stored or persisted) |
 | `tool_call` | The enforcement point: allow / confirm / block every tool call |
-| `agent_end` | Detect completion of an `/interpret` turn, parse the response, restore phase/autonomy |
+| `agent_end` | Detect completion of an `/interpret` turn, parse the response, restore the previous mode |
 | `agent_settled`, `model_select` | Refresh the footer status segment |
 
 ## State model
@@ -50,7 +50,7 @@ Three mechanisms, by kind:
 
 ## Task-brief injection
 
-`before_agent_start` returns `{ systemPrompt: original + "\n\n" + block }`. Because the return value replaces the prompt only for that turn, injection is ephemeral: no duplicate messages accumulate in the session. The block contains phase, autonomy, task status, the accepted brief's key fields (each field capped at 700 chars, the block at 6000, truncation marked `[TRUNCATED]`), and the behavioral requirements. Task text passes through `neutralizeDelimiters()` so user-supplied content cannot imitate control-plane instructions.
+`before_agent_start` returns `{ systemPrompt: original + "\n\n" + block }`. Because the return value replaces the prompt only for that turn, injection is ephemeral: no duplicate messages accumulate in the session. The block contains the mode, task status, the accepted brief's key fields (each field capped at 700 chars, the block at 6000, truncation marked `[TRUNCATED]`), and the behavioral requirements. Task text passes through `neutralizeDelimiters()` so user-supplied content cannot imitate control-plane instructions.
 
 ## Context editor (alt+e)
 
@@ -70,6 +70,9 @@ Implemented in `tool-policy.ts: evaluateToolCall`, in this order; the first appl
 interpretation guard   -> block everything, reads included
 workflow phase         -> Discuss/Plan/Verify block mutate/shell/unknown
 autonomy               -> read-only: block; attended: confirm; restricted: policy
+(the user sets both through one /mode setting: Discuss/Plan/Verify imply
+read-only, Execute picks attended or restricted; internally the two layers
+stay separate and legacy saved combos are coerced without escalation)
 tool classification    -> read / mutate / shell / unknown (unknown never safe)
 path checks            -> canonicalize (symlinks, .., nonexistent tails),
                           root containment, credential-path deny list
