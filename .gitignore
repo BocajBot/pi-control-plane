@@ -2,3 +2,5 @@ node_modules/
 *.log
 .DS_Store
 *.bak.*
+rpc-smoke-*.txt
+interp-test.txt
