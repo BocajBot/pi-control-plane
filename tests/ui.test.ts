@@ -1,6 +1,27 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { formatFooterStats, formatTokenCount } from "../src/control-plane/ui.ts";
+import {
+  estimateTokens,
+  formatDraftCounter,
+  formatFooterStats,
+  formatTokenCount,
+} from "../src/control-plane/ui.ts";
+
+test("estimateTokens: ~4 chars per token, zero only for empty", () => {
+  assert.equal(estimateTokens(""), 0);
+  assert.equal(estimateTokens("hi"), 1);
+  assert.equal(estimateTokens("a".repeat(8)), 2);
+  assert.equal(estimateTokens("a".repeat(9)), 3);
+});
+
+test("formatDraftCounter right-aligns within the width", () => {
+  const line = formatDraftCounter("hello world!", 40);
+  assert.equal(line.length, 40);
+  assert.ok(line.endsWith("Token Counter: ~3"));
+  assert.ok(line.startsWith(" "));
+  // Narrow width: label survives untruncated even if wider than the box.
+  assert.equal(formatDraftCounter("", 5), "Token Counter: ~0");
+});
 
 test("formatTokenCount matches pi's footer formatting", () => {
   assert.equal(formatTokenCount(999), "999");

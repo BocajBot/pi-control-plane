@@ -3,11 +3,25 @@
   "profiles": {
     "minimal": {
       "description": "Core coding tools only — everything else toggled off",
-      "tools": ["read", "bash", "edit", "write", "grep", "find", "ls"]
+      "tools": [
+        "read",
+        "bash",
+        "edit",
+        "write",
+        "grep",
+        "find",
+        "ls"
+      ]
     },
     "reading": {
       "description": "Read-oriented tools only (pairs well with Discuss/Plan phases)",
-      "tools": ["read", "grep", "find", "ls"]
+      "tools": [
+        "read",
+        "grep",
+        "find",
+        "ls"
+      ]
     }
-  }
+  },
+  "defaultProfile": "minimal"
 }

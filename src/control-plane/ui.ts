@@ -90,6 +90,22 @@ export function formatFooterStats(s: FooterStats): { stats: string; context: str
   return { stats: parts.join(" · "), context };
 }
 
+/**
+ * Rough token estimate for draft text (~4 chars/token). No tokenizer is
+ * available in-process, so this is always presented with a "~" prefix.
+ */
+export function estimateTokens(text: string): number {
+  if (text.length === 0) return 0;
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+/** Right-aligned draft token counter line shown under the input box. */
+export function formatDraftCounter(text: string, width: number): string {
+  const label = `Token Counter: ~${estimateTokens(text)}`;
+  if (label.length >= width) return label;
+  return " ".repeat(width - label.length) + label;
+}
+
 export function formatStatus(
   state: ControlPlaneState,
   contextPercent: number | null,

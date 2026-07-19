@@ -66,6 +66,7 @@ import { evaluateToolCall, validatePolicy, type PathOps } from "../src/control-p
 import {
   buildInjectionBlock,
   formatDenial,
+  formatDraftCounter,
   formatFooterStats,
   formatStatus,
   LIMITS,
@@ -367,6 +368,43 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     }));
   };
 
+  // ---- draft token counter (bottom-right, under the input box) ----
+  // A component-factory widget re-renders every TUI frame, so reading the
+  // editor text in render() keeps the count live while typing. The count is an
+  // estimate (~4 chars/token; no tokenizer is available in-process), hence "~".
+  let draftCounterInstalled = false;
+
+  const installDraftCounter = (ctx: ExtensionContext) => {
+    if (draftCounterInstalled) return;
+    const ui = ctx.ui as unknown as {
+      getEditorText?: () => string;
+      setWidget?: (
+        key: string,
+        content: (tui: unknown, theme: { fg(color: string, text: string): string }) => {
+          render(width: number): string[];
+        },
+        options?: { placement?: string },
+      ) => void;
+    };
+    if (typeof ui.setWidget !== "function" || typeof ui.getEditorText !== "function") return;
+    draftCounterInstalled = true;
+    ui.setWidget(
+      "control-plane-draft-counter",
+      (_tui, theme) => ({
+        render: (width: number): string[] => {
+          let draft = "";
+          try {
+            draft = ui.getEditorText?.() ?? "";
+          } catch {
+            draft = "";
+          }
+          return [theme.fg("dim", formatDraftCounter(draft, width))];
+        },
+      }),
+      { placement: "belowEditor" },
+    );
+  };
+
   const clearOverlay = (ctx: ExtensionContext, reason: string) => {
     if (contextOverlay === null) return;
     contextOverlay = null;
@@ -666,6 +704,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       applyNamedProfile(ctx, defaultProfile);
     }
     installFooter(ctx);
+    installDraftCounter(ctx);
     // Editor state is process/session scoped; a new or resumed session starts clean.
     contextOverlay = null;
     lastContextMessages = null;
