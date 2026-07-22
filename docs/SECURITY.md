@@ -53,6 +53,7 @@ A Restricted-mode (and, since it shares the same policy engine, Unattended-mode)
 | Unattended mode entered without an accepted task brief | Every mutating/shell call blocked (`unattended:no-task`); reads unaffected |
 | Scratchpad entry malformed / unknown schema | That entry ignored, newest-still-valid entry restored, or empty scratchpad if none valid — same posture as state restoration, never a partially-repaired guess |
 | `allowPathPrefixes` entry does not exist on disk | That entry grants nothing (skipped, never a literal-string fallback) |
+| Tool-profiles file (`policy/profiles.json`) missing/invalid/old schema | Profiles unavailable; `/context profile` reports the error, tool toggles otherwise unaffected |
 | Confirmation UI unavailable in Attended | Risky call blocked, never silently allowed |
 | Path unresolvable | Blocked |
 | Tool unknown | Blocked (or confirm in Attended) |

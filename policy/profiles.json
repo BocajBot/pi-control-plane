@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "profiles": {
     "minimal": {
       "description": "Core coding tools only — everything else toggled off",
@@ -23,5 +23,6 @@
       ]
     }
   },
-  "defaultProfile": "minimal"
+  "defaultProfile": "minimal",
+  "alwaysDisabledTools": ["web_search"]
 }

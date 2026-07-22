@@ -48,7 +48,12 @@ class FakePi {
   sendUserMessage(content: string) {
     this.sentUserMessages.push(content);
   }
-  allToolNames = ["read", "bash", "edit", "write", "grep", "find", "ls", "web_search"];
+  // Includes a couple of extras beyond what any shipped profile lists (like
+  // local_web_search and todo, standing in for other installed extensions'
+  // tools) so "minimal" and "all minus alwaysDisabledTools" are never
+  // coincidentally the same set here, the way they would be in a toy
+  // universe of exactly minimal's own tools + one extra.
+  allToolNames = ["read", "bash", "edit", "write", "grep", "find", "ls", "web_search", "local_web_search", "todo"];
   getActiveTools() {
     return [...this.activeTools];
   }
@@ -450,7 +455,15 @@ test("/context profile applies loadouts, lists them, and 'all' restores", async 
   assert.ok(/minimal/.test(listingText) && /reading/.test(listingText) && /Active: minimal/.test(listingText));
 
   await pi.commands.get("context")!.handler("profile all", ctx);
-  assert.ok(pi.activeTools.includes("web_search"), "'all' re-enables everything");
+  assert.ok(pi.activeTools.includes("local_web_search"), "'all' re-enables everything not always-disabled");
+  assert.ok(
+    !pi.activeTools.includes("web_search"),
+    "except alwaysDisabledTools (policy/profiles.json) - 'all' does not mean literally all",
+  );
+  assert.ok(
+    ctx.notifications.some((n) => /kept off/.test(n.message)),
+    "the override is explained in the notification, not silent",
+  );
 
   await pi.commands.get("context")!.handler("profile bogus", ctx);
   assert.ok(ctx.notifications.some((n) => /Unknown profile "bogus"/.test(n.message)));

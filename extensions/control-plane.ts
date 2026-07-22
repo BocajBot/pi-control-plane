@@ -68,6 +68,7 @@ import {
 import { applyContextFileToggles, replaceSkillsBlock, toggleName } from "../src/control-plane/toggles.ts";
 import {
   ALL_PROFILE,
+  applyAlwaysDisabled,
   applyProfile,
   clearToolToggles,
   currentProfileName,
@@ -782,15 +783,32 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     };
   };
 
-  /** Apply a profile by name ("all" included). Notifies on success and failure. */
+  /**
+   * Apply a profile by name ("all" included), then force alwaysDisabledTools
+   * off on top - this always wins regardless of which profile was picked, so
+   * a redundant tool disabled for a known reason (see policy/profiles.json)
+   * can never come back just by switching profiles. Individually toggling
+   * that exact tool back on via /context toggle afterward still works - this
+   * only guards bulk profile application, not the explicit single-tool
+   * escape hatch. Notifies on success and failure.
+   */
   const applyNamedProfile = (ctx: ExtensionContext, name: string): boolean => {
     const allTools = pi.getAllTools().map((t) => t.name);
+    const alwaysDisabledTools = profilesConfig?.alwaysDisabledTools ?? [];
     if (name === ALL_PROFILE) {
-      state.sourceToggles = clearToolToggles(state.sourceToggles);
-      pi.setActiveTools(allTools);
+      const forced = applyAlwaysDisabled(clearToolToggles(state.sourceToggles), alwaysDisabledTools, allTools);
+      state.sourceToggles = forced.toggles;
+      pi.setActiveTools(allTools.filter((t) => !forced.newlyDisabled.includes(t)));
       persist();
       updateStatus(ctx);
-      ctx.ui.notify(`Profile "all": every tool enabled (${allTools.length}).`, "info");
+      const forcedNote =
+        forced.newlyDisabled.length > 0
+          ? ` (${forced.newlyDisabled.join(", ")} kept off - see policy/profiles.json alwaysDisabledTools)`
+          : "";
+      ctx.ui.notify(
+        `Profile "all": ${allTools.length - forced.newlyDisabled.length} tool(s) enabled.${forcedNote}`,
+        "info",
+      );
       void refreshProspectiveCount(ctx);
       return true;
     }
@@ -801,16 +819,23 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       return false;
     }
     const result = applyProfile(profile.tools, allTools, state.sourceToggles);
-    state.sourceToggles = result.toggles;
-    pi.setActiveTools(result.enabled);
+    const forced = applyAlwaysDisabled(result.toggles, alwaysDisabledTools, allTools);
+    state.sourceToggles = forced.toggles;
+    pi.setActiveTools(result.enabled.filter((t) => !forced.newlyDisabled.includes(t)));
     persist();
     updateStatus(ctx);
+    const enabledCount = result.enabled.length - forced.newlyDisabled.length;
+    const disabledCount = result.disabled.length + forced.newlyDisabled.length;
     const missingNote =
       result.missing.length > 0
         ? ` Not present in this session (skipped): ${result.missing.join(", ")}.`
         : "";
+    const forcedNote =
+      forced.newlyDisabled.length > 0
+        ? ` (${forced.newlyDisabled.join(", ")} kept off - see policy/profiles.json alwaysDisabledTools)`
+        : "";
     ctx.ui.notify(
-      `Profile "${name}": ${result.enabled.length} tool(s) enabled, ${result.disabled.length} disabled.${missingNote}`,
+      `Profile "${name}": ${enabledCount} tool(s) enabled, ${disabledCount} disabled.${forcedNote}${missingNote}`,
       "info",
     );
     void refreshProspectiveCount(ctx);
@@ -909,6 +934,22 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     const defaultProfile = profilesConfig?.defaultProfile ?? null;
     if (!result.restored && defaultProfile !== null && defaultProfile !== ALL_PROFILE) {
       applyNamedProfile(ctx, defaultProfile);
+    } else if (!result.restored && (profilesConfig?.alwaysDisabledTools.length ?? 0) > 0) {
+      // No named default profile ran above (none configured, or the default
+      // is literally "all") - apply the always-disabled overlay on its own
+      // so the invariant holds even without a profile in the loop. Restored
+      // sessions are still left alone, same reasoning as applyNamedProfile.
+      const allTools = pi.getAllTools().map((t) => t.name);
+      const forced = applyAlwaysDisabled(state.sourceToggles, profilesConfig!.alwaysDisabledTools, allTools);
+      if (forced.newlyDisabled.length > 0) {
+        state.sourceToggles = forced.toggles;
+        pi.setActiveTools(pi.getActiveTools().filter((t) => !forced.newlyDisabled.includes(t)));
+        persist();
+        ctx.ui.notify(
+          `Control plane: ${forced.newlyDisabled.join(", ")} kept off by default (see policy/profiles.json alwaysDisabledTools).`,
+          "info",
+        );
+      }
     }
     installFooter(ctx);
     installDraftCounter(ctx);

@@ -17,7 +17,7 @@ No dependencies: Node 22's built-in test runner executes the TypeScript directly
 | `context-editor.test.ts` | Context serialization/parsing round-trip, overlay merge/invalidation, edit application |
 | `interpretation.test.ts` | Prompt construction, delimiter neutralization (hostile input), section parsing, missing-heading invalidation, direct-brief non-fabrication, truncation |
 | `toggles.test.ts` | Verified excision success/failure, skills-block replacement, toggle naming |
-| `profiles.test.ts` | Tool-profile validation, application, and active-profile detection |
+| `profiles.test.ts` | Tool-profile validation, application, active-profile detection, `alwaysDisabledTools` (schema v2: applyAlwaysDisabled, "all" no longer meaning literally every tool, already-disabled/not-present edge cases) |
 | `token-counter.test.ts` | Payload-format detection, message serialization for counting, count-endpoint dispatch (Anthropic vs OpenAI shaped payloads) |
 | `ui.test.ts` | Status/mode display strings, footer stats formatting, context-warning thresholds, draft/added-context counters |
 | `scratchpad.test.ts` | Note CRUD, truncation and capacity limits, strict validation, compaction-safe restoration, injection-block rendering (incl. the empty-scratchpad-renders-nothing rule) |

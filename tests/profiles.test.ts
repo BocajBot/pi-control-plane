@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { test } from "node:test";
 import {
+  applyAlwaysDisabled,
   applyProfile,
   clearToolToggles,
   currentProfileName,
@@ -9,11 +10,12 @@ import {
 } from "../src/control-plane/profiles.ts";
 
 const validConfig = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   profiles: {
     minimal: { description: "core", tools: ["read", "bash", "edit", "write"] },
     reading: { description: "reads", tools: ["read", "grep"] },
   },
+  alwaysDisabledTools: [],
 };
 
 test("validateProfiles accepts the shipped file and the valid shape", () => {
@@ -26,20 +28,71 @@ test("validateProfiles accepts the shipped file and the valid shape", () => {
 
 test("validateProfiles rejects malformed shapes and the reserved name", () => {
   assert.equal(validateProfiles(null), null);
-  assert.equal(validateProfiles({ schemaVersion: 2, profiles: {} }), null);
-  assert.equal(validateProfiles({ schemaVersion: 1, profiles: { x: { description: "d" } } }), null);
   assert.equal(
-    validateProfiles({ schemaVersion: 1, profiles: { x: { description: "d", tools: [""] } } }),
+    validateProfiles({ schemaVersion: 1, profiles: {}, alwaysDisabledTools: [] }),
+    null,
+    "old schema version must not silently validate",
+  );
+  assert.equal(
+    validateProfiles({ schemaVersion: 2, profiles: { x: { description: "d" } }, alwaysDisabledTools: [] }),
     null,
   );
   assert.equal(
-    validateProfiles({ schemaVersion: 1, profiles: { x: { description: "d", tools: [], extra: 1 } } }),
+    validateProfiles({
+      schemaVersion: 2,
+      profiles: { x: { description: "d", tools: [""] } },
+      alwaysDisabledTools: [],
+    }),
     null,
   );
   assert.equal(
-    validateProfiles({ schemaVersion: 1, profiles: { all: { description: "d", tools: [] } } }),
+    validateProfiles({
+      schemaVersion: 2,
+      profiles: { x: { description: "d", tools: [], extra: 1 } },
+      alwaysDisabledTools: [],
+    }),
+    null,
+  );
+  assert.equal(
+    validateProfiles({
+      schemaVersion: 2,
+      profiles: { all: { description: "d", tools: [] } },
+      alwaysDisabledTools: [],
+    }),
     null,
     "'all' is reserved",
+  );
+});
+
+test("validateProfiles requires and validates alwaysDisabledTools", () => {
+  assert.equal(
+    validateProfiles({ schemaVersion: 2, profiles: {} }),
+    null,
+    "alwaysDisabledTools is required, not optional",
+  );
+  assert.equal(
+    validateProfiles({ schemaVersion: 2, profiles: {}, alwaysDisabledTools: "not-an-array" }),
+    null,
+  );
+  assert.equal(
+    validateProfiles({ schemaVersion: 2, profiles: {}, alwaysDisabledTools: [""] }),
+    null,
+    "empty-string entries rejected",
+  );
+  assert.equal(
+    validateProfiles({ schemaVersion: 2, profiles: {}, alwaysDisabledTools: [1] }),
+    null,
+  );
+  const withDupes = validateProfiles({
+    schemaVersion: 2,
+    profiles: {},
+    alwaysDisabledTools: ["web_search", "web_search"],
+  });
+  assert.deepEqual(withDupes?.alwaysDisabledTools, ["web_search"], "duplicates deduplicated");
+  assert.equal(
+    validateProfiles({ ...validConfig, unknownTopKey: true }),
+    null,
+    "unknown top-level key rejected",
   );
 });
 
@@ -71,6 +124,27 @@ test("applyProfile disables unlisted tools, keeps non-tool toggles, reports miss
 test("clearToolToggles removes only tool toggles", () => {
   const cleared = clearToolToggles({ "tool:bash": false, "skill:foo": false });
   assert.deepEqual(cleared, { "skill:foo": false });
+});
+
+test("applyAlwaysDisabled forces listed tools off, preserves everything else, reports what changed", () => {
+  const allTools = ["read", "bash", "web_search", "local_web_search"];
+  const result = applyAlwaysDisabled({ "skill:foo": false }, ["web_search"], allTools);
+  assert.equal(result.toggles["tool:web_search"], false);
+  assert.equal(result.toggles["skill:foo"], false, "unrelated toggles preserved");
+  assert.equal(result.toggles["tool:local_web_search"], undefined, "not in the denylist, left alone");
+  assert.deepEqual(result.newlyDisabled, ["web_search"]);
+});
+
+test("applyAlwaysDisabled: already-disabled tool is not reported as newly disabled", () => {
+  const result = applyAlwaysDisabled({ "tool:web_search": false }, ["web_search"], ["web_search"]);
+  assert.deepEqual(result.newlyDisabled, [], "already off - nothing new happened");
+  assert.equal(result.toggles["tool:web_search"], false);
+});
+
+test("applyAlwaysDisabled: a name not present in allTools is silently skipped, not an error", () => {
+  const result = applyAlwaysDisabled({}, ["nonexistent_tool"], ["read", "bash"]);
+  assert.deepEqual(result.newlyDisabled, []);
+  assert.equal(result.toggles["tool:nonexistent_tool"], undefined);
 });
 
 test("profile picker layout: 1/5 left column, two right rows, selection marker", async () => {
@@ -120,4 +194,17 @@ test("currentProfileName matches all, named profiles, and custom states", () => 
   assert.equal(currentProfileName(config, allTools, applied.toggles), "minimal");
   assert.equal(currentProfileName(config, allTools, { "tool:read": false }), null);
   assert.equal(currentProfileName(null, allTools, { "tool:read": false }), null);
+});
+
+test("currentProfileName: 'all' still matches once alwaysDisabledTools are forced off (that IS what 'all' produces now)", () => {
+  const allTools = ["read", "bash", "web_search", "local_web_search"];
+  const config = validateProfiles({
+    schemaVersion: 2,
+    profiles: {},
+    alwaysDisabledTools: ["web_search"],
+  })!;
+  const forced = applyAlwaysDisabled(clearToolToggles({}), config.alwaysDisabledTools, allTools);
+  assert.equal(currentProfileName(config, allTools, forced.toggles), "all");
+  // But literally every tool enabled (bypassing the overlay) does NOT match "all" anymore.
+  assert.notEqual(currentProfileName(config, allTools, {}), "all");
 });
