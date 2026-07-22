@@ -193,6 +193,7 @@ export function formatStatus(
   state: ControlPlaneState,
   contextPercent: number | null,
   policyValid: boolean,
+  sandboxLabel: string = "",
 ): string {
   const task =
     state.acceptedTask !== null
@@ -203,8 +204,9 @@ export function formatStatus(
   const ctx =
     contextPercent !== null ? `Context ${Math.round(contextPercent)}% full` : "Context unknown";
   const guard = state.interpretGuard?.active ? " | Interpreting (tools disabled)" : "";
+  const sandbox = sandboxLabel.length > 0 ? ` | ${sandboxLabel}` : "";
   const mode = displayMode(state.phase, state.autonomy, policyValid, state.acceptedTask !== null);
-  return `Mode: ${mode} | ${task} | ${ctx}${guard}`;
+  return `Mode: ${mode} | ${task} | ${ctx}${guard}${sandbox}`;
 }
 
 function unavailable(value: string | number | null | undefined): string {

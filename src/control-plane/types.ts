@@ -24,6 +24,7 @@ export const SNAPSHOT_SCHEMA_VERSION = 1;
  * same as any other invalid policy; this is deliberate, not a bug. */
 export const POLICY_SCHEMA_VERSION = 2;
 export const SCRATCHPAD_SCHEMA_VERSION = 1;
+export const SANDBOX_SCHEMA_VERSION = 1;
 
 /** Session entry customType used to persist control-plane state. */
 export const STATE_ENTRY_TYPE = "pi-control-plane-state";
@@ -36,6 +37,12 @@ export const DIAGNOSTIC_ENTRY_TYPE = "pi-control-plane-diagnostic";
  * the same way state does: entries are excluded from LLM context and are
  * untouched by compaction, which only summarizes messages. */
 export const SCRATCHPAD_ENTRY_TYPE = "pi-control-plane-scratchpad";
+/** Session entry customType used to persist bwrap-sandbox state (on/off,
+ * network). Its own entry type and schema version, restored the same
+ * walk-backward way as state.ts and scratchpad.ts - deliberately not folded
+ * into ControlPlaneState so this feature's schema can evolve independently
+ * (see scratchpad.ts's header for the same reasoning). */
+export const SANDBOX_ENTRY_TYPE = "pi-control-plane-sandbox";
 
 export interface TaskBrief {
   id: string;
@@ -197,5 +204,21 @@ export interface ScratchpadNote {
 export interface ScratchpadState {
   schemaVersion: typeof SCRATCHPAD_SCHEMA_VERSION;
   notes: ScratchpadNote[];
+  updatedAt: string;
+}
+
+/**
+ * Bwrap-sandbox toggle. `enabled` wraps every allowed `bash` call in a
+ * bubblewrap (unprivileged Linux namespaces) invocation before it executes -
+ * see sandbox.ts. This is real OS-level isolation, unlike the `/mode
+ * sandboxed` alias (Restricted autonomy), which is Pi-level policy
+ * interception only; the two are independent and can be combined.
+ * `network` controls whether the sandboxed command can reach the network
+ * (default false: unshared).
+ */
+export interface SandboxState {
+  schemaVersion: typeof SANDBOX_SCHEMA_VERSION;
+  enabled: boolean;
+  network: boolean;
   updatedAt: string;
 }

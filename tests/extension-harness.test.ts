@@ -6,6 +6,7 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -147,7 +148,7 @@ async function startInterpretTurn(pi: FakePi, ctx: unknown) {
 
 test("registers the commands, the local_web_search tool, and the shortcuts", async () => {
   const pi = await boot();
-  for (const name of ["context", "task", "mode", "interpret", "scratchpad"]) {
+  for (const name of ["context", "task", "mode", "interpret", "scratchpad", "bwrap"]) {
     assert.ok(pi.commands.has(name), `missing /${name}`);
   }
   assert.ok(!pi.commands.has("phase") && !pi.commands.has("autonomy"), "phase/autonomy merged into /mode");
@@ -221,6 +222,61 @@ test("Execute (attended) approved confirmation allows the call; no-UI fails clos
   assert.equal(blocked?.block, true);
   assert.match(blocked?.reason ?? "", /failing closed/i);
 });
+
+/** These tests exercise the real `bwrap` availability check
+ * (isBwrapAvailable in extensions/control-plane.ts), so they skip rather
+ * than fail on a machine without bubblewrap installed - same reasoning as
+ * not hard-failing tests/sandbox.test.ts's real-process assertions on a
+ * platform that lacks /bin/sh. */
+const bwrapInstalled = spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
+
+test("/bwrap: off by default, status reports it, on refuses without confirmation UI needs", { skip: !bwrapInstalled }, async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+
+  await pi.commands.get("bwrap")!.handler("", ctx);
+  const statusOutput = pi.entries.at(-1)?.data as { title: string; lines: string[] };
+  assert.equal(statusOutput.title, "bwrap");
+  assert.match(statusOutput.lines.join("\n"), /Sandbox: off/);
+
+  await pi.commands.get("bwrap")!.handler("on", ctx);
+  assert.match(ctx.notifications.at(-1)?.message ?? "", /Bwrap sandbox enabled/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Sandbox: bwrap \(net off\)/);
+
+  await pi.commands.get("bwrap")!.handler("network on", ctx);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Sandbox: bwrap \(net on\)/);
+
+  await pi.commands.get("bwrap")!.handler("off", ctx);
+  assert.doesNotMatch(ctx.statuses["control-plane"] ?? "", /Sandbox:/);
+});
+
+test(
+  "/bwrap on wraps an allowed bash call's command in bwrap; off leaves it untouched",
+  { skip: !bwrapInstalled },
+  async () => {
+    const pi = await boot();
+    const root = tmpRoot();
+    const ctx = makeCtx({ cwd: root, confirmResult: true });
+    await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await pi.commands.get("mode")!.handler("execute", ctx);
+
+    const unwrapped = { type: "tool_call", toolCallId: "1", toolName: "bash", input: { command: "echo hi" } };
+    await pi.emit("tool_call", unwrapped, ctx);
+    assert.equal(unwrapped.input.command, "echo hi", "sandbox off must not touch the command");
+
+    await pi.commands.get("bwrap")!.handler("on", ctx);
+    const wrapped = { type: "tool_call", toolCallId: "2", toolName: "bash", input: { command: "echo hi" } };
+    await pi.emit("tool_call", wrapped, ctx);
+    assert.match(wrapped.input.command, /^'bwrap' /, "sandbox on must rewrite the command to a bwrap invocation");
+    assert.ok(
+      wrapped.input.command.includes(`'--bind' '${root}' '${root}'`),
+      "project root must be bound read-write",
+    );
+    assert.match(wrapped.input.command, /'echo hi'$/, "the original command must survive, quoted, at the end");
+  },
+);
 
 test("/interpret guards the turn: all tools blocked, diagnostic recorded, state restored after", async () => {
   const pi = await boot();

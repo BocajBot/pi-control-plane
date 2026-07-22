@@ -132,3 +132,31 @@ export function parseScratchpadArgs(args: string): ScratchpadCommand {
       return { kind: "usage" };
   }
 }
+
+export type BwrapCommand =
+  | { kind: "status" }
+  | { kind: "on" }
+  | { kind: "off" }
+  | { kind: "network"; on: boolean }
+  | { kind: "usage" };
+
+export function parseBwrapArgs(args: string): BwrapCommand {
+  const trimmed = args.trim();
+  if (trimmed.length === 0) return { kind: "status" };
+  const parts = trimmed.split(/\s+/);
+  const [sub, ...rest] = parts;
+  switch (sub.toLowerCase()) {
+    case "status":
+      return rest.length === 0 ? { kind: "status" } : { kind: "usage" };
+    case "on":
+      return rest.length === 0 ? { kind: "on" } : { kind: "usage" };
+    case "off":
+      return rest.length === 0 ? { kind: "off" } : { kind: "usage" };
+    case "network":
+      if (rest.length === 1 && rest[0].toLowerCase() === "on") return { kind: "network", on: true };
+      if (rest.length === 1 && rest[0].toLowerCase() === "off") return { kind: "network", on: false };
+      return { kind: "usage" };
+    default:
+      return { kind: "usage" };
+  }
+}

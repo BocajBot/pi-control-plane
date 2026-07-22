@@ -86,6 +86,14 @@ path checks            -> canonicalize (symlinks, .., nonexistent tails), then
 
 The confirm action is executed by the entry (`ctx.ui.confirm`); a denied dialog or a missing dialog API both result in a block.
 
+## Bwrap sandboxing (`sandbox.ts`, `/bwrap`)
+
+Applied strictly *after* the precedence chain above resolves to allow (either directly, or via an approved confirmation) - never instead of it, and never influencing `evaluateToolCall`'s decision itself. `sandbox.ts` is pure (no Pi imports, no filesystem access - `roBindPaths`/`shadowDirs`/`shadowFiles` are resolved by the wiring layer, `sandboxOptionsFor` in `extensions/control-plane.ts`, the same "fs is injected" split as `tool-policy.ts`'s `PathOps`) and exposes one security-relevant function, `buildSandboxedCommand`, which turns a `bash` command string into a `bwrap ... -- /bin/sh -c '<original, single-quote-escaped>'` invocation. The `tool_call` handler mutates `event.input.command` in place at the two points execution is actually granted (the plain-allow return, and the post-confirmation return) - this relies on the documented Pi contract that `ToolCallEvent.input` is mutable and patches the call before execution (`@earendil-works/pi-coding-agent`'s `types.d.ts`).
+
+State (`SandboxState`: `enabled`, `network`) is its own entry type and schema version (`SANDBOX_ENTRY_TYPE`/`SANDBOX_SCHEMA_VERSION`), restored with the identical walk-backward-take-first-valid pattern as `state.ts`/`scratchpad.ts` - deliberately not folded into `ControlPlaneState` so this feature's schema can evolve independently.
+
+Credential shadowing inside the sandbox's read-only-bound `$HOME` reuses `policy/default-policy.json`'s existing `denyPathSubstrings`/`denyPathBasenames` (the same list `tool-policy.ts` already enforces for `read`/`edit`/`write`) rather than maintaining a second list that could drift - resolved fresh per call in `sandboxOptionsFor`, same no-caching posture as `tool-policy.ts:resolveAllowPrefixes` and for the same reason (project root, cwd, and `$HOME`'s contents can all change between calls). See `docs/SECURITY.md` for exactly what this does and does not cover.
+
 ## Milestone 2: unattended autonomy, web search, scratchpad, out-of-root allowlists
 
 All four seams named in the original milestone plan are now implemented, each exactly where that plan said it would live:

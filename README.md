@@ -117,6 +117,23 @@ One merged setting (workflow stage and permissions used to be two separate setti
 
 Sessions saved before the merge restore safely: a legacy combination that no longer exists is coerced to the nearest mode **without ever escalating permissions** (e.g. Plan + Attended restores as Plan; Execute + Read-only restores as Discuss).
 
+### `/bwrap` — real OS-level isolation for `bash`, independent of `/mode`
+
+`/mode`'s `sandboxed` alias (previous section) is Pi-level policy only — no OS isolation, by its own admission. `/bwrap` is the actual OS-level isolation: when on, every `bash` call that `/mode`'s policy layer already allowed (or a human already confirmed) is additionally wrapped in [bubblewrap](https://github.com/containers/bubblewrap) — unprivileged Linux user namespaces — before it runs. The two are independent and stack: `/mode execute` (per-command confirmation) + `/bwrap on` (kernel-enforced containment of whatever gets confirmed) is a reasonable combination, not a redundant one.
+
+- `/bwrap` / `/bwrap status` — show whether the sandbox is on, whether networking is shared, and whether the `bwrap` binary is actually on `PATH`.
+- `/bwrap on` — enable. Refuses (with an error, not a silent no-op) if `bwrap` is not installed.
+- `/bwrap off` — disable (default).
+- `/bwrap network on` / `/bwrap network off` — allow or unshare networking for sandboxed commands (default off, same "safe by default" posture as everything else in this package).
+
+What the sandbox binds, every time, freshly resolved per call (see `sandboxOptionsFor` in `extensions/control-plane.ts`):
+
+- The project root — read-write. This is the entire point: code the agent may still modify.
+- Standard system directories (`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`, `/opt`) and `$HOME` — read-only, so interpreters, package managers, and toolchains under `$HOME` (nvm, cargo, a user pip install, …) resolve normally.
+- Credential paths from `policy/default-policy.json` (`denyPathSubstrings`, `denyPathBasenames`) — blanked inside `$HOME` (empty `tmpfs` over directories, `/dev/null` over files) so `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.pi/agent`, `~/.docker/config.json`, and friends are unreadable from inside the sandbox even though the rest of `$HOME` is bound in. This deliberately reuses the *same* deny list the `read`/`edit`/`write` tools already enforce rather than maintaining a second one that could drift — see `docs/SECURITY.md` for what this reuse does and does not cover (basename patterns like a stray `.env` are only shadowed at `$HOME`'s top level, not everywhere on disk).
+
+Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-session, the `bash` call is blocked with an explicit reason rather than silently running unsandboxed.
+
 ## Hotkeys
 
 | Key | Action |
@@ -184,11 +201,12 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 | `src/control-plane/interpretation.ts` | Builds the `/interpret` prompt, parses the response, creates task briefs. |
 | `src/control-plane/toggles.ts` | Verified excision of toggled-off sources from the system prompt. |
 | `src/control-plane/scratchpad.ts` | Structured working notes: validation, persistence/restoration, and rendering. Same patterns as `state.ts`, applied to its own entry type. |
+| `src/control-plane/sandbox.ts` | Bwrap command-line assembly and its own persisted on/off + network toggle. Pure: builds a command string, never spawns anything itself. Same patterns as `state.ts`/`scratchpad.ts`. |
 | `src/control-plane/websearch.ts` | Pure searxng client (injected fetch): URL building, response parsing, result formatting. No Pi imports. |
 | `src/control-plane/commands.ts` | Argument parsing for every command (so bad input handling is testable). |
 | `src/control-plane/ui.ts` | All text formatting: status line, summaries, denial messages, the injected state block. |
-| `policy/default-policy.json` | Restricted/Unattended-mode rules: denied path names/substrings, whether bash is allowed (default: no), out-of-root allowlist prefixes (default: none). Edit carefully — an invalid or old-schema file makes Restricted/Unattended behave as Read-only. |
-| `tests/` | 151 unit and harness tests. Run with `npm test`. |
+| `policy/default-policy.json` | Restricted/Unattended-mode rules: denied path names/substrings, whether bash is allowed (default: no), out-of-root allowlist prefixes (default: none). Also the credential-path source of truth `/bwrap`'s `$HOME` shadowing reuses. Edit carefully — an invalid or old-schema file makes Restricted/Unattended behave as Read-only. |
+| `tests/` | 168 unit and harness tests. Run with `npm test`. |
 | `docs/` | Architecture, security model, and testing guides. |
 | `IMPLEMENTATION-PROMPT.md` | The specification the first milestone was built from. Milestone 2 (unattended autonomy, web search, scratchpad, out-of-root allowlists) is documented in `docs/ARCHITECTURE.md`. |
 

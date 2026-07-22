@@ -10,12 +10,13 @@
  * without Pi. This file is wiring only.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
+  BashToolCallEvent,
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
@@ -23,6 +24,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import {
+  parseBwrapArgs,
   parseContextArgs,
   parseInterpretArgs,
   parseModeArgs,
@@ -46,6 +48,12 @@ import {
   pendingFromResponse,
 } from "../src/control-plane/interpretation.ts";
 import { redactSecrets } from "../src/control-plane/redaction.ts";
+import {
+  buildSandboxedCommand,
+  describeSandbox,
+  emptySandboxState,
+  restoreSandboxFromEntries,
+} from "../src/control-plane/sandbox.ts";
 import {
   addNote,
   clearScratchpad,
@@ -110,6 +118,8 @@ import {
   DIAGNOSTIC_ENTRY_TYPE,
   OUTPUT_ENTRY_TYPE,
   type RestrictedPolicy,
+  SANDBOX_ENTRY_TYPE,
+  type SandboxState,
   SCRATCHPAD_ENTRY_TYPE,
   type ScratchpadState,
   type SnapshotItem,
@@ -198,6 +208,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
   let state: ControlPlaneState = defaultState();
   let scratchpad: ScratchpadState = emptyScratchpad();
+  let sandbox: SandboxState = emptySandboxState();
+  /** Cached bwrap-on-PATH check (spawnSync is not free; the binary does not
+   * appear or disappear mid-session). Null = not checked yet. */
+  let bwrapAvailableCache: boolean | null = null;
   let policy: RestrictedPolicy | null = null;
   let policyLoadError: string | null = null;
   let lastPayloadMeta: { length: number; hash: string } | null = null;
@@ -390,10 +404,71 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     pi.appendEntry(SCRATCHPAD_ENTRY_TYPE, scratchpad);
   };
 
+  const persistSandbox = () => {
+    sandbox.updatedAt = new Date().toISOString();
+    pi.appendEntry(SANDBOX_ENTRY_TYPE, sandbox);
+  };
+
   const updateStatus = (ctx: ExtensionContext) => {
     const percent = ctx.getContextUsage()?.percent ?? null;
-    const base = formatStatus(state, percent, policy !== null);
+    const base = formatStatus(state, percent, policy !== null, describeSandbox(sandbox));
     ctx.ui.setStatus(STATUS_KEY, contextOverlay !== null ? `${base} | Context edited` : base);
+  };
+
+  const isBwrapAvailable = (): boolean => {
+    if (bwrapAvailableCache !== null) return bwrapAvailableCache;
+    try {
+      const result = spawnSync("bwrap", ["--version"], { stdio: "ignore" });
+      bwrapAvailableCache = result.error === undefined && result.status === 0;
+    } catch {
+      bwrapAvailableCache = false;
+    }
+    return bwrapAvailableCache;
+  };
+
+  /**
+   * Resolve the bwrap invocation's path lists fresh on every call - same
+   * "no caching, this module already does per-call fs work" posture as
+   * tool-policy.ts's resolveAllowPrefixes, and for the same reason: the
+   * project root, cwd, and $HOME's contents can all change between calls.
+   *
+   * roBindPaths: system toolchain directories plus $HOME, read-only, so
+   * interpreters/package managers resolve inside the sandbox.
+   * shadowDirs/shadowFiles: credential paths reused directly from
+   * policy/default-policy.json (denyPathSubstrings, denyPathBasenames) so
+   * this list never drifts from the one the read/edit/write tools already
+   * enforce - see docs/SECURITY.md for what this does and does not cover
+   * (basename patterns are only shadowed at $HOME's top level, not
+   * everywhere on disk; the project root is bound read-write regardless,
+   * same as bash's existing unsandboxed access to it today).
+   */
+  const sandboxOptionsFor = (ctx: ExtensionContext) => {
+    const home = os.homedir();
+    const systemDirs = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt"];
+    const roBindPaths = [...systemDirs.filter((p) => fs.existsSync(p)), ...(fs.existsSync(home) ? [home] : [])];
+    const shadowDirs: string[] = [];
+    const shadowFiles: string[] = [];
+    if (policy !== null) {
+      const candidates = new Set<string>();
+      for (const sub of policy.denyPathSubstrings) {
+        const trimmed = sub.replace(/^\/+/, "").replace(/\/+$/, "");
+        if (trimmed.length > 0) candidates.add(path.join(home, trimmed));
+      }
+      for (const base of policy.denyPathBasenames) {
+        candidates.add(path.join(home, base));
+      }
+      for (const candidate of candidates) {
+        try {
+          const st = fs.statSync(candidate);
+          if (st.isDirectory()) shadowDirs.push(candidate);
+          else shadowFiles.push(candidate);
+        } catch {
+          // Does not exist: nothing to shadow, same fail-closed-skip posture
+          // as resolveAllowPrefixes.
+        }
+      }
+    }
+    return { projectRoot: rootOf(ctx), cwd: ctx.cwd, network: sandbox.network, roBindPaths, shadowDirs, shadowFiles };
   };
 
   // ---- readable footer ----
@@ -925,6 +1000,20 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         "warning",
       );
     }
+    const sandboxResult = restoreSandboxFromEntries(entries, SANDBOX_ENTRY_TYPE);
+    sandbox = sandboxResult.sandbox;
+    if (sandboxResult.ignoredMalformed > 0) {
+      ctx.ui.notify(
+        `Control plane: ignored ${sandboxResult.ignoredMalformed} malformed sandbox entr${sandboxResult.ignoredMalformed === 1 ? "y" : "ies"}; ${sandboxResult.restored ? "restored the latest valid sandbox setting" : "starting with the sandbox off"}.`,
+        "warning",
+      );
+    }
+    if (sandbox.enabled && !isBwrapAvailable()) {
+      ctx.ui.notify(
+        "Control plane: bwrap sandbox was enabled in this session but the `bwrap` binary is no longer on PATH. Bash calls will fail until it is reinstalled or /bwrap off is run.",
+        "warning",
+      );
+    }
     if (policyLoadError !== null) {
       ctx.ui.notify(`Control plane: ${policyLoadError}`, "warning");
     }
@@ -1124,6 +1213,34 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
   // ---- tool authorization ----
 
+  /**
+   * Applied only once a call has already been allowed (by policy, or by
+   * user confirmation) - sandboxing is orthogonal to authorization, not a
+   * replacement for it. `event.input` mutation here relies on the documented
+   * Pi extension contract ("event.input is mutable. Mutate it in place to
+   * patch tool arguments before execution.", types.d.ts on ToolCallEvent).
+   * Fails closed: if bwrap is missing, the call is blocked rather than
+   * silently running unsandboxed, since the user explicitly turned this on.
+   */
+  const applySandboxIfEnabled = (
+    event: ToolCallEvent,
+    ctx: ExtensionContext,
+  ): { ok: true } | { ok: false; reason: string } => {
+    if (!sandbox.enabled) return { ok: true };
+    if (event.toolName !== "bash") return { ok: true };
+    if (!isBwrapAvailable()) {
+      return {
+        ok: false,
+        reason:
+          "[control plane] Bwrap sandbox is on (/bwrap on) but the `bwrap` binary is not on PATH. " +
+          "Failing closed rather than running this command unsandboxed - install bubblewrap, or run /bwrap off.",
+      };
+    }
+    const bashEvent = event as BashToolCallEvent;
+    bashEvent.input.command = buildSandboxedCommand(bashEvent.input.command, sandboxOptionsFor(ctx));
+    return { ok: true };
+  };
+
   pi.on("tool_call", async (event: ToolCallEvent, ctx) => {
     const decision = evaluateToolCall({
       toolName: event.toolName,
@@ -1150,6 +1267,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           at: new Date().toISOString(),
         });
       }
+      const sandboxResult = applySandboxIfEnabled(event, ctx);
+      if (!sandboxResult.ok) return { block: true, reason: sandboxResult.reason };
       return;
     }
 
@@ -1178,7 +1297,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         .filter((line): line is string => line !== null)
         .join("\n");
       const approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, detail);
-      if (approved) return;
+      if (approved) {
+        const sandboxResult = applySandboxIfEnabled(event, ctx);
+        if (!sandboxResult.ok) return { block: true, reason: sandboxResult.reason };
+        return;
+      }
       return {
         block: true,
         reason: `[control plane] Denied by user confirmation (${decision.rule}). The operation did not run.`,
@@ -1601,6 +1724,81 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           scratchpad = clearScratchpad();
           persistScratchpad();
           ctx.ui.notify("Scratchpad cleared.", "info");
+          return;
+        }
+      }
+    },
+  });
+
+  pi.registerCommand("bwrap", {
+    description: "Real OS-level sandboxing for bash (bubblewrap), separate from /mode sandboxed",
+    getArgumentCompletions: (prefix) => {
+      const subs = ["status", "on", "off", "network on", "network off"];
+      const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
+      return matches.length > 0 ? matches.map((s) => ({ value: s, label: s })) : null;
+    },
+    handler: async (args, ctx) => {
+      const command = parseBwrapArgs(args);
+      switch (command.kind) {
+        case "usage":
+          emit("usage", [
+            "Usage: /bwrap [status|on|off|network on|network off]",
+            "  /bwrap             — show current sandbox status",
+            "  /bwrap on          — wrap every allowed bash call in bubblewrap (unprivileged",
+            "                       Linux namespaces): project root read-write, system",
+            "                       toolchains + $HOME read-only, credential paths from",
+            "                       policy/default-policy.json blanked, network unshared",
+            "  /bwrap off         — stop wrapping bash calls (default)",
+            "  /bwrap network on  — allow sandboxed commands to reach the network",
+            "  /bwrap network off — unshare networking again (default when sandbox is on)",
+            "",
+            "This is real kernel-enforced isolation via bwrap, independent of and stackable",
+            "with /mode execute-restricted's \"sandboxed\" alias, which is Pi-level policy",
+            "only. See docs/SECURITY.md for exactly what bwrap does and does not guarantee.",
+          ]);
+          return;
+        case "status": {
+          const bwrapLine = isBwrapAvailable() ? "bwrap binary: found on PATH" : "bwrap binary: NOT found on PATH";
+          emit("bwrap", [
+            `Sandbox: ${sandbox.enabled ? "on" : "off"}`,
+            `Network: ${sandbox.network ? "on (shared)" : "off (unshared)"}`,
+            bwrapLine,
+          ]);
+          return;
+        }
+        case "on": {
+          if (!isBwrapAvailable()) {
+            ctx.ui.notify(
+              "The `bwrap` (bubblewrap) binary was not found on PATH. Install it first - sandboxing cannot be enabled without it.",
+              "error",
+            );
+            return;
+          }
+          sandbox = { ...sandbox, enabled: true };
+          persistSandbox();
+          updateStatus(ctx);
+          ctx.ui.notify(
+            `Bwrap sandbox enabled (network ${sandbox.network ? "on" : "off"}). Every allowed bash call now runs isolated.`,
+            "info",
+          );
+          return;
+        }
+        case "off": {
+          sandbox = { ...sandbox, enabled: false };
+          persistSandbox();
+          updateStatus(ctx);
+          ctx.ui.notify("Bwrap sandbox disabled. Bash calls run directly on the host again.", "info");
+          return;
+        }
+        case "network": {
+          sandbox = { ...sandbox, network: command.on };
+          persistSandbox();
+          updateStatus(ctx);
+          ctx.ui.notify(
+            `Sandbox networking ${command.on ? "enabled" : "disabled"}.` +
+              (sandbox.enabled ? "" : " (Sandbox is currently off; this takes effect once /bwrap on is run.)"),
+            "info",
+          );
           return;
         }
       }
