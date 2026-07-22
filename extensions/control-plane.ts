@@ -1567,15 +1567,20 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   });
 
   // ---- web search tool (searxng-backed, see websearch.ts) ----
+  // Named "local_web_search", not the more obvious "web_search": pi-web-access
+  // (if installed) already registers a tool literally named "web_search", and
+  // Pi's tool registry is last-registered-wins with no collision detection or
+  // picker - reusing that name would silently shadow whichever one loads
+  // second, not error or merge. See the note on READ_TOOLS in tool-policy.ts.
 
   if (TypeBoxType !== null) {
     const T = TypeBoxType;
     pi.registerTool({
-      name: "web_search",
-      label: "Web Search",
+      name: "local_web_search",
+      label: "Local Web Search",
       description:
-        "Search the web via the user's local searxng instance. Read-only: never mutates anything, available in every mode including Discuss/Plan/Verify.",
-      promptSnippet: "web_search(query) — search the web via local searxng",
+        "Search the web via the user's local searxng instance (free, no API key). Read-only: never mutates anything, available in every mode including Discuss/Plan/Verify.",
+      promptSnippet: "local_web_search(query) — search the web via local searxng",
       parameters: T.Object({
         query: T.String({ description: "The search query." }),
       }) as never,

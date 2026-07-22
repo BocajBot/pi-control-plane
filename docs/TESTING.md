@@ -11,7 +11,7 @@ No dependencies: Node 22's built-in test runner executes the TypeScript directly
 | File | Covers |
 |---|---|
 | `state.test.ts` | Safe defaults, serialization round-trip, malformed/unknown-schema rejection, compaction-safe restoration, guard-never-restored, cycle orders (all six modes), no fallback above Read-only |
-| `tool-policy.test.ts` | Classification (incl. `web_search` as read), canonicalization (traversal, symlink escape, malformed paths — uses real temp dirs and symlinks), deny patterns, policy validation (schema v2, `allowPathPrefixes`), the full phase × autonomy decision matrix incl. Unattended, out-of-root allowlist behavior, invalid-policy fallback |
+| `tool-policy.test.ts` | Classification (incl. `local_web_search` as read), canonicalization (traversal, symlink escape, malformed paths — uses real temp dirs and symlinks), deny patterns, policy validation (schema v2, `allowPathPrefixes`), the full phase × autonomy decision matrix incl. Unattended, out-of-root allowlist behavior, invalid-policy fallback |
 | `redaction.test.ts` | Every redaction category with fabricated credentials; non-secret text preserved; determinism |
 | `context-snapshot.test.ts` | Normalization stability, hash stability, no-raw-secret persistence, all diff categories, deterministic ordering |
 | `context-editor.test.ts` | Context serialization/parsing round-trip, overlay merge/invalidation, edit application |
@@ -22,7 +22,7 @@ No dependencies: Node 22's built-in test runner executes the TypeScript directly
 | `ui.test.ts` | Status/mode display strings, footer stats formatting, context-warning thresholds, draft/added-context counters |
 | `scratchpad.test.ts` | Note CRUD, truncation and capacity limits, strict validation, compaction-safe restoration, injection-block rendering (incl. the empty-scratchpad-renders-nothing rule) |
 | `websearch.test.ts` | searxng URL building, response parsing (missing URL/results dropped gracefully), network/HTTP/JSON failure handling (caught, never thrown), result formatting |
-| `extension-harness.test.ts` | The real entry against a fake Pi API: attended deny-blocks/approve-allows, no-UI fail-closed, full `/interpret` guard lifecycle with diagnostics, cross-"session" restoration incl. tool toggles, sandboxed alias warning, injection block + verified excision + honest failure, hotkey cycling through all six modes, `/scratchpad` end-to-end incl. system-prompt injection, `web_search` tool registration, Unattended's task-brief gate and per-call audit logging |
+| `extension-harness.test.ts` | The real entry against a fake Pi API: attended deny-blocks/approve-allows, no-UI fail-closed, full `/interpret` guard lifecycle with diagnostics, cross-"session" restoration incl. tool toggles, sandboxed alias warning, injection block + verified excision + honest failure, hotkey cycling through all six modes, `/scratchpad` end-to-end incl. system-prompt injection, `local_web_search` tool registration, Unattended's task-brief gate and per-call audit logging |
 
 Expected result: `pass 151, fail 0`.
 

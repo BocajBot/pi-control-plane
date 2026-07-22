@@ -149,9 +149,11 @@ Sessions saved before the merge restore safely: a legacy combination that no lon
 
 Then edit `extensions/control-plane.ts` in this repo and change `"alt+p"` to `"shift+tab"` in the `registerShortcut` call near the bottom, and run `/reload`. Trade-off: you lose one-key thinking-level cycling on its default key.
 
-## Web search (`web_search` tool)
+## Web search (`local_web_search` tool)
 
 Registered directly by this package (no separate extension needed): searches the user's local searxng instance rather than a paid API. Classified as a read tool — available in every mode including Discuss/Plan/Verify, not gated behind Execute, since it never mutates anything. Targets `http://127.0.0.1:8888` by default; override with the `PI_CONTROL_PLANE_SEARXNG_URL` environment variable if searxng runs elsewhere. If `typebox` (the parameter-schema library) is not resolvable in the current environment, the tool is silently not registered rather than failing extension load — same fallback pattern already used for the Pi SDK imports themselves.
+
+**Named `local_web_search`, not the more obvious `web_search`:** if you also have `pi-web-access` (or any other extension shipping a tool literally named `web_search`) installed, Pi's tool registry is a flat last-registered-wins map — there is no collision error and no picker the way colliding *command* names get one. A same-named tool from an extension that loads later in `packages` (`~/.pi/agent/settings.json`) would silently and completely replace this one; the model would never see it again, with no warning anywhere. Check `pi list` and grep for `registerTool` in anything else you install before assuming a new tool this package adds is actually reaching the model.
 
 ## Example workflow
 
@@ -204,7 +206,8 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 - Provider-payload length/hash appear only after the first LLM call of a session (the payload must be observed to be measured).
 - Secret redaction is pattern-based: it reduces risk, it does not guarantee detection of every secret.
 - Restricted and Unattended modes are policy enforcement inside Pi's process — **not** an operating-system sandbox (see `docs/SECURITY.md`).
-- `web_search` depends on a local searxng instance being reachable; if it is not, the tool returns a clear error string to the model rather than throwing, but there is no fallback search source (deliberately not a paid API — see `docs/ARCHITECTURE.md`).
+- `local_web_search` depends on a local searxng instance being reachable; if it is not, the tool returns a clear error string to the model rather than throwing, but there is no fallback search source (deliberately not a paid API — see `docs/ARCHITECTURE.md`).
+- Tool-name collisions across extensions are silent (last-registered-wins, no error) — unlike command-name collisions, which Pi disambiguates automatically. Verify with `pi list` + a grep for `registerTool` before assuming a newly added tool is actually reaching the model, especially after installing another extension.
 - Live behavior is validated headlessly by `node tests/smoke/rpc-smoke.mjs` (17 checks over pi's RPC mode against llama-swap); only TUI rendering of dialogs/widget and terminal hotkey delivery still need a human check. See `docs/TESTING.md`.
 
 ## Development

@@ -140,13 +140,13 @@ async function startInterpretTurn(pi: FakePi, ctx: unknown) {
   );
 }
 
-test("registers the commands, the web_search tool, and the shortcuts", async () => {
+test("registers the commands, the local_web_search tool, and the shortcuts", async () => {
   const pi = await boot();
   for (const name of ["context", "task", "mode", "interpret", "scratchpad"]) {
     assert.ok(pi.commands.has(name), `missing /${name}`);
   }
   assert.ok(!pi.commands.has("phase") && !pi.commands.has("autonomy"), "phase/autonomy merged into /mode");
-  assert.ok(pi.tools.has("web_search"), "web_search tool not registered");
+  assert.ok(pi.tools.has("local_web_search"), "local_web_search tool not registered");
   for (const key of ["alt+c", "alt+p"]) {
     assert.ok(pi.shortcuts.has(key), `missing shortcut ${key}`);
   }
@@ -537,10 +537,10 @@ test("/scratchpad: add, list, remove, clear round-trip and persist across a sess
   assert.ok(finalLines.some((l) => /empty/i.test(l)));
 });
 
-test("web_search tool: registered read-only and reachable even outside Execute mode", async () => {
+test("local_web_search tool: registered read-only and reachable even outside Execute mode", async () => {
   const pi = await boot();
-  const tool = pi.tools.get("web_search");
-  assert.ok(tool, "web_search must be registered");
+  const tool = pi.tools.get("local_web_search");
+  assert.ok(tool, "local_web_search must be registered");
   // Executing it does not require network access to prove the wiring: a
   // failed fetch (no searxng reachable in this test environment) still
   // returns a structured, non-throwing result via formatSearchResults.

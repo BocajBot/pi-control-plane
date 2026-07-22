@@ -25,11 +25,16 @@ import {
   type ToolDecision,
 } from "./types.ts";
 
-/** "web_search" is the control plane's own registered tool (searxng-backed,
- * see websearch.ts): it never mutates and never touches the filesystem, so
- * it is classified as read - available in Discuss/Plan/Verify like any other
- * read tool, not treated as an unclassified "unknown" tool. */
-export const READ_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls", "web_search"]);
+/** "local_web_search" is the control plane's own registered tool
+ * (searxng-backed, see websearch.ts): it never mutates and never touches the
+ * filesystem, so it is classified as read - available in Discuss/Plan/Verify
+ * like any other read tool, not treated as an unclassified "unknown" tool.
+ * Named "local_..." rather than the more obvious "web_search" specifically
+ * to avoid colliding with pi-web-access's tool of that exact name - Pi's
+ * tool registry is a flat last-registered-wins map (no picker/disambiguation
+ * the way colliding command names get), so a same-named tool from another
+ * installed extension would silently and completely shadow this one. */
+export const READ_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls", "local_web_search"]);
 export const MUTATING_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
 export const SHELL_TOOLS: ReadonlySet<string> = new Set(["bash"]);
 
