@@ -44,17 +44,30 @@ function displayAutonomy(autonomy: Autonomy): string {
       return "Attended";
     case "restricted":
       return "Restricted";
+    case "unattended":
+      return "Unattended";
   }
 }
 
 /** One label for the merged mode setting. Legacy combos are shown honestly. */
-export function displayMode(phase: Phase, autonomy: Autonomy, policyValid: boolean): string {
+export function displayMode(
+  phase: Phase,
+  autonomy: Autonomy,
+  policyValid: boolean,
+  hasAcceptedTask?: boolean,
+): string {
   if (phase === "execute") {
     if (autonomy === "attended") return "Execute (attended)";
     if (autonomy === "restricted") {
       return policyValid
         ? "Execute (restricted)"
         : "Execute (restricted — policy invalid, enforcing read-only)";
+    }
+    if (autonomy === "unattended") {
+      if (!policyValid) return "Execute (unattended — policy invalid, enforcing read-only)";
+      return hasAcceptedTask === false
+        ? "Execute (unattended — no accepted task, mutation blocked)"
+        : "Execute (unattended)";
     }
     return "Execute (read-only)";
   }
@@ -190,7 +203,8 @@ export function formatStatus(
   const ctx =
     contextPercent !== null ? `Context ${Math.round(contextPercent)}% full` : "Context unknown";
   const guard = state.interpretGuard?.active ? " | Interpreting (tools disabled)" : "";
-  return `Mode: ${displayMode(state.phase, state.autonomy, policyValid)} | ${task} | ${ctx}${guard}`;
+  const mode = displayMode(state.phase, state.autonomy, policyValid, state.acceptedTask !== null);
+  return `Mode: ${mode} | ${task} | ${ctx}${guard}`;
 }
 
 function unavailable(value: string | number | null | undefined): string {
@@ -229,7 +243,7 @@ export function renderContextSummary(
   for (const t of templates) lines.push(`  ${t.name}`);
   lines.push(`Active tools (${snapshot.tools.length}): ${snapshot.tools.join(", ") || "Unavailable"}`);
   lines.push("");
-  lines.push(`Mode:            ${displayMode(snapshot.phase, snapshot.autonomy, true)}`);
+  lines.push(`Mode:            ${displayMode(snapshot.phase, snapshot.autonomy, true, snapshot.hasAcceptedTask)}`);
   lines.push(`Accepted task:   ${snapshot.hasAcceptedTask ? "yes" : "no"}`);
   lines.push("");
   lines.push(
@@ -369,16 +383,21 @@ function truncateField(text: string, max: number): string {
  */
 export function buildInjectionBlock(state: ControlPlaneState, policyValid: boolean): string {
   const lines: string[] = [];
+  const hasAcceptedTask = state.acceptedTask !== null;
   lines.push("[PI CONTROL PLANE]");
   lines.push("");
-  lines.push(`Mode: ${displayMode(state.phase, state.autonomy, policyValid)}`);
+  lines.push(`Mode: ${displayMode(state.phase, state.autonomy, policyValid, hasAcceptedTask)}`);
   lines.push(
     state.phase === "execute"
       ? state.autonomy === "restricted" && policyValid
         ? "Mutating tools are policy-enforced: project-root writes only, credential paths and shell blocked."
-        : state.autonomy === "attended"
-          ? "Risky tool calls (writes, shell, out-of-root reads) require user confirmation."
-          : "Mutating tools are blocked in this mode."
+        : state.autonomy === "unattended" && policyValid
+          ? hasAcceptedTask
+            ? "Mutating tools are policy-enforced (same rules as restricted) with no human reviewing in real time. Stay strictly within the accepted task's scope."
+            : "Mutating tools are blocked: unattended mode requires an accepted task brief first."
+          : state.autonomy === "attended"
+            ? "Risky tool calls (writes, shell, out-of-root reads) require user confirmation."
+            : "Mutating tools are blocked in this mode."
       : "Mutating tools are blocked in this mode.",
   );
   const taskStatus =
@@ -509,7 +528,8 @@ export function renderHotkeyCheatsheet(): string[] {
     "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",
     "  alt+s  send preview: everything the next message will send, editable, incl. your draft",
     "  alt+t  tool-profile picker (enter: apply this session · space: set as default)",
-    "  alt+p  cycle mode: Discuss > Plan > Execute (attended) > Execute (restricted) > Verify",
+    "  alt+p  cycle mode: Discuss > Plan > Execute (attended) > Execute (restricted)",
+    "         > Execute (unattended) > Verify",
     "  alt+h  this cheat sheet",
     "",
     "Pi essentials:",
@@ -548,15 +568,19 @@ export const USAGE = {
     "  /task clear       — clear accepted and pending task state (asks to confirm)",
   ],
   mode: [
-    "Usage: /mode [discuss|plan|execute|execute-restricted|verify]",
+    "Usage: /mode [discuss|plan|execute|execute-restricted|execute-unattended|verify]",
     "  discuss             — talk only; every mutating tool blocked, reads allowed",
     "  plan                — same permissions as discuss, framed for planning",
     "  execute             — changes allowed; risky operations ask for confirmation",
     "  execute-restricted  — changes allowed inside the project root under",
     "                        policy/default-policy.json; no confirmations, shell blocked",
+    "  execute-unattended  — same policy enforcement as execute-restricted, but requires",
+    "                        an accepted task brief first (/interpret + /task accept, or",
+    "                        /task set) and logs every allowed call as a diagnostic entry",
+    "                        for later review — meant for running with nobody watching",
     "  verify              — read-only again, framed for checking the work",
     "  (\"restricted\" means execute-restricted; \"sandboxed\" too, with a warning:",
-    "   it is policy enforcement, not an OS sandbox)",
+    "   it is policy enforcement, not an OS sandbox; \"unattended\" means execute-unattended)",
   ],
   interpret: [
     "Usage: /interpret <task request>",

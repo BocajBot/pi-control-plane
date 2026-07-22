@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "denyPathBasenames": [
     ".env",
     ".netrc",
@@ -21,5 +21,6 @@
     "/.kube/",
     "/.docker/config.json"
   ],
-  "allowBash": false
+  "allowBash": false,
+  "allowPathPrefixes": []
 }

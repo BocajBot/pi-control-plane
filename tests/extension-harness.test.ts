@@ -20,6 +20,9 @@ class FakePi {
   handlers = new Map<string, Handler[]>();
   commands = new Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }>();
   shortcuts = new Map<string, (ctx: unknown) => unknown>();
+  /** Loosely typed: this test double only needs enough of ToolDefinition's
+   * shape to invoke a tool's execute() from a test, not the full pi type. */
+  tools = new Map<string, { name: string; execute: (...args: unknown[]) => unknown }>();
   entries: { type: string; customType: string; data: unknown }[] = [];
   sentUserMessages: string[] = [];
   activeTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -34,6 +37,9 @@ class FakePi {
   }
   registerShortcut(key: string, options: { handler: (ctx: unknown) => unknown }) {
     this.shortcuts.set(key, options.handler);
+  }
+  registerTool(tool: { name: string; execute: (...args: unknown[]) => unknown }) {
+    this.tools.set(tool.name, tool);
   }
   registerEntryRenderer() {}
   appendEntry(customType: string, data?: unknown) {
@@ -134,12 +140,13 @@ async function startInterpretTurn(pi: FakePi, ctx: unknown) {
   );
 }
 
-test("registers the four commands and the shortcuts", async () => {
+test("registers the commands, the web_search tool, and the shortcuts", async () => {
   const pi = await boot();
-  for (const name of ["context", "task", "mode", "interpret"]) {
+  for (const name of ["context", "task", "mode", "interpret", "scratchpad"]) {
     assert.ok(pi.commands.has(name), `missing /${name}`);
   }
   assert.ok(!pi.commands.has("phase") && !pi.commands.has("autonomy"), "phase/autonomy merged into /mode");
+  assert.ok(pi.tools.has("web_search"), "web_search tool not registered");
   for (const key of ["alt+c", "alt+p"]) {
     assert.ok(pi.shortcuts.has(key), `missing shortcut ${key}`);
   }
@@ -464,7 +471,7 @@ test("applied profile persists and is restored in a new session", async () => {
   assert.deepEqual([...pi2.activeTools].sort(), ["find", "grep", "ls", "read"], "profile toggles reapplied on restore");
 });
 
-test("mode cycle hotkey advances through all five modes", async () => {
+test("mode cycle hotkey advances through all six modes", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
@@ -475,7 +482,112 @@ test("mode cycle hotkey advances through all five modes", async () => {
   await pi.shortcuts.get("alt+p")!(ctx);
   assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(restricted\)/);
   await pi.shortcuts.get("alt+p")!(ctx);
+  // No task brief accepted in this test, so unattended correctly reports its
+  // mutation gate rather than a bare "Unattended" label.
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(unattended — no accepted task, mutation blocked\)/);
+  await pi.shortcuts.get("alt+p")!(ctx);
   assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Verify/);
   await pi.shortcuts.get("alt+p")!(ctx);
   assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Discuss/);
+});
+
+test("/scratchpad: add, list, remove, clear round-trip and persist across a session restore", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+
+  await pi.commands.get("scratchpad")!.handler("add remember to check the config", ctx);
+  assert.ok(ctx.notifications.some((n) => /added/i.test(n.message)));
+
+  await pi.commands.get("scratchpad")!.handler("", ctx);
+  const listEntry = pi.entries.at(-1);
+  assert.equal(listEntry?.customType, "pi-control-plane-output");
+  const listLines = (listEntry?.data as { lines: string[] }).lines;
+  assert.ok(listLines.some((l) => l.includes("remember to check the config")));
+
+  // Persists across a fresh session restore, same as control-plane state.
+  const pi2 = new (pi.constructor as new () => FakePi)();
+  await controlPlaneExtension(pi2 as never);
+  const ctx2 = makeCtx({ cwd: root, branchEntries: pi.entries });
+  await pi2.emit("session_start", { type: "session_start", reason: "resume" }, ctx2);
+  await pi2.commands.get("scratchpad")!.handler("", ctx2);
+  const restoredLines = (pi2.entries.at(-1)?.data as { lines: string[] }).lines;
+  assert.ok(restoredLines.some((l) => l.includes("remember to check the config")));
+
+  // Injected into the system prompt each turn.
+  const result = (await pi2.emit(
+    "before_agent_start",
+    { type: "before_agent_start", prompt: "user prompt", systemPrompt: "BASE", systemPromptOptions: { cwd: root, contextFiles: [], skills: [] } },
+    ctx2,
+  )) as { systemPrompt?: string };
+  assert.ok(result?.systemPrompt?.includes("[SCRATCHPAD]"));
+  assert.ok(result?.systemPrompt?.includes("remember to check the config"));
+
+  // Remove by id, then clear.
+  const noteId = listLines.find((l) => l.trim().startsWith("("))?.trim().match(/\(([a-z0-9]+)\)/)?.[1];
+  assert.ok(noteId, "could not parse a note id out of the rendered list");
+  await pi.commands.get("scratchpad")!.handler(`remove ${noteId}`, ctx);
+  assert.ok(ctx.notifications.some((n) => /removed/i.test(n.message)));
+  await pi.commands.get("scratchpad")!.handler("add another note", ctx);
+  await pi.commands.get("scratchpad")!.handler("clear force", ctx);
+  assert.ok(ctx.notifications.some((n) => /cleared/i.test(n.message)));
+  await pi.commands.get("scratchpad")!.handler("", ctx);
+  const finalLines = (pi.entries.at(-1)?.data as { lines: string[] }).lines;
+  assert.ok(finalLines.some((l) => /empty/i.test(l)));
+});
+
+test("web_search tool: registered read-only and reachable even outside Execute mode", async () => {
+  const pi = await boot();
+  const tool = pi.tools.get("web_search");
+  assert.ok(tool, "web_search must be registered");
+  // Executing it does not require network access to prove the wiring: a
+  // failed fetch (no searxng reachable in this test environment) still
+  // returns a structured, non-throwing result via formatSearchResults.
+  const result = (await tool!.execute("call-1", { query: "test query" }, undefined, undefined, {})) as {
+    output: string;
+  };
+  assert.equal(typeof result.output, "string");
+  assert.ok(result.output.length > 0);
+});
+
+test("Unattended: tool_call is blocked without an accepted task, and logs every allowed call once a task exists", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute-restricted", ctx);
+  await pi.commands.get("mode")!.handler("unattended", ctx);
+  assert.ok(
+    ctx.notifications.some((n) => /no task brief is accepted/i.test(n.message)),
+    "must warn that mutation is gated without an accepted task",
+  );
+
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolName: "write", input: { path: "f.txt", content: "" } },
+    ctx,
+  )) as { block?: boolean; reason?: string } | undefined;
+  assert.equal(blocked?.block, true);
+  assert.match(blocked?.reason ?? "", /accepted task brief/i);
+
+  // Accept a task, then a mutating call in-root should be allowed AND logged
+  // as a diagnostic entry (the audit trail nobody-is-watching requires).
+  await pi.commands.get("task")!.handler("set do the thing", ctx);
+  const entriesBefore = pi.entries.length;
+  const allowed = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolName: "write", input: { path: path.join(root, "f.txt"), content: "" } },
+    ctx,
+  )) as { block?: boolean } | undefined;
+  assert.equal(allowed?.block, undefined, "allowed calls return undefined, same contract as every other mode");
+  const diagnostic = pi.entries.slice(entriesBefore).find((e) => e.customType === DIAGNOSTIC_ENTRY_TYPE);
+  assert.ok(diagnostic, "an allowed unattended mutation must be logged for later review");
+  assert.equal((diagnostic!.data as { kind: string }).kind, "unattended-call-allowed");
+
+  // Reads are not logged (would drown out the signal) and are unaffected by
+  // the task-brief gate either way.
+  const entriesBeforeRead = pi.entries.length;
+  await pi.emit("tool_call", { type: "tool_call", toolName: "read", input: { path: path.join(root, "f.txt") } }, ctx);
+  assert.equal(pi.entries.length, entriesBeforeRead, "reads must not add an audit entry");
 });

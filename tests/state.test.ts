@@ -123,21 +123,22 @@ test("phase normalization handles case and rejects invalid names", () => {
   assert.equal(normalizePhase(""), null);
 });
 
-test("autonomy normalization: sandboxed is only an alias for restricted", () => {
+test("autonomy normalization: sandboxed is only an alias for restricted; unattended is a direct value", () => {
   assert.deepEqual(resolveAutonomyInput("Read-Only"), { autonomy: "read-only", sandboxAliasUsed: false });
   assert.deepEqual(resolveAutonomyInput("sandboxed"), { autonomy: "restricted", sandboxAliasUsed: true });
-  assert.equal(resolveAutonomyInput("unattended"), null);
+  assert.deepEqual(resolveAutonomyInput("unattended"), { autonomy: "unattended", sandboxAliasUsed: false });
   assert.equal(resolveAutonomyInput("yolo"), null);
 });
 
-test("cycle orders: discuss->plan->execute->verify->discuss, read-only->attended->restricted->read-only", () => {
+test("cycle orders: discuss->plan->execute->verify->discuss, read-only->attended->restricted->unattended->read-only", () => {
   assert.equal(cyclePhase("discuss"), "plan");
   assert.equal(cyclePhase("plan"), "execute");
   assert.equal(cyclePhase("execute"), "verify");
   assert.equal(cyclePhase("verify"), "discuss");
   assert.equal(cycleAutonomy("read-only"), "attended");
   assert.equal(cycleAutonomy("attended"), "restricted");
-  assert.equal(cycleAutonomy("restricted"), "read-only");
+  assert.equal(cycleAutonomy("restricted"), "unattended");
+  assert.equal(cycleAutonomy("unattended"), "read-only");
 });
 
 test("task brief validation rejects fabricated shapes", () => {
@@ -146,11 +147,19 @@ test("task brief validation rejects fabricated shapes", () => {
   assert.notEqual(validateTaskBrief(directBrief("x")), null);
 });
 
-test("mode mapping: five modes round-trip; legacy combos are null", () => {
+test("mode mapping: six modes round-trip; legacy combos are null", () => {
   assert.deepEqual(stateForMode("discuss"), { phase: "discuss", autonomy: "read-only" });
   assert.deepEqual(stateForMode("execute"), { phase: "execute", autonomy: "attended" });
   assert.deepEqual(stateForMode("execute-restricted"), { phase: "execute", autonomy: "restricted" });
-  for (const mode of ["discuss", "plan", "execute", "execute-restricted", "verify"] as const) {
+  assert.deepEqual(stateForMode("execute-unattended"), { phase: "execute", autonomy: "unattended" });
+  for (const mode of [
+    "discuss",
+    "plan",
+    "execute",
+    "execute-restricted",
+    "execute-unattended",
+    "verify",
+  ] as const) {
     const { phase, autonomy } = stateForMode(mode);
     assert.equal(modeOf(phase, autonomy), mode);
   }
@@ -165,11 +174,12 @@ test("coerceToMode never escalates legacy combos", () => {
   assert.equal(coerceToMode("execute", "attended"), "execute");
 });
 
-test("cycleMode walks all five modes", () => {
+test("cycleMode walks all six modes", () => {
   assert.equal(cycleMode("discuss"), "plan");
   assert.equal(cycleMode("plan"), "execute");
   assert.equal(cycleMode("execute"), "execute-restricted");
-  assert.equal(cycleMode("execute-restricted"), "verify");
+  assert.equal(cycleMode("execute-restricted"), "execute-unattended");
+  assert.equal(cycleMode("execute-unattended"), "verify");
   assert.equal(cycleMode("verify"), "discuss");
 });
 

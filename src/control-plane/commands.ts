@@ -90,6 +90,9 @@ export function parseModeArgs(args: string): ModeCommand {
   if (trimmed === "sandboxed" || trimmed === "execute-sandboxed") {
     return { kind: "set", mode: "execute-restricted", sandboxAlias: true };
   }
+  if (trimmed === "unattended") {
+    return { kind: "set", mode: "execute-unattended", sandboxAlias: false };
+  }
   if ((MODES as readonly string[]).includes(trimmed)) {
     return { kind: "set", mode: trimmed as Mode, sandboxAlias: false };
   }
@@ -101,4 +104,31 @@ export type InterpretCommand = { kind: "run"; request: string } | { kind: "usage
 export function parseInterpretArgs(args: string): InterpretCommand {
   const trimmed = args.trim();
   return trimmed.length > 0 ? { kind: "run", request: trimmed } : { kind: "usage" };
+}
+
+export type ScratchpadCommand =
+  | { kind: "show" }
+  | { kind: "add"; text: string }
+  | { kind: "remove"; id: string }
+  | { kind: "clear"; force: boolean }
+  | { kind: "usage" };
+
+export function parseScratchpadArgs(args: string): ScratchpadCommand {
+  const trimmed = args.trim();
+  if (trimmed.length === 0) return { kind: "show" };
+  const [sub, ...rest] = trimmed.split(/\s+/);
+  switch (sub.toLowerCase()) {
+    case "add": {
+      const text = trimmed.slice(sub.length).trim();
+      return text.length > 0 ? { kind: "add", text } : { kind: "usage" };
+    }
+    case "remove":
+      return rest.length === 1 ? { kind: "remove", id: rest[0] } : { kind: "usage" };
+    case "clear":
+      if (rest.length === 0) return { kind: "clear", force: false };
+      if (rest.length === 1 && rest[0].toLowerCase() === "force") return { kind: "clear", force: true };
+      return { kind: "usage" };
+    default:
+      return { kind: "usage" };
+  }
 }

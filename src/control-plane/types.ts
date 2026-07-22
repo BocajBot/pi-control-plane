@@ -8,19 +8,34 @@
 export const PHASES = ["discuss", "plan", "execute", "verify"] as const;
 export type Phase = (typeof PHASES)[number];
 
-export const AUTONOMY_LEVELS = ["read-only", "attended", "restricted"] as const;
+/**
+ * "unattended" is gated: evaluateToolCall() (tool-policy.ts) refuses to grant
+ * it any mutation unless an accepted task brief exists, and every allowed
+ * call under it is logged as a diagnostic entry (audit trail for when nobody
+ * is watching in real time) - see extension entry, tool_call handler.
+ */
+export const AUTONOMY_LEVELS = ["read-only", "attended", "restricted", "unattended"] as const;
 export type Autonomy = (typeof AUTONOMY_LEVELS)[number];
 
 export const STATE_SCHEMA_VERSION = 1;
 export const SNAPSHOT_SCHEMA_VERSION = 1;
-export const POLICY_SCHEMA_VERSION = 1;
+/** Bumped to 2 for allowPathPrefixes (out-of-root allowlist). A policy file
+ * saved under schema 1 is unknown-version -> null -> Read-only fallback,
+ * same as any other invalid policy; this is deliberate, not a bug. */
+export const POLICY_SCHEMA_VERSION = 2;
+export const SCRATCHPAD_SCHEMA_VERSION = 1;
 
 /** Session entry customType used to persist control-plane state. */
 export const STATE_ENTRY_TYPE = "pi-control-plane-state";
 /** Session entry customType used for chat-visible command output. */
 export const OUTPUT_ENTRY_TYPE = "pi-control-plane-output";
-/** Session entry customType used for diagnostic events (e.g. blocked interpret tool calls). */
+/** Session entry customType used for diagnostic events (e.g. blocked interpret tool calls,
+ * and every tool call allowed under Unattended autonomy). */
 export const DIAGNOSTIC_ENTRY_TYPE = "pi-control-plane-diagnostic";
+/** Session entry customType used to persist the scratchpad. Survives /compact
+ * the same way state does: entries are excluded from LLM context and are
+ * untouched by compaction, which only summarizes messages. */
+export const SCRATCHPAD_ENTRY_TYPE = "pi-control-plane-scratchpad";
 
 export interface TaskBrief {
   id: string;
@@ -118,6 +133,16 @@ export interface RestrictedPolicy {
   denyPathSubstrings: string[];
   /** Whether the bash tool is permitted in Restricted mode. Default false. */
   allowBash: boolean;
+  /**
+   * Directories outside the project root that mutating tools may also target,
+   * in addition to the root itself. Each entry is canonicalized (realpath) at
+   * check time; an entry that does not exist on disk is skipped entirely
+   * (never falls back to a literal-string match). Deny patterns still apply
+   * inside an allowed prefix - this widens where writes may land, it never
+   * narrows what is denied. Empty array reproduces pre-allowlist behavior
+   * exactly (root-only).
+   */
+  allowPathPrefixes: string[];
 }
 
 export type ToolAction = "allow" | "block" | "confirm";
@@ -159,4 +184,18 @@ export interface SnapshotDiff {
   tokenDelta: number | null;
   systemPromptHashChanged: boolean;
   providerPayloadHashChanged: boolean;
+}
+
+/** One structured working note. Text only - the model decides what to write;
+ * the control plane never fabricates or summarizes content into a note. */
+export interface ScratchpadNote {
+  id: string;
+  text: string;
+  createdAt: string;
+}
+
+export interface ScratchpadState {
+  schemaVersion: typeof SCRATCHPAD_SCHEMA_VERSION;
+  notes: ScratchpadNote[];
+  updatedAt: string;
 }

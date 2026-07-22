@@ -26,6 +26,7 @@ import {
   parseContextArgs,
   parseInterpretArgs,
   parseModeArgs,
+  parseScratchpadArgs,
   parseTaskArgs,
 } from "../src/control-plane/commands.ts";
 import { diffIsEmpty, diffSnapshots } from "../src/control-plane/context-diff.ts";
@@ -45,6 +46,16 @@ import {
   pendingFromResponse,
 } from "../src/control-plane/interpretation.ts";
 import { redactSecrets } from "../src/control-plane/redaction.ts";
+import {
+  addNote,
+  clearScratchpad,
+  emptyScratchpad,
+  generateNoteId,
+  removeNote,
+  renderScratchpadBlock,
+  renderScratchpadList,
+  restoreScratchpadFromEntries,
+} from "../src/control-plane/scratchpad.ts";
 import {
   type CustomEntryLike,
   cycleMode,
@@ -98,9 +109,18 @@ import {
   DIAGNOSTIC_ENTRY_TYPE,
   OUTPUT_ENTRY_TYPE,
   type RestrictedPolicy,
+  SCRATCHPAD_ENTRY_TYPE,
+  type ScratchpadState,
   type SnapshotItem,
   STATE_ENTRY_TYPE,
 } from "../src/control-plane/types.ts";
+import {
+  DEFAULT_SEARXNG_BASE_URL,
+  formatSearchResults,
+  type GetFetch,
+  MAX_RESULTS as MAX_SEARCH_RESULTS,
+  searchSearxng,
+} from "../src/control-plane/websearch.ts";
 
 const STATUS_KEY = "control-plane";
 const WIDGET_KEY = "control-plane-context";
@@ -149,6 +169,17 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     visibleWidth = null;
     truncateToWidth = null;
   }
+  // TypeBox backs pi.registerTool()'s parameter schema. Same
+  // dynamic-import-with-fallback pattern as the two imports above: if it
+  // cannot be resolved (e.g. under the unit-test harness, outside Pi), the
+  // web_search tool is simply not registered rather than throwing at load.
+  let TypeBoxType: Record<string, (...args: never[]) => unknown> | null = null;
+  try {
+    const typebox = (await import("typebox")) as unknown as { Type: typeof TypeBoxType };
+    TypeBoxType = typebox.Type;
+  } catch {
+    TypeBoxType = null;
+  }
 
   /** Key matching that works under both legacy escape codes and the kitty
    * keyboard protocol (pi enables kitty in supporting terminals, where e.g.
@@ -165,6 +196,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   };
 
   let state: ControlPlaneState = defaultState();
+  let scratchpad: ScratchpadState = emptyScratchpad();
   let policy: RestrictedPolicy | null = null;
   let policyLoadError: string | null = null;
   let lastPayloadMeta: { length: number; hash: string } | null = null;
@@ -350,6 +382,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   const persist = () => {
     state.updatedAt = new Date().toISOString();
     pi.appendEntry(STATE_ENTRY_TYPE, state);
+  };
+
+  const persistScratchpad = () => {
+    scratchpad.updatedAt = new Date().toISOString();
+    pi.appendEntry(SCRATCHPAD_ENTRY_TYPE, scratchpad);
   };
 
   const updateStatus = (ctx: ExtensionContext) => {
@@ -692,9 +729,16 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     if (sandboxAlias) {
       ctx.ui.notify(SANDBOX_ALIAS_WARNING, "warning");
     }
-    if (mode === "execute-restricted" && policy === null) {
+    if ((mode === "execute-restricted" || mode === "execute-unattended") && policy === null) {
       ctx.ui.notify(
-        "Execute (restricted) selected but the policy failed to load/validate — enforcement falls back to read-only.",
+        `${mode === "execute-restricted" ? "Execute (restricted)" : "Execute (unattended)"} selected but the policy failed to load/validate — enforcement falls back to read-only.`,
+        "warning",
+      );
+      return;
+    }
+    if (mode === "execute-unattended" && state.acceptedTask === null) {
+      ctx.ui.notify(
+        "Execute (unattended) selected but no task brief is accepted yet — every mutating call will be blocked until you run /interpret + /task accept, or /task set <text>.",
         "warning",
       );
       return;
@@ -848,6 +892,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         "warning",
       );
     }
+    const scratchpadResult = restoreScratchpadFromEntries(entries, SCRATCHPAD_ENTRY_TYPE);
+    scratchpad = scratchpadResult.scratchpad;
+    if (scratchpadResult.ignoredMalformed > 0) {
+      ctx.ui.notify(
+        `Control plane: ignored ${scratchpadResult.ignoredMalformed} malformed scratchpad entr${scratchpadResult.ignoredMalformed === 1 ? "y" : "ies"}; ${scratchpadResult.restored ? "restored the latest valid scratchpad" : "starting with an empty scratchpad"}.`,
+        "warning",
+      );
+    }
     if (policyLoadError !== null) {
       ctx.ui.notify(`Control plane: ${policyLoadError}`, "warning");
     }
@@ -968,6 +1020,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     }
 
     prompt += "\n\n" + buildInjectionBlock(state, policy !== null);
+    const scratchpadBlock = renderScratchpadBlock(scratchpad, LIMITS.injectionTotal);
+    if (scratchpadBlock !== null) prompt += "\n\n" + scratchpadBlock;
     if (state.interpretGuard?.active) {
       interpretTurnStarted = true;
       prompt +=
@@ -1040,9 +1094,23 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       cwd: ctx.cwd,
       policy,
       ops: pathOps,
+      hasAcceptedTask: state.acceptedTask !== null,
     });
 
-    if (decision.action === "allow") return;
+    if (decision.action === "allow") {
+      // Unattended mode has nobody watching in real time; every allowed call
+      // (not just blocked ones) is logged so there is something to review
+      // afterward. Read tools are excluded - the volume would drown out the
+      // signal, and reads are not the risk this level gates.
+      if (state.autonomy === "unattended" && decision.riskCategory !== "read") {
+        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+          kind: "unattended-call-allowed",
+          toolName: event.toolName,
+          at: new Date().toISOString(),
+        });
+      }
+      return;
+    }
 
     if (decision.action === "confirm") {
       if (!ctx.hasUI) {
@@ -1373,7 +1441,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   pi.registerCommand("mode", {
     description: "Show or set the mode (discuss/plan/execute/execute-restricted/verify)",
     getArgumentCompletions: (prefix) => {
-      const subs = ["discuss", "plan", "execute", "execute-restricted", "verify"];
+      const subs = ["discuss", "plan", "execute", "execute-restricted", "execute-unattended", "verify"];
       const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
       return matches.length > 0 ? matches.map((s) => ({ value: s, label: s })) : null;
     },
@@ -1424,6 +1492,105 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       pi.sendUserMessage(buildInterpretationPrompt(command.request));
     },
   });
+
+  pi.registerCommand("scratchpad", {
+    description: "Structured working notes that survive /compact (show, add, remove, clear)",
+    getArgumentCompletions: (prefix) => {
+      const subs = ["add ", "remove ", "clear"];
+      const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
+      return matches.length > 0 ? matches.map((s) => ({ value: s, label: s.trim() })) : null;
+    },
+    handler: async (args, ctx) => {
+      const command = parseScratchpadArgs(args);
+      switch (command.kind) {
+        case "usage":
+          emit("usage", [
+            "Usage: /scratchpad [add <text>|remove <id>|clear]",
+            "  /scratchpad          — list current notes",
+            "  /scratchpad add <text>  — add a note (survives /compact)",
+            "  /scratchpad remove <id> — remove one note by id",
+            "  /scratchpad clear       — remove all notes (asks to confirm)",
+          ]);
+          return;
+        case "show":
+          emit("scratchpad", renderScratchpadList(scratchpad));
+          return;
+        case "add": {
+          const id = generateNoteId(new Set(scratchpad.notes.map((n) => n.id)));
+          const result = addNote(scratchpad, command.text, id);
+          if (!result.ok) {
+            ctx.ui.notify(result.error, "error");
+            return;
+          }
+          scratchpad = result.scratchpad;
+          persistScratchpad();
+          ctx.ui.notify(`Note (${result.note.id}) added.`, "info");
+          return;
+        }
+        case "remove": {
+          const result = removeNote(scratchpad, command.id);
+          if (!result.ok) {
+            ctx.ui.notify(result.error, "error");
+            return;
+          }
+          scratchpad = result.scratchpad;
+          persistScratchpad();
+          ctx.ui.notify(`Note (${command.id}) removed.`, "info");
+          return;
+        }
+        case "clear": {
+          if (scratchpad.notes.length === 0) {
+            ctx.ui.notify("Scratchpad is already empty.", "info");
+            return;
+          }
+          let confirmed = command.force;
+          if (!confirmed && ctx.hasUI) {
+            confirmed = await ctx.ui.confirm(
+              "Clear the scratchpad?",
+              `This removes all ${scratchpad.notes.length} note(s). This cannot be undone.`,
+            );
+          } else if (!confirmed) {
+            ctx.ui.notify('No confirmation UI available. Use "/scratchpad clear force" to clear without a dialog.', "warning");
+            return;
+          }
+          if (!confirmed) {
+            ctx.ui.notify("Clear cancelled.", "info");
+            return;
+          }
+          scratchpad = clearScratchpad();
+          persistScratchpad();
+          ctx.ui.notify("Scratchpad cleared.", "info");
+          return;
+        }
+      }
+    },
+  });
+
+  // ---- web search tool (searxng-backed, see websearch.ts) ----
+
+  if (TypeBoxType !== null) {
+    const T = TypeBoxType;
+    pi.registerTool({
+      name: "web_search",
+      label: "Web Search",
+      description:
+        "Search the web via the user's local searxng instance. Read-only: never mutates anything, available in every mode including Discuss/Plan/Verify.",
+      promptSnippet: "web_search(query) — search the web via local searxng",
+      parameters: T.Object({
+        query: T.String({ description: "The search query." }),
+      }) as never,
+      execute: async (_toolCallId, params) => {
+        const query = (params as { query: string }).query;
+        const fetchGet: GetFetch = async (url) => {
+          const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+          return { ok: res.ok, status: res.status, json: () => res.json() as Promise<unknown> };
+        };
+        const baseUrl = process.env.PI_CONTROL_PLANE_SEARXNG_URL ?? DEFAULT_SEARXNG_BASE_URL;
+        const outcome = await searchSearxng(baseUrl, query, fetchGet, MAX_SEARCH_RESULTS);
+        return { output: formatSearchResults(outcome) } as never;
+      },
+    });
+  }
 
   // ---- context editor (alt+e) ----
 

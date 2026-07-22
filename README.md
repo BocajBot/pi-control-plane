@@ -4,7 +4,7 @@ A control-plane extension for the [Pi coding agent](https://github.com/earendil-
 
 1. **What the model can see** (context files, skills, tools, system prompt, token usage) — `/context`
 2. **What the model thinks it is doing** (an explicit, reviewable task brief) — `/task`, `/interpret`
-3. **What the model is allowed to do right now** (one merged setting: Discuss / Plan / Execute (attended) / Execute (restricted) / Verify) — `/mode`
+3. **What the model is allowed to do right now** (one merged setting: Discuss / Plan / Execute (attended) / Execute (restricted) / Execute (unattended) / Verify) — `/mode`
 
 The central rule: **you can inspect and correct Pi's context and task interpretation before Pi is permitted to modify anything.** Enforcement is real — a mode that would only change a label is treated as a bug.
 
@@ -93,6 +93,15 @@ Runs one **no-tools turn** in which the model must restate the task as twelve re
 
 Your request text is wrapped in delimiters and treated as data — it cannot masquerade as control-plane instructions.
 
+### `/scratchpad` — structured working notes that survive `/compact`
+
+- `/scratchpad` — list current notes (id, timestamp, text).
+- `/scratchpad add <text>` — add a note.
+- `/scratchpad remove <id>` — remove one note.
+- `/scratchpad clear` — remove all notes (asks to confirm; `force` skips the dialog).
+
+Persisted as its own session entry, the same way control-plane state is: excluded from LLM context, untouched by `/compact` (which only summarizes messages), and injected into the system prompt every turn so the model can actually see and use its own notes across a compaction that would otherwise have wiped that context. The control plane never writes, edits, or summarizes a note's text itself — it only stores what it is told and shows back what is there.
+
 ### `/mode` — what is the model allowed to do right now?
 
 One merged setting (workflow stage and permissions used to be two separate settings — `/phase` and `/autonomy` — which allowed contradictory combos like Execute + Read-only; they are now one):
@@ -100,7 +109,8 @@ One merged setting (workflow stage and permissions used to be two separate setti
 - `discuss` — talk only. Every mutating tool blocked; reads (`read`, `grep`, `find`, `ls`) allowed. Shell is blocked entirely — commands are never parsed to guess whether they are "safe" (pattern-level command filtering proved unreliable in practice; whole-tool denial is reliable).
 - `plan` — same permissions as discuss, framed for planning.
 - `execute` — changes allowed, **attended**: reads inside the project run freely; anything risky (writes, edits, shell, unknown tools, reads outside the project root) pops a confirmation dialog showing the tool, risk category, target/command, and whether it is inside the project root. Denying blocks the call. If no confirmation UI exists (e.g. print mode), risky calls are blocked — never silently allowed.
-- `execute-restricted` — changes allowed under policy, no confirmations: writes only inside the project root (paths canonicalized, symlinks resolved, `..` traversal caught), credential paths blocked (`.env`, `.ssh`, `.aws`, etc. — see `policy/default-policy.json`), shell blocked by default, unknown tools always blocked. If the policy file is missing or invalid, enforcement falls back to read-only. (`restricted` is accepted as shorthand.)
+- `execute-restricted` — changes allowed under policy, no confirmations: writes only inside the project root or an allowlisted prefix (`policy.allowPathPrefixes`, off by default — see `policy/default-policy.json`), paths canonicalized, symlinks resolved, `..` traversal caught, credential paths blocked (`.env`, `.ssh`, `.aws`, etc.), shell blocked by default, unknown tools always blocked. If the policy file is missing or invalid, enforcement falls back to read-only. (`restricted` is accepted as shorthand.)
+- `execute-unattended` — identical policy enforcement to `execute-restricted` (same file, same rules, same allowlist), but requires an accepted task brief first — `/interpret` + `/task accept`, or `/task set <text>` — before any mutating or shell call is permitted; without one, every mutating call is blocked (reads are unaffected). Every *allowed* mutating/shell call is logged as a diagnostic entry, since this is the one mode meant to run with nobody confirming actions in real time. (`unattended` is accepted as shorthand.) See `docs/SECURITY.md` for the full reasoning.
 - `verify` — read-only again, framed for checking the work. When verification reveals a needed change, switch back to `execute`.
 - `sandboxed` is accepted only as an alias for `execute-restricted` and prints: *"This mode provides Pi-level policy restrictions, not operating-system isolation. It is not a security sandbox."* The status bar never displays "Sandboxed". See `docs/SECURITY.md` for why this distinction matters.
 
@@ -114,7 +124,7 @@ Sessions saved before the merge restore safely: a legacy combination that no lon
 | `alt+e` | Open the session context in **nvim** to view and edit it |
 | `alt+s` | **Send preview**: everything the next message will send — system prompt (with the auto-appended control-plane block shown read-only), full history, and your unsent draft — in nvim, editable |
 | `alt+t` | Tool-profile picker: modal with profile names in a left column (1/5 width) and, on the right, the selected profile's description over its tool list. ↑/↓ or j/k select, **enter** applies for this session only, **space** also saves it as the default for new sessions (written to `policy/profiles.json` as `defaultProfile`), esc closes; `*` marks the active profile, `(default)` the default one |
-| `alt+p` | Cycle mode: Discuss → Plan → Execute (attended) → Execute (restricted) → Verify |
+| `alt+p` | Cycle mode: Discuss → Plan → Execute (attended) → Execute (restricted) → Execute (unattended) → Verify |
 | `alt+h` | Hotkey cheat sheet as a centered modal (any key closes; `/hotkeys` lists everything) |
 
 `alt+s` is `alt+e` plus two things: lines prefixed `#> ` show the control-plane state block exactly as it will be appended to the system prompt (read-only — edits to them are ignored), and a `DRAFT` section holds your unsent message — editing it rewrites the input box on save. Context edits behave identically to `alt+e` (override, `Context edited`, `/context restore`).
@@ -138,6 +148,10 @@ Sessions saved before the merge restore safely: a legacy combination that no lon
 ```
 
 Then edit `extensions/control-plane.ts` in this repo and change `"alt+p"` to `"shift+tab"` in the `registerShortcut` call near the bottom, and run `/reload`. Trade-off: you lose one-key thinking-level cycling on its default key.
+
+## Web search (`web_search` tool)
+
+Registered directly by this package (no separate extension needed): searches the user's local searxng instance rather than a paid API. Classified as a read tool — available in every mode including Discuss/Plan/Verify, not gated behind Execute, since it never mutates anything. Targets `http://127.0.0.1:8888` by default; override with the `PI_CONTROL_PLANE_SEARXNG_URL` environment variable if searxng runs elsewhere. If `typebox` (the parameter-schema library) is not resolvable in the current environment, the tool is silently not registered rather than failing extension load — same fallback pattern already used for the Pi SDK imports themselves.
 
 ## Example workflow
 
@@ -166,12 +180,14 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 | `src/control-plane/context-diff.ts` | Compares two snapshots for `/context diff`. |
 | `src/control-plane/interpretation.ts` | Builds the `/interpret` prompt, parses the response, creates task briefs. |
 | `src/control-plane/toggles.ts` | Verified excision of toggled-off sources from the system prompt. |
-| `src/control-plane/commands.ts` | Argument parsing for the five commands (so bad input handling is testable). |
+| `src/control-plane/scratchpad.ts` | Structured working notes: validation, persistence/restoration, and rendering. Same patterns as `state.ts`, applied to its own entry type. |
+| `src/control-plane/websearch.ts` | Pure searxng client (injected fetch): URL building, response parsing, result formatting. No Pi imports. |
+| `src/control-plane/commands.ts` | Argument parsing for every command (so bad input handling is testable). |
 | `src/control-plane/ui.ts` | All text formatting: status line, summaries, denial messages, the injected state block. |
-| `policy/default-policy.json` | Restricted-mode rules: denied path names/substrings, whether bash is allowed (default: no). Edit carefully — an invalid file makes Restricted behave as Read-only. |
-| `tests/` | 77 unit and harness tests. Run with `npm test`. |
+| `policy/default-policy.json` | Restricted/Unattended-mode rules: denied path names/substrings, whether bash is allowed (default: no), out-of-root allowlist prefixes (default: none). Edit carefully — an invalid or old-schema file makes Restricted/Unattended behave as Read-only. |
+| `tests/` | 151 unit and harness tests. Run with `npm test`. |
 | `docs/` | Architecture, security model, and testing guides. |
-| `IMPLEMENTATION-PROMPT.md` | The specification this milestone was built from. |
+| `IMPLEMENTATION-PROMPT.md` | The specification the first milestone was built from. Milestone 2 (unattended autonomy, web search, scratchpad, out-of-root allowlists) is documented in `docs/ARCHITECTURE.md`. |
 
 ## Pi built-ins worth knowing alongside this
 
@@ -187,7 +203,8 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 - "Reason Pi says the tool is needed" in Attended confirmations shows `Unavailable` — Pi does not expose the model's rationale for a tool call.
 - Provider-payload length/hash appear only after the first LLM call of a session (the payload must be observed to be measured).
 - Secret redaction is pattern-based: it reduces risk, it does not guarantee detection of every secret.
-- Restricted mode is policy enforcement inside Pi's process — **not** an operating-system sandbox (see `docs/SECURITY.md`).
+- Restricted and Unattended modes are policy enforcement inside Pi's process — **not** an operating-system sandbox (see `docs/SECURITY.md`).
+- `web_search` depends on a local searxng instance being reachable; if it is not, the tool returns a clear error string to the model rather than throwing, but there is no fallback search source (deliberately not a paid API — see `docs/ARCHITECTURE.md`).
 - Live behavior is validated headlessly by `node tests/smoke/rpc-smoke.mjs` (17 checks over pi's RPC mode against llama-swap); only TUI rendering of dialogs/widget and terminal hotkey delivery still need a human check. See `docs/TESTING.md`.
 
 ## Development

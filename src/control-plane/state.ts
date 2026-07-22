@@ -73,11 +73,24 @@ export function cycleAutonomy(current: Autonomy): Autonomy {
 
 /**
  * The user-facing merged setting. Internally phase and autonomy stay separate
- * (enforcement precedence is unchanged), but only these five combinations are
+ * (enforcement precedence is unchanged), but only these six combinations are
  * reachable: Discuss/Plan/Verify imply read-only, and Execute chooses between
- * attended and restricted.
+ * attended, restricted, and unattended.
+ *
+ * execute-unattended is deliberately placed last in the cycle, after
+ * execute-restricted: alt+p / /mode cycling reaches it only by passing
+ * through the other four modes first, never as an accidental single step
+ * from Discuss. It carries its own gate (an accepted task brief is required)
+ * enforced in tool-policy.ts, not here - this module only sequences modes.
  */
-export const MODES = ["discuss", "plan", "execute", "execute-restricted", "verify"] as const;
+export const MODES = [
+  "discuss",
+  "plan",
+  "execute",
+  "execute-restricted",
+  "execute-unattended",
+  "verify",
+] as const;
 export type Mode = (typeof MODES)[number];
 
 export function stateForMode(mode: Mode): { phase: Phase; autonomy: Autonomy } {
@@ -90,6 +103,8 @@ export function stateForMode(mode: Mode): { phase: Phase; autonomy: Autonomy } {
       return { phase: "execute", autonomy: "attended" };
     case "execute-restricted":
       return { phase: "execute", autonomy: "restricted" };
+    case "execute-unattended":
+      return { phase: "execute", autonomy: "unattended" };
     case "verify":
       return { phase: "verify", autonomy: "read-only" };
   }
@@ -100,6 +115,7 @@ export function modeOf(phase: Phase, autonomy: Autonomy): Mode | null {
   if (phase === "execute") {
     if (autonomy === "attended") return "execute";
     if (autonomy === "restricted") return "execute-restricted";
+    if (autonomy === "unattended") return "execute-unattended";
     return null;
   }
   return autonomy === "read-only" ? (phase as Mode) : null;

@@ -25,7 +25,11 @@ import {
   type ToolDecision,
 } from "./types.ts";
 
-export const READ_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
+/** "web_search" is the control plane's own registered tool (searxng-backed,
+ * see websearch.ts): it never mutates and never touches the filesystem, so
+ * it is classified as read - available in Discuss/Plan/Verify like any other
+ * read tool, not treated as an unclassified "unknown" tool. */
+export const READ_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls", "web_search"]);
 export const MUTATING_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
 export const SHELL_TOOLS: ReadonlySet<string> = new Set(["bash"]);
 
@@ -93,6 +97,39 @@ export function isInsideRoot(canonical: string, canonicalRoot: string): boolean 
   return canonical === canonicalRoot || canonical.startsWith(canonicalRoot + path.sep);
 }
 
+/**
+ * Resolve policy.allowPathPrefixes to canonical (realpath'd) directories,
+ * silently dropping any entry that does not exist. Never falls back to a
+ * literal-string match for a missing entry - an allowlist entry that cannot
+ * be resolved grants nothing, the same fail-closed posture as every other
+ * path check in this module. Resolved fresh on every call (no caching): this
+ * module is synchronous and already does per-call fs work in canonicalizePath.
+ */
+export function resolveAllowPrefixes(policy: RestrictedPolicy, ops: PathOps): string[] {
+  const resolved: string[] = [];
+  for (const raw of policy.allowPathPrefixes) {
+    try {
+      if (ops.exists(raw)) resolved.push(ops.realpath(raw));
+    } catch {
+      // Unresolvable configured prefix grants nothing.
+    }
+  }
+  return resolved;
+}
+
+/** True when canonical falls inside the project root OR inside one of the
+ * policy's allowlisted prefixes. Restricted-mode mutation uses this in place
+ * of a bare isInsideRoot check; deny patterns still apply either way. */
+export function isAllowedDestination(
+  canonical: string,
+  projectRoot: string,
+  policy: RestrictedPolicy,
+  ops: PathOps,
+): boolean {
+  if (isInsideRoot(canonical, projectRoot)) return true;
+  return resolveAllowPrefixes(policy, ops).some((prefix) => isInsideRoot(canonical, prefix));
+}
+
 /** Returns the matching deny rule as a string, or null when nothing matches. */
 export function matchesDenyPatterns(canonical: string, policy: RestrictedPolicy): string | null {
   const segments = canonical.split(path.sep).filter((s) => s.length > 0);
@@ -118,6 +155,10 @@ function isStringArrayOfNonEmpty(value: unknown): value is string[] {
   );
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
 /** Strict policy validation. Anything unexpected -> null -> Read-only fallback. */
 export function validatePolicy(value: unknown): RestrictedPolicy | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -126,7 +167,17 @@ export function validatePolicy(value: unknown): RestrictedPolicy | null {
   if (!isStringArrayOfNonEmpty(record.denyPathBasenames)) return null;
   if (!isStringArrayOfNonEmpty(record.denyPathSubstrings)) return null;
   if (typeof record.allowBash !== "boolean") return null;
-  const knownKeys = new Set(["schemaVersion", "denyPathBasenames", "denyPathSubstrings", "allowBash"]);
+  // Entries themselves may not be empty strings (same rule as deny lists),
+  // but the array itself may be empty (no allowlist widening at all).
+  if (!isStringArray(record.allowPathPrefixes)) return null;
+  if ((record.allowPathPrefixes as string[]).some((p) => p.trim().length === 0)) return null;
+  const knownKeys = new Set([
+    "schemaVersion",
+    "denyPathBasenames",
+    "denyPathSubstrings",
+    "allowBash",
+    "allowPathPrefixes",
+  ]);
   for (const key of Object.keys(record)) {
     if (!knownKeys.has(key)) return null;
   }
@@ -135,6 +186,7 @@ export function validatePolicy(value: unknown): RestrictedPolicy | null {
     denyPathBasenames: record.denyPathBasenames,
     denyPathSubstrings: record.denyPathSubstrings,
     allowBash: record.allowBash,
+    allowPathPrefixes: record.allowPathPrefixes as string[],
   };
 }
 
@@ -150,6 +202,16 @@ export interface EvaluateInput {
   /** Null means the Restricted policy failed to load/validate. */
   policy: RestrictedPolicy | null;
   ops: PathOps;
+  /**
+   * Whether an accepted task brief currently exists. Only consulted for
+   * autonomy "unattended": mutation is refused entirely without one. Ignored
+   * by every other autonomy level (Attended and Restricted both already
+   * require a human to have explicitly chosen that mode for this session;
+   * Unattended is the one level meant to run with nobody watching in real
+   * time, so it is the one level that requires a human-reviewed scope
+   * boundary to already be in place before it starts).
+   */
+  hasAcceptedTask: boolean;
 }
 
 function targetPathOf(toolInput: Record<string, unknown>): string | null {
@@ -219,7 +281,10 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
 
   // Read-oriented tools: allowed in every phase, subject to autonomy checks.
   if (category === "read") {
-    if (autonomy === "restricted") {
+    // Unattended reuses Restricted's read policy unchanged: observation is
+    // not the risk this level gates (mutation is, via hasAcceptedTask below),
+    // so reads are not held back waiting on a task brief.
+    if (autonomy === "restricted" || autonomy === "unattended") {
       if (policy === null) {
         // Policy failed: Read-only semantics. Reads are still allowed.
         return allow("policy-fallback:read", risk, insideRoot);
@@ -285,7 +350,23 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
     );
   }
 
-  // Restricted.
+  // Unattended: gated on an accepted task brief existing before ANY mutation
+  // is permitted (no human is watching in real time to catch scope drift).
+  // Once gated, enforcement below is byte-for-byte the same RestrictedPolicy
+  // logic Restricted uses - autonomy is not referenced again past this point,
+  // so both levels share every remaining check (policy fallback, shell,
+  // unknown tools, destination, deny patterns).
+  if (autonomy === "unattended" && !input.hasAcceptedTask) {
+    return block(
+      "unattended:no-task",
+      "Unattended mode requires an accepted task brief before any mutation is permitted - there is no human in the loop to catch scope drift here.",
+      risk,
+      insideRoot,
+      "Run /interpret then /task accept, or /task set <text>, first. Or use /mode execute-restricted / execute for a human-attended session instead.",
+    );
+  }
+
+  // Restricted (and, past the gate above, Unattended).
   if (policy === null) {
     return block(
       "policy-fallback",
@@ -330,10 +411,14 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
       null,
     );
   }
-  if (!isInsideRoot(canonical, projectRoot)) {
+  if (!isAllowedDestination(canonical, projectRoot, policy, ops)) {
+    const hint =
+      policy.allowPathPrefixes.length > 0
+        ? ` (also checked ${policy.allowPathPrefixes.length} allowlisted prefix(es) in policy.allowPathPrefixes; none matched)`
+        : "";
     return block(
       "restricted:outside-root",
-      `Writing to "${canonical}" is blocked: it is outside the project root "${projectRoot}".`,
+      `Writing to "${canonical}" is blocked: it is outside the project root "${projectRoot}"${hint}.`,
       risk,
       false,
     );
@@ -344,10 +429,14 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
       "restricted:credential-path",
       `Writing to "${canonical}" is blocked by the Restricted policy (${denied}).`,
       risk,
-      true,
+      isInsideRoot(canonical, projectRoot),
     );
   }
-  return allow("restricted:in-root", risk, true);
+  return allow(
+    isInsideRoot(canonical, projectRoot) ? "restricted:in-root" : "restricted:allowlisted-outside-root",
+    risk,
+    isInsideRoot(canonical, projectRoot),
+  );
 }
 
 function capitalize(s: string): string {

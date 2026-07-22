@@ -69,20 +69,30 @@ Implemented in `tool-policy.ts: evaluateToolCall`, in this order; the first appl
 ```text
 interpretation guard   -> block everything, reads included
 workflow phase         -> Discuss/Plan/Verify block mutate/shell/unknown
-autonomy               -> read-only: block; attended: confirm; restricted: policy
+autonomy               -> read-only: block; attended: confirm;
+                          restricted/unattended: policy (unattended adds one
+                          earlier check: no accepted task -> block outright)
 (the user sets both through one /mode setting: Discuss/Plan/Verify imply
-read-only, Execute picks attended or restricted; internally the two layers
-stay separate and legacy saved combos are coerced without escalation)
-tool classification    -> read / mutate / shell / unknown (unknown never safe)
-path checks            -> canonicalize (symlinks, .., nonexistent tails),
-                          root containment, credential-path deny list
+read-only, Execute picks attended, restricted, or unattended; internally the
+two layers stay separate and legacy saved combos are coerced without
+escalation)
+tool classification    -> read / mutate / shell / unknown (unknown never safe;
+                          web_search is a registered custom tool classified read)
+path checks            -> canonicalize (symlinks, .., nonexistent tails), then
+                          root containment OR an allowlisted prefix
+                          (policy.allowPathPrefixes, realpath'd at check time),
+                          then the credential-path deny list either way
 ```
 
 The confirm action is executed by the entry (`ctx.ui.confirm`); a denied dialog or a missing dialog API both result in a block.
 
-## Extension seams for later milestones
+## Milestone 2: unattended autonomy, web search, scratchpad, out-of-root allowlists
 
-- **Unattended autonomy**: add `"unattended"` to `AUTONOMY_LEVELS` and a branch in `evaluateToolCall`; state validation, cycling, and status handling pick it up from the constant. Deliberately absent until the enforcement layer has proven itself.
-- **Web search**: a future custom tool registered via `pi.registerTool`, classified in `tool-policy.ts` (target: the existing local searxng instance on :8888, not a paid API).
-- **Scratchpad**: a new custom-entry type alongside the state entry; survives compaction the same way.
-- **Out-of-root allowlists**: extend `RestrictedPolicy` with `allowPathPrefixes`; `validatePolicy` and `matchesDenyPatterns` are the only touch points.
+All four seams named in the original milestone plan are now implemented, each exactly where that plan said it would live:
+
+- **Unattended autonomy** (`tool-policy.ts`, `types.ts`, `state.ts`): `"unattended"` is a fourth `AUTONOMY_LEVELS` value and `execute-unattended` a sixth `Mode`, both picked up automatically by the existing cycling/validation/restoration code (no new state-machine logic needed there). `evaluateToolCall` gates it on `hasAcceptedTask`: every mutating call is blocked with `unattended:no-task` until a task brief is accepted, and once gated, enforcement reuses the exact same `RestrictedPolicy` logic Restricted uses (same rule names, same deny patterns, same root containment) — Unattended is Restricted's policy engine plus a mandatory scope boundary, not a separate, more permissive path. Reads are not gated by the task-brief requirement (observation is not the risk this level targets). The entry point (`extensions/control-plane.ts`, `tool_call` handler) logs every *allowed* mutating/shell call as a `DIAGNOSTIC_ENTRY_TYPE` entry — an audit trail for when nobody is watching in real time. Entering the mode without an accepted task shows a warning instead of silently doing nothing.
+- **Web search** (`websearch.ts`, new): pure module (injected `fetch`, no Pi imports) targeting the user's local searxng instance (`http://127.0.0.1:8888` by default, overridable via `PI_CONTROL_PLANE_SEARXNG_URL`) via its `?format=json` API — explicitly not a paid API, matching the original plan. Registered as `web_search` via `pi.registerTool` in the entry point, dynamically importing `typebox` with the same load-outside-Pi fallback pattern already used for `@earendil-works/pi-coding-agent`/`@earendil-works/pi-tui` (if `typebox` is unavailable, the tool is simply not registered). Classified as a `read` tool in `tool-policy.ts` (`READ_TOOLS`), so it is available in Discuss/Plan/Verify like `grep` or `find`, not gated behind Execute.
+- **Scratchpad** (`scratchpad.ts`, new): a `SCRATCHPAD_ENTRY_TYPE` custom entry alongside the state entry, restored with the identical walk-backward-take-first-valid pattern as `state.ts:restoreFromEntries` (`restoreScratchpadFromEntries`). Survives `/compact` the same way state does. `/scratchpad [add <text>|remove <id>|clear]`. Notes are injected into the system prompt each turn (`before_agent_start`, after the task-brief block) via `renderScratchpadBlock`, capped at `LIMITS.injectionTotal`; an empty scratchpad renders nothing (no per-turn noise). The control plane never writes, edits, or summarizes note content on the model's behalf — same "never invent what you cannot observe" posture as the rest of this codebase.
+- **Out-of-root allowlists** (`tool-policy.ts`, `types.ts`, `policy/default-policy.json`): `RestrictedPolicy.allowPathPrefixes: string[]` (policy schema bumped 1 -> 2 — a schema-1 policy file is an unknown version and fails closed to Read-only, deliberately, not a bug). `isAllowedDestination` widens the Restricted-mode mutate-branch destination check: a canonical target outside the project root is still permitted if it falls under one of the allowlisted prefixes, each resolved via `realpath` at check time; an entry that does not exist on disk is skipped entirely (never a literal-string fallback match). Deny patterns (credential paths) still apply inside an allowlisted prefix exactly as inside the root — the allowlist only widens *where* writes may land, never *what* is denied. Applies to Unattended too, since it shares the same policy-enforcement code path.
+
+Test coverage: `tests/tool-policy.test.ts` (unattended gate + shared-enforcement equivalence + allowlist, pure), `tests/scratchpad.test.ts`, `tests/websearch.test.ts` (pure, injected fetch/fs), `tests/extension-harness.test.ts` (end-to-end: command registration, tool registration, gate + audit-log wiring, scratchpad persistence + injection).
