@@ -126,6 +126,10 @@ import {
   STATE_ENTRY_TYPE,
 } from "../src/control-plane/types.ts";
 import {
+  verifyCompletion,
+  type VerificationReport,
+} from "../src/control-plane/verify.ts";
+import {
   DEFAULT_SEARXNG_BASE_URL,
   formatSearchResults,
   type GetFetch,
@@ -228,6 +232,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let lastIncomingCount = 0;
   let lastBaseSystemPrompt: string | null = null;
   let contextOverlay: Overlay | null = null;
+  // Paths recorded as written/edited this session (memory only). Feeds the
+  // /verify completion-criteria pass; never persisted, so it is cleared by
+  // a restart — /verify then falls back to on-disk existence checks.
+  const writtenFiles = new Set<string>();
   // Exact token counting (memory only; raw payloads are never persisted).
   let lastProviderRequest: { payload: unknown; model: string; baseUrl: string } | null = null;
   let lastTokenCount: TokenCountResult | null = null;
@@ -1256,6 +1264,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     });
 
     if (decision.action === "allow") {
+      // Record files written/edited this session so /verify has observable
+      // evidence of what actually changed (independent of autonomy mode).
+      const input = event.input as Record<string, unknown>;
+      const targetPath = typeof input.path === "string" ? input.path : null;
+      const command = typeof input.command === "string" ? input.command : null;
+      if ((event.toolName === "edit" || event.toolName === "write") && targetPath !== null) {
+        writtenFiles.add(targetPath);
+      }
       // Unattended mode has nobody watching in real time; every allowed call
       // (not just blocked ones) is logged so there is something to review
       // afterward. Read tools are excluded - the volume would drown out the
@@ -1264,6 +1280,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
           kind: "unattended-call-allowed",
           toolName: event.toolName,
+          ...(targetPath !== null ? { targetPath } : {}),
+          ...(command !== null ? { command } : {}),
           at: new Date().toISOString(),
         });
       }
