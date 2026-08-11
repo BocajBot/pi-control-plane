@@ -56,10 +56,26 @@ export interface VerificationReport {
   at: string;
 }
 
-/** Pure basename — no node `path` import needed; handles both separators. */
-function basename(p: string): string {
-  const normalized = p.replace(/\\/g, "/");
-  return normalized.slice(normalized.lastIndexOf("/") + 1);
+/**
+ * Normalize a path to forward slashes without leading/trailing separators.
+ * Pure — no node `path` import needed.
+ */
+function normalizePath(p: string): string {
+  return p.replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+/**
+ * A written path satisfies a deliverable when it IS the deliverable, or when
+ * the deliverable ends with it at a path-separator boundary. This rejects the
+ * basename-only fallback: "tmp/report.md" must NOT satisfy "docs/report.md",
+ * but "src/foo.ts" does satisfy "/abs/src/foo.ts".
+ */
+function isDeliverableMatch(written: string, deliverable: string): boolean {
+  const w = normalizePath(written);
+  const d = normalizePath(deliverable);
+  if (w === d) return true;
+  if (w === "") return false;
+  return d.endsWith(w) && d[d.length - w.length - 1] === "/";
 }
 
 /**
@@ -71,7 +87,7 @@ export function verifyCompletion(input: VerifyInput): VerificationReport {
   const { brief, writtenFiles, auditEntries, fileExists } = input;
 
   const deliverables = brief.deliverables.map((d) => {
-    const written = writtenFiles.some((wf) => wf === d || basename(wf) === basename(d));
+    const written = writtenFiles.some((wf) => isDeliverableMatch(wf, d));
     if (written) {
       return { deliverable: d, satisfied: true, evidence: `written (${d})` };
     }

@@ -128,6 +128,7 @@ import {
 import {
   verifyCompletion,
   type VerificationReport,
+  type VerifyAuditEntry,
 } from "../src/control-plane/verify.ts";
 import {
   DEFAULT_SEARXNG_BASE_URL,
@@ -236,6 +237,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // /verify completion-criteria pass; never persisted, so it is cleared by
   // a restart — /verify then falls back to on-disk existence checks.
   const writtenFiles = new Set<string>();
+  // In-memory audit of allowed mutating/risk calls this session (memory only,
+  // never persisted). Feeds the /verify completion-criteria match on toolName,
+  // targetPath and command; cleared by a restart like writtenFiles.
+  const sessionAudit: VerifyAuditEntry[] = [];
   // Exact token counting (memory only; raw payloads are never persisted).
   let lastProviderRequest: { payload: unknown; model: string; baseUrl: string } | null = null;
   let lastTokenCount: TokenCountResult | null = null;
@@ -1171,6 +1176,35 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
   // ---- interpretation completion ----
 
+  // Read-only completion-criteria seam (Task 1 /verify). Observes the accepted
+  // brief against what the session actually changed; never a model-judged
+  // verdict. Shared by the agent_end seam and the /verify command.
+  const runVerification = (ctx: ExtensionContext | ExtensionCommandContext): void => {
+    const brief = state.acceptedTask;
+    if (brief === null) return;
+    const report: VerificationReport = verifyCompletion({
+      brief,
+      writtenFiles: Array.from(writtenFiles),
+      auditEntries: sessionAudit,
+      fileExists: (p) => fs.existsSync(p),
+    });
+    const lines = [
+      `deliverables ${report.satisfiedDeliverables}/${report.totalDeliverables}`,
+      `criteria    ${report.satisfiedCriteria}/${report.totalCriteria}`,
+      ...report.deliverables.map((d) => `${d.satisfied ? "OK   " : "MISS"} ${d.deliverable} — ${d.evidence}`),
+      ...report.completionCriteria.map((c) => `${c.satisfied ? "OK   " : "MISS"} ${c.criterion} — ${c.evidence}`),
+    ];
+    emit("verify", lines);
+    const allMet =
+      report.satisfiedDeliverables === report.totalDeliverables &&
+      report.satisfiedCriteria === report.totalCriteria;
+    ctx.ui.notify(
+      `verify: ${report.satisfiedDeliverables}/${report.totalDeliverables} deliverables, ` +
+        `${report.satisfiedCriteria}/${report.totalCriteria} criteria satisfied`,
+      allMet ? "success" : "warning",
+    );
+  };
+
   pi.on("agent_end", (event, ctx) => {
     // For the forward-looking count: the turn's final assistant reply is the
     // one message the last provider request has not seen yet.
@@ -1178,6 +1212,9 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     if (tail?.role === "assistant") {
       messagesSinceLastRequest.push(serializeForCounting(tail));
     }
+    // Read-only completion-criteria seam: observe what this turn changed against
+    // the accepted brief (no-op unless a task is accepted).
+    runVerification(ctx);
     const guard = state.interpretGuard;
     if (!guard?.active) return;
     if (!interpretTurnStarted) return; // stale agent_end from an earlier turn
@@ -1271,6 +1308,15 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       const command = typeof input.command === "string" ? input.command : null;
       if ((event.toolName === "edit" || event.toolName === "write") && targetPath !== null) {
         writtenFiles.add(targetPath);
+      }
+      // Record every allowed non-read call so /verify can match completion
+      // criteria against what was actually done (tool name / target / command).
+      if (decision.riskCategory !== "read") {
+        sessionAudit.push({
+          toolName: event.toolName,
+          ...(targetPath !== null ? { targetPath } : {}),
+          ...(command !== null ? { command } : {}),
+        });
       }
       // Unattended mode has nobody watching in real time; every allowed call
       // (not just blocked ones) is logged so there is something to review
@@ -1672,6 +1718,21 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       persist();
       updateStatus(ctx);
       pi.sendUserMessage(buildInterpretationPrompt(command.request));
+    },
+  });
+
+  pi.registerCommand("verify", {
+    description: "Read-only completion-criteria check against the accepted task brief",
+    handler: async (_args, ctx) => {
+      if (!ctx.isIdle()) {
+        ctx.ui.notify("The agent is busy. Wait for the current turn to finish, then run /verify.", "error");
+        return;
+      }
+      if (state.acceptedTask === null) {
+        ctx.ui.notify("No accepted task brief — run /task accept (or /task set) first.", "warning");
+        return;
+      }
+      runVerification(ctx);
     },
   });
 
