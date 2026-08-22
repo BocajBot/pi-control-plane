@@ -4,3 +4,8 @@ node_modules/
 *.bak.*
 rpc-smoke-*.txt
 interp-test.txt
+.pi/
+# build artifacts (derived; rebuilt from source by bin/build-isolated.mjs)
+*.tar.gz
+*.zip
+.hermes/

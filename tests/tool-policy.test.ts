@@ -54,6 +54,7 @@ test("tool classification: read tools known, unknown tools never safe", () => {
   assert.equal(classifyTool("find"), "read");
   assert.equal(classifyTool("ls"), "read");
   assert.equal(classifyTool("local_web_search"), "read");
+  assert.equal(classifyTool("transcribe_audio"), "read");
   assert.equal(classifyTool("edit"), "mutate");
   assert.equal(classifyTool("write"), "mutate");
   assert.equal(classifyTool("bash"), "shell");
@@ -64,6 +65,13 @@ test("tool classification: read tools known, unknown tools never safe", () => {
 test("local_web_search is treated as a read tool: available in Discuss without Execute/autonomy elevation", () => {
   const decision = evaluateToolCall(
     evalInput({ toolName: "local_web_search", phase: "discuss", autonomy: "read-only" }),
+  );
+  assert.equal(decision.action, "allow");
+});
+
+test("transcribe_audio is treated as a read tool: available in Discuss without Execute/autonomy elevation", () => {
+  const decision = evaluateToolCall(
+    evalInput({ toolName: "transcribe_audio", phase: "discuss", autonomy: "read-only" }),
   );
   assert.equal(decision.action, "allow");
 });

@@ -34,7 +34,17 @@ import {
  * tool registry is a flat last-registered-wins map (no picker/disambiguation
  * the way colliding command names get), so a same-named tool from another
  * installed extension would silently and completely shadow this one. */
-export const READ_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls", "local_web_search"]);
+/** "transcribe_audio" (see transcription.ts) reads one file the user named
+ * and returns text; it writes nothing, so it is a read tool by the same
+ * reasoning as local_web_search above. */
+export const READ_TOOLS: ReadonlySet<string> = new Set([
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "local_web_search",
+  "transcribe_audio",
+]);
 export const MUTATING_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
 export const SHELL_TOOLS: ReadonlySet<string> = new Set(["bash"]);
 

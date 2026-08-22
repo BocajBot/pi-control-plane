@@ -1,0 +1,48 @@
+{
+  "schema": "pi-harness-phase3-live-evidence-v1",
+  "observedAt": "2026-08-22",
+  "harnessVersion": "0.3.0",
+  "piVersion": "0.84.1",
+  "nodeVersion": "v22.22.3",
+  "platform": "linux 7.2.0-1-cachyos-kfdfix x64",
+  "coordinatorModel": "llama-swap/qwopus-35b-a3b-coder",
+  "childModel": "llama-swap/qwopus-35b-a3b-coder",
+  "posture": {
+    "autonomy": "guided",
+    "approvalPolicy": "mutations",
+    "reasoningMode": "balanced"
+  },
+  "sourceHashes": {
+    "extensions/pi-harness.ts": "dd82218e68cd7a58f6d36f982cab74d0d2c4382230af209e67da4e68bf744840",
+    "src/harness/delegate-runtime.ts": "fcb7e4cae4542a97266a63ae7c7a28f3dc78185881d9662039832f30bfd04e36",
+    "src/harness/delegation-jobs.ts": "2bfd4fe6f3378f79acf086f3693bb68c00509da922acf094fff844da31df324e",
+    "tests/smoke/harness-delegate-smoke.mjs": "140a3b4a00b2a5a485b8b5e72a9e5d97766da2bf1bfee0293d3315b2e9bbe932"
+  },
+  "runtimeFacts": {
+    "defaultNestedActiveTools": 34,
+    "defaultNestedExtensions": 10,
+    "defaultNestedSkills": 11,
+    "defaultNestedContextFiles": 1,
+    "acceptedTools": ["request_read_scope", "scoped_list", "scoped_read"],
+    "acceptedExtensions": 0,
+    "acceptedSkills": 0,
+    "acceptedPrompts": 0,
+    "acceptedContextFiles": 0
+  },
+  "liveChecks": {
+    "passed": 41,
+    "total": 41,
+    "failed": []
+  },
+  "observations": [
+    "An unexpected builtin read tool caused refusal before the child received a prompt.",
+    "The bounded child performed two real tool calls and each was attested before and after.",
+    "Denied scope escalation leaked no outside content and persisted an auditable denial.",
+    "Approved escalation preserved the blocked objective and base authority and added only the exact approved read root.",
+    "SIGKILL of the parent left no child process; recovery marked the durable running job orphaned and spawned no duplicate.",
+    "Nested delegation was absent from both active and registered child tools."
+  ],
+  "rawRunManifestSha256": "aed18916bf19705e4180faf69160362c900ac0aef3c59ca16056805b9826336d",
+  "artifactSha256": null,
+  "artifactHashNote": "The artifact hash is reported externally because embedding its own hash would be self-referential."
+}
