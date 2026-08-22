@@ -25,7 +25,20 @@ import { harnessPaths } from "../src/harness/config.ts";
 import { chainEvent } from "../src/harness/audit.ts";
 import { HarnessStore } from "../src/harness/store.ts";
 
-const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// Resolve the harness modules for spawned CHILD processes in a way that works
+// in both trees: the repo (src/harness/*) and the isolated artifact
+// (src/core/*, where bin/build-isolated.mjs rewrites the static imports above
+// but cannot rewrite a path embedded in a worker-script string). Probe the
+// layout and hand the child an absolute file: URL.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const STORE_PATH = [
+  path.join(HERE, "../src/core/store.ts"),
+  path.join(HERE, "../src/harness/store.ts"),
+].find((c) => fs.existsSync(c)) ?? path.join(HERE, "../src/harness/store.ts");
+const STORE_URL = JSON.stringify(pathToFileURL(STORE_PATH).href);
+const CONFIG_URL = JSON.stringify(pathToFileURL(STORE_PATH.replace(/store\.ts$/, "config.ts")).href);
 
 function freshPaths() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "ac-home-"));
@@ -39,8 +52,8 @@ function workerScript(home: string, proj: string): string {
   const file = path.join(home, "append-worker.mjs");
   fs.writeFileSync(
     file,
-    `import { HarnessStore } from "${REPO}/src/harness/store.ts";
-     import { harnessPaths } from "${REPO}/src/harness/config.ts";
+    `import { HarnessStore } from ${STORE_URL};
+     import { harnessPaths } from ${CONFIG_URL};
      const paths = harnessPaths(${JSON.stringify(home)}, ${JSON.stringify(proj)}, { PI_HARNESS_HOME: ${JSON.stringify(path.join(home, "hh"))} });
      const i = process.argv[2];
      new HarnessStore(paths).appendAudit({
@@ -181,7 +194,7 @@ test("§6: a live lock is not stolen (mutual exclusion holds within the stale wi
   // A child grabs the lock and holds it ~900ms, well inside STALE_LOCK_MS.
   fs.writeFileSync(
     holder,
-    `import { withFileLock } from "${REPO}/src/harness/store.ts";
+    `import { withFileLock } from ${STORE_URL};
      withFileLock(${JSON.stringify(target)}, () => {
        const end = Date.now() + 900;
        while (Date.now() < end) {}
