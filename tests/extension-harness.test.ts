@@ -513,6 +513,49 @@ test("Decision B: an approved out-of-scope read records no denial (no double-cou
   assert.ok(!findReadDenied(pi), "an approved read must not be recorded as a denial");
 });
 
+// ---- Part 1: reads free by default (out-of-scope non-sensitive reads) ----
+// An out-of-project read no longer prompts unless it hits the sensitive-path
+// denylist. In-scope reads were already silent; this only touches the
+// out-of-root read confirm.
+
+test("Part 1: an out-of-scope non-sensitive read is allowed without a prompt", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const outsideFile = path.join(tmpRoot(), "notes.txt");
+  fs.writeFileSync(outsideFile, "hi\n");
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx); // attended
+  const titles: string[] = [];
+  scriptConfirm(ctx, {}, titles);
+  const result = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: outsideFile } },
+    ctx,
+  );
+  assert.equal(result, undefined, "a non-sensitive out-of-scope read is allowed silently");
+  assert.deepEqual(titles, [], "no confirmation prompt for a normal read");
+});
+
+test("Part 1: an out-of-scope sensitive read still prompts (exfil gate held)", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const outsideEnv = path.join(tmpRoot(), ".env");
+  fs.writeFileSync(outsideEnv, "SECRET=1\n");
+  const ctx = makeCtx({ cwd: root, confirmResult: false });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const titles: string[] = [];
+  scriptConfirm(ctx, { "Allow read?": false }, titles);
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: outsideEnv } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true, "a declined sensitive read is blocked");
+  assert.deepEqual(titles, ["Allow read?"], "a sensitive read still prompts");
+});
+
 /** These tests exercise the real `bwrap` availability check
  * (isBwrapAvailable in extensions/control-plane.ts), so they skip rather
  * than fail on a machine without bubblewrap installed - same reasoning as
