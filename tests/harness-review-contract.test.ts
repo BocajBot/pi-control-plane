@@ -486,6 +486,12 @@ test("isEmptySectionPlaceholder: emptiness declarations are placeholders", () =>
     "—",
     "TBD",
     "not applicable",
+    // markdown-emphasized placeholders (VALIDATION §12 third addendum: qwen #4)
+    "_None observed_",
+    "_None observed_.",
+    "*none*",
+    "**None**",
+    "*Nothing to report.*",
   ]) {
     assert.equal(isEmptySectionPlaceholder(s), true, `expected placeholder: ${JSON.stringify(s)}`);
   }
@@ -498,9 +504,33 @@ test("isEmptySectionPlaceholder: substantive claims are NOT placeholders", () =>
     "the user prefers pkexec over sudo",
     "scope was widened without approval (cause: model)",
     "no-build documented for test_output",
+    // emphasis stripping must not turn a substantive claim into a placeholder
+    "*none of the tools were denied*",
+    "_the retry count is 3_",
   ]) {
     assert.equal(isEmptySectionPlaceholder(s), false, `expected substantive: ${JSON.stringify(s)}`);
   }
+});
+
+test("placeholder: a lone underscore-wrapped '_None observed_' section parses to empty", () => {
+  // The exact qwen #4 shape from VALIDATION §12 third addendum: markdown-italic
+  // placeholders that the first cut of the classifier missed.
+  const parsed = parseReviewProposals(
+    [
+      "FINDINGS:",
+      `- the sandbox refuses without bwrap || ${AUD}`,
+      "MODELGUIDANCE:",
+      "- _None observed_",
+      "UNRESOLVED:",
+      "- _None observed_",
+    ].join("\n"),
+  );
+  assert.deepEqual(parsed.modelSpecificGuidance, []);
+  assert.deepEqual(parsed.unresolvedIssues, []);
+
+  const { acceptance } = checkReviewEvidence(parsed, SESSION_IDS, COMPLETE_READ);
+  assert.equal(acceptance.accepted, true, "no underscore-wrapped placeholder survives to reject");
+  assert.deepEqual(acceptance.rejectedItems, []);
 });
 
 /* --- generations --------------------------------------------------- */

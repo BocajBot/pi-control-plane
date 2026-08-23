@@ -453,7 +453,18 @@ export function stripEchoedPrompt(reply: string, prompt: string): string {
  * as an item and still reject.
  */
 export function isEmptySectionPlaceholder(content: string): boolean {
-  const c = content.trim().replace(/[.…\s]+$/u, "").toLowerCase();
+  // Strip surrounding markdown emphasis (_italic_, *italic*, **bold**) before
+  // classifying: measured (VALIDATION §12 third addendum) models write the
+  // placeholder emphasized - `_None observed_` - which is semantically identical
+  // to the bare form. `_`/`*` only; `-` and `—` are themselves placeholders and
+  // must survive. Leading emphasis is dropped, trailing emphasis folds in with
+  // the sentence-punctuation strip.
+  const c = content
+    .trim()
+    .replace(/^[_*]+/u, "")
+    .replace(/[_*.…\s]+$/u, "")
+    .trim()
+    .toLowerCase();
   if (c.length === 0) return true;
   if (["_none_", "none", "n/a", "na", "nil", "-", "—", "tbd", "not applicable"].includes(c)) return true;
   if (/^none\b/.test(c) && !/^none (of|were|was|are|is|had|have|has|will|would|remain)\b/.test(c)) return true;
