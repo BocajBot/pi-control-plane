@@ -148,7 +148,7 @@ async function startInterpretTurn(pi: FakePi, ctx: unknown) {
 
 test("registers the commands, the local_web_search tool, and the shortcuts", async () => {
   const pi = await boot();
-  for (const name of ["context", "task", "mode", "interpret", "scratchpad", "bwrap"]) {
+  for (const name of ["context", "task", "mode", "interpret", "scratchpad", "bwrap", "harness-rules"]) {
     assert.ok(pi.commands.has(name), `missing /${name}`);
   }
   assert.ok(!pi.commands.has("phase") && !pi.commands.has("autonomy"), "phase/autonomy merged into /mode");
@@ -554,6 +554,128 @@ test("Part 1: an out-of-scope sensitive read still prompts (exfil gate held)", a
   )) as { block?: boolean; reason?: string };
   assert.equal(blocked?.block, true, "a declined sensitive read is blocked");
   assert.deepEqual(titles, ["Allow read?"], "a sensitive read still prompts");
+});
+
+// ---- Part 3: remembered decisions (soft-policy rules) ----
+// A saved rule (via /harness-rules allow) suppresses a future attended confirm
+// so the same prompt never recurs. Rules are scope-bound, revocable, cannot
+// loosen a hard rule, and (being prompt-suppression) do not apply without a UI.
+
+const findRuleAdded = (pi: FakePi) =>
+  pi.entries.find(
+    (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "remembered-rule-added",
+  );
+
+test("Part 3: a remembered rule (/harness-rules allow) suppresses the prompt", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx); // attended
+  await pi.commands.get("harness-rules")!.handler("allow write out.txt", ctx);
+  const added = findRuleAdded(pi);
+  assert.ok(added, "a rule was saved via the command");
+  assert.equal((added!.data as { actor?: string }).actor, "user");
+
+  const titles: string[] = [];
+  scriptConfirm(ctx, {}, titles);
+  const r = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "out.txt", content: "y" } },
+    ctx,
+  );
+  assert.equal(r, undefined, "the write is auto-allowed by the remembered rule");
+  assert.deepEqual(titles, [], "the remembered rule suppresses the prompt");
+  assert.ok(
+    pi.entries.some(
+      (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "remembered-rule-allow",
+    ),
+    "the remembered-rule allow is audited",
+  );
+});
+
+test("Part 3: a remembered rule is revocable via /harness-rules and the prompt returns", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.commands.get("harness-rules")!.handler("allow write out.txt", ctx);
+  const id = (findRuleAdded(pi)!.data as { ruleId: string }).ruleId;
+  await pi.commands.get("harness-rules")!.handler(`revoke ${id}`, ctx);
+
+  // The rule is gone: the next write prompts again (declined here -> blocked).
+  const titles: string[] = [];
+  scriptConfirm(ctx, { "Allow write?": false }, titles);
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "out.txt", content: "y" } },
+    ctx,
+  )) as { block?: boolean };
+  assert.equal(blocked?.block, true);
+  assert.ok(titles.includes("Allow write?"), "the prompt returns after revocation");
+});
+
+test("Part 3: a sensitive read cannot be remembered as allow (hard boundary)", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const outsideEnv = path.join(tmpRoot(), ".env");
+  fs.writeFileSync(outsideEnv, "SECRET=1\n");
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.commands.get("harness-rules")!.handler(`allow read ${outsideEnv}`, ctx);
+  assert.ok(!findRuleAdded(pi), "no rule saved for a sensitive read");
+  assert.ok(
+    ctx.notifications.some((n) => /sensitive/i.test(n.message)),
+    "the command refuses and says why",
+  );
+});
+
+test("Part 3: a remembered edit rule cannot resurrect a blind edit (hard rule wins)", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const file = path.join(root, "data.txt");
+  fs.writeFileSync(file, "orig\n");
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.commands.get("harness-rules")!.handler("allow edit data.txt", ctx);
+  assert.ok(findRuleAdded(pi), "an edit rule was saved");
+
+  // data.txt was never read this session, so read-before-edit must block the
+  // edit even though a rule matches — a rule cannot loosen a hard boundary.
+  const titles: string[] = [];
+  scriptConfirm(ctx, {}, titles);
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "edit", input: { path: "data.txt", oldText: "orig", newText: "again" } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true);
+  assert.match(blocked?.reason ?? "", /read-before-edit/);
+  assert.deepEqual(titles, [], "read-before-edit blocks before any prompt; the rule does not bypass it");
+});
+
+test("Part 3: a remembered rule does not auto-allow without a UI (no-UI fails closed)", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.commands.get("harness-rules")!.handler("allow write out.txt", ctx);
+  assert.ok(findRuleAdded(pi), "rule saved");
+
+  // Same extension instance (rule in force), but a no-UI context: the rule must
+  // not auto-allow — a no-UI session has no prompt to suppress and fails closed.
+  const noUi = makeCtx({ cwd: root, hasUI: false });
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "out.txt", content: "y" } },
+    noUi,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true);
+  assert.match(blocked?.reason ?? "", /failing closed/i);
 });
 
 /** These tests exercise the real `bwrap` availability check

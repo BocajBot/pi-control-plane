@@ -207,6 +207,35 @@ export interface ScratchpadState {
   updatedAt: string;
 }
 
+export const RULES_SCHEMA_VERSION = 1;
+export const RULES_ENTRY_TYPE = "pi-control-plane-rules";
+
+/**
+ * One remembered decision: a soft-policy rule that suppresses a future
+ * attended confirmation. Scope-bound (only applies within the project it was
+ * created in) and always an allow with user-actor provenance. It can only
+ * convert an attended CONFIRM into an allow; it can never loosen a hard rule
+ * (read-before-edit, scope-write denials, sensitive-read confirms), because
+ * those resolve to a block earlier or are excluded at match time.
+ */
+export interface RememberedRule {
+  id: string;
+  /** The tool this rule allows (e.g. "edit", "write"). */
+  tool: string;
+  /** Canonical absolute target path the rule allows the tool to act on. */
+  target: string;
+  /** Project root in force when the rule was created; the rule only applies
+   * while that same project root is in force. */
+  scopeRoot: string;
+  createdAt: string;
+}
+
+export interface RememberedRulesState {
+  schemaVersion: typeof RULES_SCHEMA_VERSION;
+  rules: RememberedRule[];
+  updatedAt: string;
+}
+
 /**
  * Bwrap-sandbox toggle. `enabled` wraps every allowed `bash` call in a
  * bubblewrap (unprivileged Linux namespaces) invocation before it executes -
