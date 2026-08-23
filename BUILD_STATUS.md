@@ -21,7 +21,16 @@ reproduction, not a prose one: `tests/harness-audit-fork-repro.test.ts` shows tw
 unlocked appends from a cached tip forking the chain (prevHashes
 `[<anchor>, X, X]`, `verifyAudit ok=false brokenAt=2`), then the same interleave
 through the current locked append staying linear (`[<anchor>, X, Y]`, `ok=true`).
-Still not shown: a multi-model live reviewer panel.
+
+**The multi-model live reviewer panel is now shown** (VALIDATION §12): four local
+llama-swap families (qwen3-8-27b, hermes-4-3-36b, gemma-4-26b-a4b-it,
+glm-4.7-flash-mxfp4) each run once through the real review path and graded by the
+evidence contract. Result: 0/4 accepted this run — all four produced real
+shape-valid content but were rejected uniformly on citation grounding (1–2
+ungrounded items each). The finding is the uniform, model-independent enforcement
+of the grounding gate and its all-or-nothing strictness, not model acceptance;
+acceptance is run-to-run nondeterministic (qwen3-8-27b was accepted in §6/§11).
+No provisional/asserted-not-shown claims remain open.
 
 ---
 

@@ -790,3 +790,55 @@ and embedding the artifact's own hash would be self-referential.
 **Scope note.** Standalone project-root inference resolves to the nearest
 `.pi`/VCS ancestor (pre-existing `project.ts` precedence); a pi-initialised
 project anchors correctly. Not redesigned here (§13).
+
+---
+
+## 12. Multi-model live reviewer panel (Phase 4 follow-up, 2026-08-22)
+
+The last asserted-not-shown claim in BUILD_STATUS. Four **local** llama-swap
+models (`http://localhost:9292`, zero cloud spend), four distinct families, each
+run once through the real retrospective-review path
+(`tests/smoke/harness-review-smoke.mjs`) over a genuine session record and graded
+by the existing evidence contract (reviewProduced, readComplete, shapeValid,
+citation grounding = condition 3, acceptance gate). Serialized — llama-swap swaps
+one model at a time.
+
+| Model | Family | reviewProduced | readComplete | shapeValid | citations (cond 3) | accepted | proposals (raw) |
+|-------|--------|:--:|:--:|:--:|:--:|:--:|--|
+| qwen3-8-27b | Qwen3.8 | yes (2323 ch) | 11/11 | yes | **fail** (2 uncited) | **NO** | f6 p1 g2 |
+| hermes-4-3-36b | seed_oss / Hermes | yes (2227 ch) | 11/11 | yes | **fail** (1 uncited) | **NO** | f4 p2 g2 |
+| gemma-4-26b-a4b-it | Gemma 4 | yes (2789 ch) | 12/12 | yes | **fail** (2 uncited) | **NO** | f5 p2 m1 g1 |
+| glm-4.7-flash-mxfp4 | GLM 4.7 | yes (2022 ch) | 11/11 | yes | **fail** (2 uncited) | **NO** | f6 p2 g1 |
+
+**Result: 0/4 accepted this run — all four rejected on the SAME condition
+(citation grounding), and that is the finding, not a failure of the run.** Every
+model produced real, shape-valid content over the full session (reviewProduced
+and readComplete held for all four), and every model was sunk by one or two
+ungrounded items. The gate behaved identically across four families:
+
+- The uncited items were placeholders and generic observations the model failed
+  to attach to a real session entry id: `_none_`, "No correction needed"
+  (cited `None`), "The harness infrastructure recorded state changes…",
+  "The session was part of a smoke test directory…", and — for gemma — a
+  **timestamp cited in the id position** (`|| 2026-08-23T04:44:…`) rather than an
+  entry id.
+- Condition 3 is **all-or-nothing**: a single ungrounded item among 5–8 sinks the
+  whole review. This is the intended M5 property (the two facts "the reviewer said
+  nothing" and "the reviewer found nothing" must stay distinct, and an assertion
+  without a source is neither), shown here to bind uniformly across models.
+
+**What this shows vs what it does not.** SHOWN: the evidence contract is not
+qwen-specific — four independent families exercise the same parse + grounding +
+acceptance path, and the gate enforces grounding uniformly rather than accepting
+whatever a model emits. Also shown: acceptance is run-to-run nondeterministic —
+qwen3-8-27b was *accepted* with 24 grounded / 0 uncited items in the Phase 3 live
+run (§6/§11) and *rejected* here on 2 stray items; the difference is model
+sampling, not a code change. NOT claimed: that any given model passes on any given
+run. The strictness surfaced here (one stray line → rejection) is a real
+operational characteristic of the loop and the reason acceptance is treated as an
+evidence event, never assumed. No config was tuned per model; thinking-off is set
+only for qwen3-8-27b (pre-existing), so the other three ran on their default
+templates and still produced shape-valid content.
+
+Logs: `~/pi-harness-work/panel/<model>.log` (transient; regenerate with
+`HARNESS_SMOKE_MODEL=llama-swap/<id> node tests/smoke/harness-review-smoke.mjs`).
