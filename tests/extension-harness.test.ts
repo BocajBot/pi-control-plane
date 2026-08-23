@@ -223,6 +223,120 @@ test("Execute (attended) approved confirmation allows the call; no-UI fails clos
   assert.match(blocked?.reason ?? "", /failing closed/i);
 });
 
+// ---- attended phase-switch dialog ----
+// When a mutating call is blocked SOLELY by the phase rule in an interactive
+// session, the human is offered the same transition as /mode execute. It is
+// user-actor authority and grants no model actor new capability; autonomy still
+// gates the actual mutation independently (the attended per-call confirm).
+//
+// Note on the "autonomy would still prohibit after the switch" fallback in the
+// handler: under the merged phase/autonomy model, /mode execute yields Execute +
+// Attended, and Attended never hard-blocks a mutating tool (it confirms). So the
+// postSwitch === "block" fallback is defensively coded but structurally
+// unreachable via this dialog; the real manifestation of "autonomy gates
+// independently" is the second confirm exercised in the third test below.
+
+/** Script ui.confirm by dialog title so the two gates can be answered separately. */
+function scriptConfirm(ctx: ReturnType<typeof makeCtx>, answers: Record<string, boolean>, titles: string[]) {
+  ctx.ui.confirm = (async (title: string) => {
+    titles.push(title);
+    return answers[title] ?? false;
+  }) as typeof ctx.ui.confirm;
+}
+
+test("phase-switch dialog: approve switch + approve call → proceeds, audited as user", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot() });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const titles: string[] = [];
+  scriptConfirm(ctx, { "Switch to Execute phase?": true, "Allow write?": true }, titles);
+  const result = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "f.txt", content: "x" } },
+    ctx,
+  );
+  assert.equal(result, undefined, "approved switch + approved call must proceed");
+  // Two independent gates fired in order: the phase switch, then the attended
+  // per-call confirm — one Yes did not grant the mutation.
+  assert.deepEqual(titles, ["Switch to Execute phase?", "Allow write?"]);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Execute/);
+  const audit = pi.entries.find(
+    (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "phase-switch-via-dialog",
+  );
+  assert.ok(audit, "phase switch must be audited");
+  const d = audit!.data as Record<string, unknown>;
+  assert.equal(d.actor, "user");
+  assert.equal(d.provenance, "attended-phase-dialog");
+  assert.equal(d.from, "discuss");
+  assert.equal(d.to, "execute");
+  assert.equal(d.blockedTool, "write");
+  assert.equal(d.blockedRule, "phase:discuss");
+});
+
+test("phase-switch dialog: decline switch → identical plain block, no phase change", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot() });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const titles: string[] = [];
+  scriptConfirm(ctx, { "Switch to Execute phase?": false }, titles);
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "f.txt", content: "x" } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true);
+  assert.match(blocked?.reason ?? "", /phase:discuss/, "declined switch blocks exactly as today");
+  assert.deepEqual(titles, ["Switch to Execute phase?"], "no per-call confirm after a declined switch");
+  assert.match(ctx.statuses["control-plane"] ?? "", /Discuss/, "phase must not change on decline");
+  assert.ok(
+    !pi.entries.some(
+      (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "phase-switch-via-dialog",
+    ),
+    "a declined switch must not be audited as a switch",
+  );
+});
+
+test("phase-switch dialog: approve switch but decline the call → switched yet blocked (autonomy gates independently)", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot() });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const titles: string[] = [];
+  scriptConfirm(ctx, { "Switch to Execute phase?": true, "Allow write?": false }, titles);
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "f.txt", content: "x" } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true, "the mutation is still independently gated by autonomy");
+  assert.match(blocked?.reason ?? "", /Denied by user confirmation/);
+  assert.deepEqual(titles, ["Switch to Execute phase?", "Allow write?"]);
+  // The switch did happen (it is a real phase change), it just did not authorize
+  // the mutation — the per-call confirm did that job separately.
+  assert.match(ctx.statuses["control-plane"] ?? "", /Execute/);
+  assert.ok(
+    pi.entries.some(
+      (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "phase-switch-via-dialog",
+    ),
+    "the approved switch is audited even though the call was then declined",
+  );
+});
+
+test("phase-switch dialog: no-UI session gets the plain block, never a dialog", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot(), hasUI: false });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const titles: string[] = [];
+  scriptConfirm(ctx, {}, titles);
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "f.txt", content: "x" } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true);
+  assert.match(blocked?.reason ?? "", /phase:discuss/);
+  assert.deepEqual(titles, [], "no confirmation dialog without a UI");
+});
+
 /** These tests exercise the real `bwrap` availability check
  * (isBwrapAvailable in extensions/control-plane.ts), so they skip rather
  * than fail on a machine without bubblewrap installed - same reasoning as

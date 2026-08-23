@@ -124,6 +124,7 @@ import {
   type ScratchpadState,
   type SnapshotItem,
   STATE_ENTRY_TYPE,
+  type ToolDecision,
 } from "../src/control-plane/types.ts";
 import {
   verifyCompletion,
@@ -1300,20 +1301,17 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     return { ok: true };
   };
 
-  pi.on("tool_call", async (event: ToolCallEvent, ctx) => {
-    const decision = evaluateToolCall({
-      toolName: event.toolName,
-      toolInput: event.input as Record<string, unknown>,
-      guardActive: state.interpretGuard?.active ?? false,
-      phase: state.phase,
-      autonomy: state.autonomy,
-      projectRoot: rootOf(ctx),
-      cwd: ctx.cwd,
-      policy,
-      ops: pathOps,
-      hasAcceptedTask: state.acceptedTask !== null,
-    });
-
+  /**
+   * Enact a policy decision: allow (with /verify bookkeeping + sandbox),
+   * confirm (attended per-call dialog), or block. Factored out so the
+   * phase-switch dialog below can re-dispatch a call through the SAME path
+   * after an attended phase change, rather than duplicating the logic.
+   */
+  const handleDecision = async (
+    event: ToolCallEvent,
+    ctx: ExtensionContext,
+    decision: ToolDecision,
+  ): Promise<{ block: true; reason: string } | undefined> => {
     if (decision.action === "allow") {
       // Record files written/edited this session so /verify has observable
       // evidence of what actually changed (independent of autonomy mode).
@@ -1395,6 +1393,92 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       });
     }
     return { block: true, reason: formatDenial(decision, event.toolName) };
+  };
+
+  pi.on("tool_call", async (event: ToolCallEvent, ctx) => {
+    const decision = evaluateToolCall({
+      toolName: event.toolName,
+      toolInput: event.input as Record<string, unknown>,
+      guardActive: state.interpretGuard?.active ?? false,
+      phase: state.phase,
+      autonomy: state.autonomy,
+      projectRoot: rootOf(ctx),
+      cwd: ctx.cwd,
+      policy,
+      ops: pathOps,
+      hasAcceptedTask: state.acceptedTask !== null,
+    });
+
+    // Attended phase-switch dialog: when a call is blocked SOLELY by the phase
+    // rule (a non-Execute phase prohibiting a mutating tool) and a UI is
+    // available, offer the human the same transition they could type as
+    // /mode execute — a prose dead end ("type /mode execute") becomes a Yes/No
+    // at the moment of the block. This is user-actor authority (the human
+    // answers), identical to the attended confirm and read-out-of-scope gates;
+    // it grants no model actor any new capability. Autonomy still gates
+    // independently: we recompute the decision AS IF already in Execute and,
+    // if that would still block, fall back to the plain block (never stack two
+    // escalations into one Yes); if it would only confirm, the retry hits the
+    // attended per-call dialog separately below.
+    if (decision.action === "block" && decision.rule.startsWith("phase:") && ctx.hasUI) {
+      const exec = stateForMode("execute");
+      const postSwitch = evaluateToolCall({
+        toolName: event.toolName,
+        toolInput: event.input as Record<string, unknown>,
+        guardActive: state.interpretGuard?.active ?? false,
+        phase: exec.phase,
+        autonomy: exec.autonomy,
+        projectRoot: rootOf(ctx),
+        cwd: ctx.cwd,
+        policy,
+        ops: pathOps,
+        hasAcceptedTask: state.acceptedTask !== null,
+      });
+      if (postSwitch.action !== "block") {
+        const input = event.input as Record<string, unknown>;
+        const command = typeof input.command === "string" ? input.command : null;
+        const target = typeof input.path === "string" ? input.path : null;
+        const body = [
+          `The current phase (${state.phase}) blocks mutating tool calls.`,
+          `Blocked tool: ${event.toolName}`,
+          target !== null ? `Target: ${target}` : null,
+          command !== null ? `Command: ${command.length > 200 ? command.slice(0, 200) + "…" : command}` : null,
+          "",
+          "Switching to Execute permits mutating tools until you change the phase back.",
+          postSwitch.action === "confirm"
+            ? "After switching, this call still requires a separate per-action confirmation (autonomy is unchanged)."
+            : null,
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n");
+        const approved = await ctx.ui.confirm("Switch to Execute phase?", body);
+        if (approved) {
+          const fromMode = modeOf(state.phase, state.autonomy) ?? state.phase;
+          setMode(ctx, "execute", false);
+          // Audit the phase change with the dialog as provenance so a
+          // dialog-driven switch is visible to /verify and review, and is
+          // attributable to the human who answered (user actor).
+          pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+            kind: "phase-switch-via-dialog",
+            from: fromMode,
+            to: "execute",
+            actor: "user",
+            provenance: "attended-phase-dialog",
+            blockedTool: event.toolName,
+            blockedRule: decision.rule,
+            at: new Date().toISOString(),
+          });
+          // Re-dispatch the SAME call under the new phase so the user does not
+          // retype anything; autonomy gates it independently (attended → the
+          // per-call confirm dialog runs here).
+          return handleDecision(event, ctx, postSwitch);
+        }
+        // Declined: block exactly as today.
+        return handleDecision(event, ctx, decision);
+      }
+    }
+
+    return handleDecision(event, ctx, decision);
   });
 
   // ---- commands ----
