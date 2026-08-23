@@ -740,3 +740,53 @@ access to the harness home, who can rewrite the log, the tip commitment, and
 the lock. The chain is tamper-evident, not tamper-proof. NFS is unsupported
 (`O_EXCL` is not atomic there).
 
+
+## 11. Packaged-artifact acceptance + empty-review fix (v0.3.2)
+
+Live-testing the ACTUAL packaged artifact (loaded via `PI_CODING_AGENT_DIR` →
+throwaway agentdir whose `settings.json` `packages` points at the extracted
+tarball) exposed a review-contract defect that in-repo unit tests missed,
+because those inject a canned reviewer reply.
+
+**Load provenance (engagement marker).** Moving the packaged extract aside made
+`/harness` unavailable under the same env, with no fallback to repo source — so
+the resolved extension path is the packaged tarball extract, not the in-repo
+tree. The user's `~/.pi/agent` was not modified.
+
+**Defect.** A reasoning reviewer (`qwen3-8-27b`) spent its whole 8192-token
+output budget in a thinking block (`stopReason=length`) and emitted no text;
+the empty reply parsed to zero proposals and `checkReviewEvidence` **accepted**
+it — a vacuous review. Primary evidence: the nested session's assistant message
+is a single `thinking` part with no text. Discriminating control: the same
+model called directly with `enable_thinking:false` returns well-formed content.
+
+**Fix.** A distinct `reviewProduced` precondition: a blank/absent reply is
+refused; a non-blank reply proposing nothing stays a legitimate empty review.
+This is mechanical ("did the reviewer answer"), not semantic entailment.
+
+**Live before/after against the packaged 0.3.2 artifact.**
+
+| run | thinking | reviewProduced | accepted | detail |
+|-----|----------|----------------|----------|--------|
+| v0.3.1 (pre-fix) | on | (field absent) | **true** | rawReply 0 chars — vacuous |
+| Test D (v0.3.2) | on | **false** | **false** | "the reviewer produced no output" |
+| Test F (v0.3.2) | off | **true** | **true** | 52/52 read, 24 grounded proposals, 0 uncited, 6390 chars |
+
+**Coordinator standalone (14/14)** via `tests/smoke/harness-coordinator-standalone.mjs`:
+extension loads and answers `/harness status|authority|capability`; builtin bash
+absent + sandboxed shell present; audit chain verifies live; per-project layout
++ non-authoritative WORKSTATE on disk. `harness-smoke.mjs` (the in-repo
+coordinator smoke) cannot run standalone — its startup handshake waits for an
+event only the control plane emits — which is why this probe exists.
+
+**Bounded delegation (41/41)** against the packaged extract (run `bXRlpL`).
+
+**Artifact.** `pi-harness-isolated-0.3.2.tar.gz`, reproducible (identical SHA
+from two builds), traceable to tag v0.3.2 (`26c8d7d`); extension bytes
+byte-identical to the live-tested extract. The concrete SHA is reported in
+PHASE3-CLOSEOUT.md rather than here, because this file ships inside the artifact
+and embedding the artifact's own hash would be self-referential.
+
+**Scope note.** Standalone project-root inference resolves to the nearest
+`.pi`/VCS ancestor (pre-existing `project.ts` precedence); a pi-initialised
+project anchors correctly. Not redesigned here (§13).

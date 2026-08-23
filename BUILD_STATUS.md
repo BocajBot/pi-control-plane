@@ -8,6 +8,15 @@ Section 31 says the correct next maturation signal is evidence that the
 invariants survive real sessions, not more features. Everything below is a
 place where that evidence does not yet exist.
 
+**v0.3.2 update (2026-08-22).** Two items below moved from asserted to shown by
+live testing of the packaged artifact (VALIDATION §11): the retrospective
+review gate now runs live against the packaged tarball extract — one accepted
+review with 24 grounded proposals, and a rejected empty/length-truncated reply
+(`reviewProduced=false`) that v0.3.1 had accepted vacuously — and coordinator
+enforcement is confirmed standalone (14/14). Load provenance is proven by
+ablation, not asserted. Still not shown: a multi-model live reviewer panel, and
+an executable (not prose) reproduction of the pre-fix audit fork.
+
 ---
 
 ## 1. Executed under v0.2, but not against a live model

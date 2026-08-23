@@ -1,7 +1,7 @@
 {
   "schema": "pi-harness-phase3-live-evidence-v1",
   "observedAt": "2026-08-22",
-  "harnessVersion": "0.3.0",
+  "harnessVersion": "0.3.2",
   "piVersion": "0.84.1",
   "nodeVersion": "v22.22.3",
   "platform": "linux 7.2.0-1-cachyos-kfdfix x64",
@@ -13,26 +13,74 @@
     "reasoningMode": "balanced"
   },
   "sourceHashes": {
-    "extensions/pi-harness.ts": "dd82218e68cd7a58f6d36f982cab74d0d2c4382230af209e67da4e68bf744840",
+    "extensions/pi-harness.ts": "1acf450dbc75197334341164191e719746dedc42b12a4720824db9cde1f339a9",
     "src/harness/delegate-runtime.ts": "fcb7e4cae4542a97266a63ae7c7a28f3dc78185881d9662039832f30bfd04e36",
     "src/harness/delegation-jobs.ts": "2bfd4fe6f3378f79acf086f3693bb68c00509da922acf094fff844da31df324e",
-    "tests/smoke/harness-delegate-smoke.mjs": "140a3b4a00b2a5a485b8b5e72a9e5d97766da2bf1bfee0293d3315b2e9bbe932"
+    "tests/smoke/harness-delegate-smoke.mjs": "140a3b4a00b2a5a485b8b5e72a9e5d97766da2bf1bfee0293d3315b2e9bbe932",
+    "src/harness/agents.ts": "4588bcfc7c6495732bddf56a2bf0f54619003483e6fe94f46fdfbb3eaa0f790d",
+    "src/harness/types.ts": "260fc87b73b0b5709795934061ca967c9ff77a59470eaba7fc14d7a581d9bddc",
+    "tests/smoke/harness-coordinator-standalone.mjs": "1700c5500187a9715babff41531ec8898388d6ca82534f9e2073457fe1b7beea",
+    "tests/harness-review-contract.test.ts": "746a61f31dd5b98523de1c4ae29886c2e9c7b5ceb67d366f5c7548076389a85f",
+    "tests/harness-audit-concurrency.test.ts": "b5d201089af7df42f2f39ff60f60242f2e7cca4dab629382c65f93e986fba7ba"
   },
   "runtimeFacts": {
     "defaultNestedActiveTools": 34,
     "defaultNestedExtensions": 10,
     "defaultNestedSkills": 11,
     "defaultNestedContextFiles": 1,
-    "acceptedTools": ["request_read_scope", "scoped_list", "scoped_read"],
+    "acceptedTools": [
+      "request_read_scope",
+      "scoped_list",
+      "scoped_read"
+    ],
     "acceptedExtensions": 0,
     "acceptedSkills": 0,
     "acceptedPrompts": 0,
     "acceptedContextFiles": 0
   },
   "liveChecks": {
-    "passed": 41,
-    "total": 41,
-    "failed": []
+    "delegateBoundedPackaged": {
+      "passed": 41,
+      "total": 41,
+      "failed": [],
+      "model": "llama-swap/qwopus-35b-a3b-coder",
+      "note": "Baseline bounded-delegation suite; manifest sha aed18916bf19705e4180faf69160362c900ac0aef3c59ca16056805b9826336d"
+    },
+    "reviewContractUnit": {
+      "passed": 28,
+      "total": 28,
+      "failed": [],
+      "note": "tests/harness-review-contract.test.ts incl. 4 new empty/truncated-reply rejection tests"
+    },
+    "auditConcurrencyRealMultiProc": {
+      "passed": 6,
+      "total": 6,
+      "failed": [],
+      "note": "tests/harness-audit-concurrency.test.ts; N=12 real OS processes -> one linear hash chain"
+    },
+    "reviewerAcceptancePackaged": {
+      "accepted": true,
+      "reviewProduced": true,
+      "linesRead": "52/52",
+      "proposalsGrounded": 24,
+      "uncited": 0,
+      "rawReplyChars": 6390,
+      "model": "llama-swap/qwen3-8-27b",
+      "note": "Live accepted retrospective review against the packaged 0.3.2 extract (Test F, thinking off)"
+    },
+    "reviewerEmptyRejectedPackaged": {
+      "accepted": false,
+      "reviewProduced": false,
+      "reason": "the reviewer produced no output; nothing was reviewed",
+      "note": "Live counterexample (Test D, thinking on): the empty reply v0.3.1 accepted is now rejected"
+    },
+    "coordinatorStandalonePackaged": {
+      "passed": 14,
+      "total": 14,
+      "failed": [],
+      "model": "llama-swap/qwen3-8-27b",
+      "note": "tests/smoke/harness-coordinator-standalone.mjs against the packaged extract"
+    }
   },
   "observations": [
     "An unexpected builtin read tool caused refusal before the child received a prompt.",
@@ -40,9 +88,19 @@
     "Denied scope escalation leaked no outside content and persisted an auditable denial.",
     "Approved escalation preserved the blocked objective and base authority and added only the exact approved read root.",
     "SIGKILL of the parent left no child process; recovery marked the durable running job orphaned and spawned no duplicate.",
-    "Nested delegation was absent from both active and registered child tools."
+    "Nested delegation was absent from both active and registered child tools.",
+    "v0.3.2: the review contract rejected an empty/length-truncated reviewer reply (reviewProduced=false) live against the packaged artifact, where v0.3.1 accepted it as a vacuous empty review.",
+    "v0.3.2: a live retrospective review was accepted against the packaged artifact with 24 grounded proposals (0 uncited, 6390-char reply).",
+    "Coordinator enforcement verified standalone (14/14): capability confinement (builtin bash absent, sandboxed shell present), append-oriented authority, live hash-chain verification, and non-authoritative WORKSTATE on disk.",
+    "Standalone project-root inference resolves to the nearest .pi/VCS ancestor (pre-existing project.ts precedence; \u00a713 out of scope for redesign); a pi-initialised project (its own .pi) anchors correctly."
   ],
   "rawRunManifestSha256": "aed18916bf19705e4180faf69160362c900ac0aef3c59ca16056805b9826336d",
   "artifactSha256": null,
-  "artifactHashNote": "The artifact hash is reported externally because embedding its own hash would be self-referential."
+  "artifactHashNote": "Reported externally (PHASE3-CLOSEOUT.md), not embedded: this file ships inside the artifact, so recording the artifact's own hash here would be self-referential. The build is reproducible (two builds from committed source yield an identical SHA) and its extension bytes (src/index.ts, src/agents.ts, src/types.ts, src/core/store.ts) are byte-identical to the extract exercised by the live checks.",
+  "reviewerModel": "llama-swap/qwen3-8-27b (enable_thinking:false)",
+  "loadProvenance": {
+    "method": "PI_CODING_AGENT_DIR redirect to a throwaway agentdir whose settings.json packages -> packaged-extract/pi-harness",
+    "engagementProof": "Ablation: moving the packaged extract aside made /harness unavailable under the same env (no fallback to repo source), proving the resolved extension path is the packaged tarball extract.",
+    "userPiUntouched": "Live runs used PI_CODING_AGENT_DIR + PI_HARNESS_HOME throwaways; the user's ~/.pi/agent was not modified (one stray WORKSTATE.md written by an early probe was removed)."
+  }
 }
