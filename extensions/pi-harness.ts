@@ -2694,10 +2694,12 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
         // find. `checkReviewEvidence` drops every item that does not cite an
         // id from this session and reports what it dropped, verbatim.
         const shaped = validateReviewProposals(parsed);
-        const { acceptance, filtered } = checkReviewEvidence(shaped ?? parsed, knownEntryIds, {
-          linesExpected,
-          linesRead,
-        });
+        const { acceptance, filtered } = checkReviewEvidence(
+          shaped ?? parsed,
+          knownEntryIds,
+          { linesExpected, linesRead },
+          replyText,
+        );
         // Only the surviving items are ever acted on. On rejection this is
         // empty, so a caller that ignored `accepted` still cannot promote
         // anything - the gate is structural, not advisory.

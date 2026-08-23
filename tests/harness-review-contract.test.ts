@@ -155,6 +155,61 @@ test("evidence gate: a complete read with every item cited is accepted", () => {
   assert.deepEqual(filtered, proposals(), "nothing is dropped from an accepted review");
 });
 
+/* --- precondition: the reviewer actually produced output ----------- */
+
+test("evidence gate: an empty reviewer reply is refused, not accepted as a review of nothing", () => {
+  // The defect the first live packaged run exposed: a reasoning model spent
+  // its whole output budget thinking and stopped on `length` having emitted no
+  // text. The empty reply parsed to zero proposals, which passes shape, passes
+  // citations (nothing to cite) and passes the read - and the review was
+  // accepted. An empty answer is "the reviewer said nothing", never "the
+  // reviewer found nothing"; the gate must tell them apart.
+  const empty = parseReviewProposals("");
+  const { acceptance } = checkReviewEvidence(empty, SESSION_IDS, COMPLETE_READ, "");
+  assert.equal(acceptance.reviewProduced, false);
+  assert.equal(acceptance.accepted, false, "an empty reply is not an accepted review");
+  assert.equal(acceptance.readComplete, true, "the read itself was fine");
+  assert.equal(acceptance.shapeValid, true, "empty is a well-formed shape");
+  assert.equal(acceptance.citationsValid, true, "there was nothing to cite");
+  assert.match(acceptance.reason, /produced no output/);
+});
+
+test("evidence gate: a whitespace-only reviewer reply is refused", () => {
+  const { acceptance } = checkReviewEvidence(
+    parseReviewProposals("   \n\t  "),
+    SESSION_IDS,
+    COMPLETE_READ,
+    "   \n\t  ",
+  );
+  assert.equal(acceptance.reviewProduced, false);
+  assert.equal(acceptance.accepted, false);
+});
+
+test("evidence gate: a non-blank reply that proposes nothing is a legitimate empty review", () => {
+  // The other side of the line. A reviewer that read the whole session and
+  // genuinely had nothing durable to promote still *answered*. That must be
+  // accepted - the precondition is "did the reviewer speak", not "did it find
+  // something".
+  const prose = "I read the full session. Nothing here rises to a durable lesson.";
+  const { acceptance } = checkReviewEvidence(
+    parseReviewProposals(prose),
+    SESSION_IDS,
+    COMPLETE_READ,
+    prose,
+  );
+  assert.equal(acceptance.reviewProduced, true);
+  assert.equal(acceptance.accepted, true, "the reviewer answered; it simply had nothing to promote");
+});
+
+test("evidence gate: omitting the raw reply leaves the produced-output precondition satisfied", () => {
+  // Callers exercising the citation logic directly (these tests, and the
+  // corpus smoke) have no reply text to offer. Omitting it must not turn the
+  // precondition into a silent rejection of an otherwise-valid review.
+  const { acceptance } = checkReviewEvidence(proposals(), SESSION_IDS, COMPLETE_READ);
+  assert.equal(acceptance.reviewProduced, true);
+  assert.equal(acceptance.accepted, true);
+});
+
 test("evidence gate: an item citing an id that never occurred in the session is refused", () => {
   // The whole point of condition 3. `FABRICATED` passes idKind() and is
   // indistinguishable from a real id by shape alone; only membership in the

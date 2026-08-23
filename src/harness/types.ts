@@ -787,6 +787,12 @@ export interface SessionIndexEntry {
  */
 export interface ReviewAcceptance {
   accepted: boolean;
+  /** Precondition: the reviewer actually produced a non-blank reply. An empty
+   * or truncated-to-nothing reply parses to zero proposals and would otherwise
+   * satisfy every other condition vacuously, silently recording "the reviewer
+   * said nothing" as "the reviewer found nothing" - the two facts section 19
+   * insists are distinct. See checkReviewEvidence. */
+  reviewProduced: boolean;
   /** Condition 1: every line of the raw session file was retrieved through
    * the fixed reader, and the reviewer saw that full text. */
   readComplete: boolean;

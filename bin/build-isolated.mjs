@@ -42,7 +42,7 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PKG_NAME = "pi-harness";
 // 0.3.0: an explicitly constructed, attested, read-only delegated child,
 // durable read-scope escalation, crash orphaning, and live acceptance.
-const VERSION = "0.3.1";
+const VERSION = "0.3.2";
 
 /* ------------------------------------------------------------------ *
  * Layout mapping

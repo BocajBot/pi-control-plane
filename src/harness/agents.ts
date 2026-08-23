@@ -695,7 +695,22 @@ export function checkReviewEvidence(
   proposals: ReviewProposals,
   knownEntryIds: ReadonlySet<string>,
   read: ReviewReadProof,
+  rawReply?: string,
 ): { acceptance: ReviewAcceptance; filtered: ReviewProposals } {
+  // Precondition. A reviewer that produced no text at all parses to zero
+  // proposals, which passes shape (empty is well-formed), passes citations
+  // (nothing to cite), and - if the reader did its job - passes the complete
+  // read. All three conditions then certify a review that never happened. This
+  // is not hypothetical: the first live packaged run drove a reasoning model
+  // whose entire output budget went into a thinking block, so it stopped on
+  // `length` having emitted no answer; the empty reply was accepted as a valid
+  // empty review. The raw reply is passed in so the gate can tell "said
+  // nothing" from "found nothing" - the distinction section 19 requires and
+  // the reason the raw reply is stored at all. Callers that have no reply text
+  // to offer (unit tests exercising the citation logic directly) omit it, and
+  // the precondition is treated as satisfied for them.
+  const reviewProduced = rawReply === undefined ? true : rawReply.trim().length > 0;
+
   // Condition 1. `linesExpected > 0` is required, not incidental: a reader
   // that failed to open the session file reports 0 expected and 0 read, and
   // `0 === 0` would otherwise certify a review of nothing as a complete read.
@@ -712,6 +727,7 @@ export function checkReviewEvidence(
     return {
       acceptance: {
         accepted: false,
+        reviewProduced,
         readComplete,
         shapeValid: false,
         citationsValid: false,
@@ -792,6 +808,9 @@ export function checkReviewEvidence(
   const uniformCitation = itemCount > 1 && citedIds.size === 1;
 
   const failures: string[] = [];
+  if (!reviewProduced) {
+    failures.push("the reviewer produced no output; nothing was reviewed");
+  }
   if (!readComplete) {
     failures.push(
       read.linesExpected === 0
@@ -807,7 +826,8 @@ export function checkReviewEvidence(
 
   return {
     acceptance: {
-      accepted: readComplete && citationsValid,
+      accepted: reviewProduced && readComplete && citationsValid,
+      reviewProduced,
       readComplete,
       shapeValid: true,
       citationsValid,

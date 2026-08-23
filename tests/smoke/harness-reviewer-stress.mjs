@@ -148,6 +148,7 @@ for (const r of rows) {
     .reduce((n, k) => n + (p[k]?.length ?? 0), 0) + (p.memoryCandidates?.length ?? 0);
   console.log(`${r.model}  over ${r.stat.lines} lines / ${r.stat.entries} entries / ${r.stat.toolCalls} tool calls / ${r.stat.failedTools} failed / ${r.stat.modelChanges} model changes`);
   if (!g) { console.log("   NO REVIEW GENERATION WRITTEN"); console.log(`   ${r.out.slice(0, 300)}`); continue; }
+  console.log(`   reviewer produced output  : ${a.reviewProduced}  (rawReply ${String(g.rawReply ?? "").length} chars)`);
   console.log(`   complete source read      : ${a.readComplete}  (${a.linesRead}/${a.linesExpected})`);
   console.log(`   parser success            : ${a.shapeValid}   (${items} item(s) parsed)`);
   console.log(`   citation source membership: ${a.citationsValid}  (${(a.rejectedItems ?? []).length} uncited)`);
@@ -157,3 +158,8 @@ for (const r of rows) {
   if (!a.accepted) console.log(`   reason: ${a.reason}`);
   for (const x of (a.rejectedItems ?? []).slice(0, 3)) console.log(`   UNCITED: ${String(x).slice(0, 100)}`);
 }
+
+// A killed nested pi child can leave a stdio handle open and keep the event
+// loop alive after the report is printed. The results are all on stdout by
+// now, so exit deterministically rather than hanging on a dangling handle.
+process.exit(0);
