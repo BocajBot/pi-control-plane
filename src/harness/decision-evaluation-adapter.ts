@@ -34,6 +34,7 @@ import type {
   DecisionObservation,
   Evidence,
 } from "./decision-evaluation.ts";
+import type { ExecutionRecord } from "./external-evidence.ts";
 
 export interface EvidenceSources {
   audit: AuditEvent[];
@@ -137,6 +138,31 @@ export function toEvidence(src: EvidenceSources): Evidence[] {
     out.push(observation);
   }
 
+  return out;
+}
+
+/**
+ * Extract execution records from `shell_exec` audit events for the exit_code
+ * external-evidence reader (Phase 4.2 §A). This is the adapter's job because it
+ * knows the audit-event shape; the reader stays storage-unaware. Only
+ * harness-written fields are read (`metadata.runId`/`exitCode`/`decisionId`), so
+ * nothing model-supplied enters the exit-code join path. A line missing a valid
+ * runId or a numeric exitCode is skipped rather than guessed.
+ */
+export function extractExecutionRecords(audit: readonly AuditEvent[]): ExecutionRecord[] {
+  const out: ExecutionRecord[] = [];
+  for (const event of audit) {
+    if (event.eventType !== "shell_exec") continue;
+    const meta = (event.metadata ?? {}) as Record<string, unknown>;
+    if (typeof meta.runId !== "string" || meta.runId.length === 0) continue;
+    if (typeof meta.exitCode !== "number" || !Number.isInteger(meta.exitCode)) continue;
+    out.push({
+      runId: meta.runId,
+      decisionId: typeof meta.decisionId === "string" && meta.decisionId.length > 0 ? meta.decisionId : null,
+      exitCode: meta.exitCode,
+      at: event.timestamp,
+    });
+  }
   return out;
 }
 

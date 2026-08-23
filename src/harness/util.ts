@@ -29,6 +29,7 @@ export const ID_PREFIXES = {
   review: "rev",
   checkpoint: "chk",
   delegation: "dlg",
+  run: "run",
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIXES;

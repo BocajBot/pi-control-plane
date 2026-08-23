@@ -164,6 +164,81 @@ evidence, and the origin already travels on `observedEvidence`.
 
 ---
 
+## §A — harness-assigned run id + exit_code source (design)
+
+The second external source is a process **exit code**. Unlike a file diff, an exit
+status is the *direct, OS-reported outcome of a specific command the harness ran* —
+so it can both confirm and refute, provided the exit code is attributed to the
+right decision by something the model cannot forge.
+
+### Where the run id is assigned
+The **harness execution layer** mints the run id — `makeId("run")` inside the
+`harness_bash` tool's `execute()`, immediately around the `pi.exec(...)` call. It
+is generated, never taken from tool parameters, so **no model-supplied string ever
+becomes a run id**. The `run` prefix is added to `ID_PREFIXES` so `idKind()` can
+recover it.
+
+### Where it is captured (the external record)
+The existing `shell_exec` audit event **is** the execution record. Its metadata
+gains `{ runId, exitCode, decisionId }`:
+- `runId` — the harness-minted identity of this execution.
+- `exitCode` — the real `pi.exec` result (already captured, previously only in the
+  result string).
+- `decisionId` — the decision this command served, set by the harness from the
+  active decision context, or `null`.
+
+No new store: `shell_exec` lines are already append-only and hash-chained, so an
+execution record is tamper-evident for free (`verifyAuditChain`).
+
+### Where it is stored on the decision
+The **join key is `decisionId`**, already the telemetry join key. A command-
+executing decision's telemetry carries the same `decisionId` the harness stamps
+onto the `shell_exec` line it produced. The `runId` is the *execution's* identity
+(dedup + provenance), not the join key — the join is decision↔execution by
+`decisionId`, and both sides of it live on **harness-written** records.
+
+### Join rule
+`readExitCodeEvidence(claims, executionRecords)`:
+- an `ExecutionRecord{runId, decisionId, exitCode, at}` with a non-null
+  `decisionId` and a valid `runId` joins to the claim of the same `decisionId`;
+- **exit 0 → `success:true`; nonzero → `success:false`** — both authoritative,
+  `origin: externally_observed`. Missing `runId` or `decisionId` → **drop** (the
+  no-faith-join rule; an execution we cannot attribute is not evidence).
+
+### exit 0 semantics — bidirectional, unlike file_diff
+file_diff is refute-only: a diff is a downstream artifact anyone could have
+produced, so a nonzero diff proves nothing. An **exit code is the command's own
+result**, captured by the harness for a command uniquely tied to the decision by
+the harness-minted run id — it is not a shared artifact. So exit 0 is genuine
+success evidence (`success:true`, can corroborate a claimed success **and**
+contradict a claimed failure), and nonzero is failure evidence (`success:false`).
+Caveat, documented in code: "exit 0" attests the *command's* success, which the
+join ties to the decision; it is a strong proxy for task success, not a proof of
+it — but strictly better than the model's self-report, which is the whole point.
+
+### Forgery analysis (a fake id must not attach)
+Every field in the join path — `decisionId`, `runId`, `exitCode` — lives on
+`shell_exec` audit events, and `audit()` is the harness's sole, append-only,
+hash-chained writer. A model **cannot append a `shell_exec` record**, so it cannot
+manufacture an execution record with a chosen exit code. If a model fabricates a
+run id (or a decisionId) anywhere it *can* write — its own reasoning, a tool
+argument — that value never enters this join: the reader reads execution records
+**only** from `shell_exec` audit events, never from model-supplied fields. A
+fabricated run id therefore resolves to no execution record → nothing is emitted.
+Tampering with a real `shell_exec` line to flip an exit code breaks
+`verifyAuditChain` (already enforced and tested). Net: the model has no writable
+field on the path from decision to exit-code verdict.
+
+### Liveness (honest state)
+The **run-id capture is live**: real `shell_exec` executions now carry a harness-
+minted `runId` + `exitCode`. The **exit_code evidence is dormant** in the same
+sense as file_diff: `harness_bash` is run by the coordinator directly, not inside
+a telemetry-recorded, command-executing *decision*, so `decisionId` on those
+records is `null` and nothing joins. It goes live when a decision class that runs
+commands and records telemetry exists (e.g. a future execute/build/test delegate,
+which the read-only delegate is not). The reader + capture are built and tested
+now so that seam is a stamp-the-decisionId change, not a re-architecture.
+
 ## Open decisions
 
 - **[RESOLVED §A] `file_diff` first**, with the anchor + asymmetry amendment

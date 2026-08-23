@@ -135,8 +135,8 @@ import { inferProjectRoot } from "../src/harness/project.ts";
 import { formatIncident, makeDecision, makeIncident } from "../src/harness/records.ts";
 import { buildDecisionTelemetry, type DecisionTelemetryInput } from "../src/harness/decision-telemetry.ts";
 import { evaluate, type EvaluationReport, type DecisionClaim } from "../src/harness/decision-evaluation.ts";
-import { toEvidence, chainTrust } from "../src/harness/decision-evaluation-adapter.ts";
-import { readFileDiffEvidence } from "../src/harness/external-evidence.ts";
+import { toEvidence, chainTrust, extractExecutionRecords } from "../src/harness/decision-evaluation-adapter.ts";
+import { readFileDiffEvidence, readExitCodeEvidence } from "../src/harness/external-evidence.ts";
 import {
   generateProposals,
   selectNewProposals,
@@ -1400,9 +1400,19 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
           audit(actingAs, null, "shell_exec", command, `refused: ${outcome.reason}`);
           return { content: [{ type: "text", text: `Refused: ${outcome.reason}` }] } as never;
         }
+        // Run id minted by the harness execution layer (never from params), so
+        // the exit code below is an execution record the model cannot forge
+        // (Phase 4.2 §A). decisionId is the join key to a command-executing
+        // decision; null here because harness_bash is run by the coordinator
+        // directly, not inside a telemetry-recorded decision - the exit_code
+        // reader stays dormant until such a decision class stamps it.
+        const runId = makeId("run");
         const result = await pi.exec("/bin/sh", ["-c", outcome.command], { cwd: session.scope.root });
         audit(actingAs, null, "shell_exec", command, `exit ${result.exitCode ?? 0}`, {
           mounts: outcome.mounts,
+          runId,
+          exitCode: result.exitCode ?? 0,
+          decisionId: null,
         });
         const text = [result.stdout ?? "", result.stderr ?? ""].filter((s) => s.length > 0).join("\n");
         return { content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }] } as never;
@@ -2967,13 +2977,18 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
     const reviews = store!.readReviewGenerations(state.id);
     const evidence = toEvidence({ audit: auditRead.records, delegations, reviews });
     const claims = evidence.filter((e): e is DecisionClaim => e.kind === "claim");
-    const external = readFileDiffEvidence(claims, delegations, {
+    const fileDiff = readFileDiffEvidence(claims, delegations, {
       gitDiff: (anchor, roots) => gitDiffSince(paths?.projectRoot ?? process.cwd(), anchor, roots),
       now: nowIso(),
       expectsFileChange: () => false,
     });
+    // exit_code external evidence: joins decisions to harness-captured process
+    // exits by decisionId (read only from shell_exec audit records; no
+    // model-supplied field enters the join). Dormant until a command-executing
+    // decision class stamps decisionId on its shell_exec lines.
+    const exitCodes = readExitCodeEvidence(claims, extractExecutionRecords(auditRead.records));
     return evaluate({
-      evidence: [...evidence, ...external],
+      evidence: [...evidence, ...fileDiff, ...exitCodes],
       chain: chainTrust(verification, auditRead.records.length),
     });
   };

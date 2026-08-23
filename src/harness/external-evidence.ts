@@ -128,3 +128,76 @@ export function readFileDiffEvidence(
   // Deterministic order, independent of job append order.
   return out.sort((a, b) => (a.decisionId < b.decisionId ? -1 : a.decisionId > b.decisionId ? 1 : 0));
 }
+
+/* ------------------------------------------------------------------ *
+ * exit_code source (Phase 4.2 §A)
+ * ------------------------------------------------------------------ */
+
+/**
+ * One process execution the harness ran and captured. Extracted from
+ * `shell_exec` audit events (harness-written, hash-chained) by the adapter -
+ * never from a model-supplied field, which is the forgery barrier: the model has
+ * no writable field on the path from decision to exit-code verdict.
+ *
+ * `runId` is the harness-minted identity of the execution (dedup + provenance).
+ * `decisionId` is the join key to the decision the command served, or null when
+ * the command was not run inside a telemetry-recorded decision.
+ */
+export interface ExecutionRecord {
+  runId: string;
+  decisionId: string | null;
+  exitCode: number;
+  at: string;
+}
+
+/**
+ * Exit-code external evidence. Unlike file_diff, an exit code is the direct,
+ * OS-reported result of a specific command the harness ran, tied to the decision
+ * by a harness-minted run id - not a shared artifact - so it is BIDIRECTIONAL:
+ *
+ *  - exit 0     -> success:true  (corroborates a claimed success; contradicts a
+ *                                 claimed failure)
+ *  - exit != 0  -> success:false (refutes a claimed success)
+ *
+ * Both are authoritative `externally_observed` observations. An execution with no
+ * `runId` or no `decisionId` is dropped (no-faith join): an execution we cannot
+ * attribute to a decision is not evidence about it. Deterministic; the latest
+ * execution per decision by intrinsic (at, runId) is the one that stands.
+ *
+ * NOTE on "exit 0": it attests the *command's* success, which the join ties to
+ * the decision. It is a strong proxy for task success, not a proof of it - but it
+ * is a signal the model did not author, which is the entire point of the seam.
+ */
+export function readExitCodeEvidence(
+  claims: readonly DecisionClaim[],
+  records: readonly ExecutionRecord[],
+): DecisionObservation[] {
+  const claimIds = new Set(claims.map((c) => c.decisionId));
+
+  // Latest attributable execution per decision, by intrinsic (at, runId).
+  const latest = new Map<string, ExecutionRecord>();
+  for (const r of records) {
+    if (typeof r.runId !== "string" || r.runId.length === 0) continue;   // no harness identity -> drop
+    if (r.decisionId === null || !claimIds.has(r.decisionId)) continue;  // unattributable / no decision -> drop
+    if (!Number.isInteger(r.exitCode)) continue;                          // not a real exit status -> drop
+    const prev = latest.get(r.decisionId);
+    if (prev === undefined || r.at > prev.at || (r.at === prev.at && r.runId > prev.runId)) {
+      latest.set(r.decisionId, r);
+    }
+  }
+
+  const out: DecisionObservation[] = [];
+  for (const [decisionId, r] of latest) {
+    out.push({
+      kind: "observation",
+      source: "exit_code",
+      origin: "externally_observed",
+      refId: r.runId,
+      at: r.at,
+      decisionId,
+      observedOutcome: `exit ${r.exitCode}`,
+      success: r.exitCode === 0,
+    });
+  }
+  return out.sort((a, b) => (a.decisionId < b.decisionId ? -1 : a.decisionId > b.decisionId ? 1 : 0));
+}
