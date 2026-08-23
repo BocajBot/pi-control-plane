@@ -229,15 +229,22 @@ Tampering with a real `shell_exec` line to flip an exit code breaks
 `verifyAuditChain` (already enforced and tested). Net: the model has no writable
 field on the path from decision to exit-code verdict.
 
-### Liveness (honest state)
-The **run-id capture is live**: real `shell_exec` executions now carry a harness-
-minted `runId` + `exitCode`. The **exit_code evidence is dormant** in the same
-sense as file_diff: `harness_bash` is run by the coordinator directly, not inside
-a telemetry-recorded, command-executing *decision*, so `decisionId` on those
-records is `null` and nothing joins. It goes live when a decision class that runs
-commands and records telemetry exists (e.g. a future execute/build/test delegate,
-which the read-only delegate is not). The reader + capture are built and tested
-now so that seam is a stamp-the-decisionId change, not a re-architecture.
+### Liveness (now LIVE)
+The exit_code seam is **live**. A `command_run` decision class was added to the
+4.1 telemetry allowlist, and `harness_bash` records one when the coordinator opts
+in (`record: true` for a validation/build/test run), stamping the same
+`decisionId` onto both the `decision_telemetry` claim and the `shell_exec`
+execution record so the run-id join closes. This records an **already-authorized
+action** - the coordinator's own sandboxed shell, under identical scope/sandbox
+authority - and grants no new capability, actor, or policy (the boundary that
+ruled out an exec-capable delegate). Demonstrated end-to-end on real exit codes in
+`tests/smoke/harness-live-eval-demo.mjs`: a claimed-success command that really
+exits 0 → MATCH (externally corroborated), and a deliberate false-success claim
+whose command really exits 1 → MISMATCH, both `origin: externally_observed`.
+
+`file_diff` remains dormant (its edit-expectation predicate is still false - no
+edit-class decision exists yet), which is correct: read-only delegations produce
+no diff to refute.
 
 ## Open decisions
 

@@ -48,6 +48,12 @@ export const IMPORTANT_DECISION_ACTIONS = [
   "model_select",
   "memory_write",
   "route",
+  // A command the coordinator decided to run (a validation/build/test check) as
+  // part of a task. This records an ALREADY-AUTHORIZED action - it grants no new
+  // capability and adds no actor; it only makes the choice observable so the
+  // exit_code external-evidence seam (Phase 4.2 §A) can join a real outcome to
+  // it by run id. Recording surface, not an authority boundary.
+  "command_run",
 ] as const;
 
 export type ImportantDecisionAction = (typeof IMPORTANT_DECISION_ACTIONS)[number];

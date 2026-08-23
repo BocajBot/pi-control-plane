@@ -1386,9 +1386,17 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
       promptSnippet: "pi_harness_bash(command) - run a command in the sandboxed shell",
       parameters: T.Object({
         command: T.String({ description: "The shell command to run." }),
+        record: T.Optional(T.Boolean({
+          description:
+            "Record this run as a command-execution decision (for validation/build/test checks) so its real exit code can be evaluated. Records an already-authorized action; grants no new authority.",
+        })),
+        expect_success: T.Optional(T.Boolean({
+          description:
+            "When recording, the outcome you are asserting: true = you expect this command to succeed (default). The real exit code is compared against this claim.",
+        })),
       }) as never,
       execute: async (_id, params, ctx) => {
-        const { command } = params as { command: string };
+        const { command, record, expect_success } = params as { command: string; record?: boolean; expect_success?: boolean };
         if (session === null) {
           return { content: [{ type: "text", text: "Harness session is not initialized." }] } as never;
         }
@@ -1400,19 +1408,40 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
           audit(actingAs, null, "shell_exec", command, `refused: ${outcome.reason}`);
           return { content: [{ type: "text", text: `Refused: ${outcome.reason}` }] } as never;
         }
+
+        // A command-execution DECISION, recorded only when the coordinator opts
+        // in (a validation/build/test run). This records an already-authorized
+        // action through the 4.1 telemetry allowlist - no new capability, actor,
+        // or policy. The CLAIM is the coordinator's asserted outcome
+        // (expect_success), recorded BEFORE the exit code is known, so the
+        // exit_code external witness below is an independent check, not a
+        // tautology. When `record` is absent this tool behaves exactly as before
+        // (no telemetry, decisionId null).
+        const decisionId = record === true ? makeId("decision") : null;
+        if (decisionId !== null) {
+          const claimStatus = expect_success === false ? "failed" : "completed";
+          recordDecision("coordinator", currentModel(ctx), {
+            decisionId,
+            action: "command_run",
+            category: "command_execution",
+            rule: "coordinator_validation",
+            confidence: null,
+            context: { taskClass: null, estimatedComplexity: null, availableCapabilities: [] },
+            outcome: { status: claimStatus, retries: 0, userOverride: false },
+          });
+        }
+
         // Run id minted by the harness execution layer (never from params), so
-        // the exit code below is an execution record the model cannot forge
-        // (Phase 4.2 §A). decisionId is the join key to a command-executing
-        // decision; null here because harness_bash is run by the coordinator
-        // directly, not inside a telemetry-recorded decision - the exit_code
-        // reader stays dormant until such a decision class stamps it.
+        // the exit code is an execution record the model cannot forge (§A). When
+        // the run is a recorded decision, decisionId closes the run-id join so
+        // the exit_code reader produces a real externally_observed verdict.
         const runId = makeId("run");
         const result = await pi.exec("/bin/sh", ["-c", outcome.command], { cwd: session.scope.root });
         audit(actingAs, null, "shell_exec", command, `exit ${result.exitCode ?? 0}`, {
           mounts: outcome.mounts,
           runId,
           exitCode: result.exitCode ?? 0,
-          decisionId: null,
+          decisionId,
         });
         const text = [result.stdout ?? "", result.stderr ?? ""].filter((s) => s.length > 0).join("\n");
         return { content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }] } as never;
