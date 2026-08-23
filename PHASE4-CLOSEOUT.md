@@ -108,13 +108,19 @@ records a `command_run` decision and stamps its `decisionId`. `policy.ts`,
    its evidence path are already built to receive it.
 4. **Branch cleanup.** `phase4-decision-telemetry` is stale at `3a66dd0` (master
    is ahead); delete or keep as you prefer.
-5. **Citation-gate acceptance design.** Measured N=5×4 models (VALIDATION §12
-   addendum): 9/20 = 45% accepted, and the dominant rejection is a *systematic*
-   artifact — models writing a "none"-class placeholder into an empty section,
-   which the gate counts as an uncited item. Evidence points to a fix **upstream**
-   of the gate (reviewer prompt or parser: an empty-section placeholder is not a
-   citable item), not to loosening M5. No change was made — this is a design
-   decision for you, with the measured table as its evidence.
+5. **Citation-gate acceptance design.** Measured N=5×4 (VALIDATION §12 addendum):
+   9/20 = 45% accepted; dominant rejection is a *systematic* "none"-class
+   placeholder models write into empty sections, counted as an uncited item.
+   **The prompt-side fix was tried and REFUTED** (§12 second addendum, ablation
+   commit `e8d134d` + measurement): instructing the reviewer to leave sections
+   empty did NOT suppress the placeholder (placeholder lines 24 → 29, acceptance
+   did not rise), with engagement proven. So prompt wording is not the lever at
+   this model tier. Remaining levers, both **your** decision, neither taken:
+   (a) **parser** — treat a lone "none" placeholder in an otherwise-empty section
+   as empty, not an item (most promising, untested); (b) **M5 all-or-nothing** —
+   whether one uncited item should sink an otherwise-grounded review. Also decide
+   whether to keep or revert the prompt edit `e8d134d` (correct guidance, but it
+   did not move the metric).
 
 ---
 

@@ -898,3 +898,50 @@ Recommendation for the morning decision (evidence only; no change made): treat
 this as (b) first — fix the placeholder upstream (prompt or parser) and
 re-measure — before considering any change to the M5 condition itself. Per-run
 logs: `~/pi-harness-work/panel/rate-<model>-<n>.log` (transient).
+
+### §12 second addendum — prompt-fix ablation (single variable, 2026-08-23)
+
+Discriminating control for story (b): apply the **prompt-side fix only** (reviewer
+template instructed to leave empty sections empty, never a "none"/"_none_"
+placeholder — commit `e8d134d`), change nothing else (gate, parser, M5, per-model
+config all untouched), and re-run the identical N=5×4 measurement.
+
+**Engagement proof (independent of the outcome):** `~/.pi/agent/config.json`
+`packages` includes `"../../Documents/pi-control-plane"`, and the only
+`pi-harness.ts` on disk is the repo copy, whose `renderReviewPrompt`
+(`src/harness/agents.ts`) carries the edit. So the after-run demonstrably used the
+new prompt — a null result is attributable, not a mis-load.
+
+| Model | accepted before /5 | accepted after /5 |
+|-------|:--:|:--:|
+| qwen3-8-27b | 0 | 0 |
+| hermes-4-3-36b | 2 | 0 |
+| gemma-4-26b-a4b-it | 4 | 1 |
+| glm-4.7-flash-mxfp4 | 3 | 2 |
+| **aggregate** | **9/20 (45%)** | **3/20 (15%)** |
+| placeholder lines emitted (all 20 runs) | **24** | **29** |
+
+**Result: story (b)-as-a-prompt-fix is REFUTED.** The explicit instruction did not
+suppress the placeholder — models emitted *more* "none"-class lines after being
+told not to (24 → 29), and acceptance did not rise. The behavior is not
+controllable by prompt wording at this model tier.
+
+**Attribution honesty:** the 45% → 15% acceptance *drop* is NOT claimed as caused
+by the edit. Each side is a single n=5-per-model sample of a high-variance metric
+(gemma alone swung 4/5 → 1/5), so the drop is within plausible run-to-run noise;
+distinguishing a real regression from noise would need more repetitions. The
+**discriminating, low-variance observation is the placeholder count (24 → 29, no
+collapse)** — that is what refutes the prompt fix, not the acceptance number.
+
+**What this does to the morning story:** the placeholder artifact is real and
+consistent in kind (first addendum) but is **not** removable by prompt
+instruction. The remaining levers are therefore downstream, and both are morning
+decisions, not made here:
+- **Parser variant:** treat a lone "none"-class placeholder in an otherwise-empty
+  section as *empty*, not as an item. Untested; the most promising lever left.
+- **M5 all-or-nothing:** reconsider whether one uncited item should sink an
+  otherwise-grounded review. A contract-design question.
+
+The prompt edit `e8d134d` is correct guidance on its own merits but did not move
+the metric; whether to keep or revert it is part of the morning citation-gate
+decision. Logs: `~/pi-harness-work/panel/rate2-<model>-<n>.log` (transient).
