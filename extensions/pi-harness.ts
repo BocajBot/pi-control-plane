@@ -134,6 +134,8 @@ import {
 import { inferProjectRoot } from "../src/harness/project.ts";
 import { formatIncident, makeDecision, makeIncident } from "../src/harness/records.ts";
 import { buildDecisionTelemetry, type DecisionTelemetryInput } from "../src/harness/decision-telemetry.ts";
+import { evaluate, type EvaluationReport } from "../src/harness/decision-evaluation.ts";
+import { toEvidence, chainTrust } from "../src/harness/decision-evaluation-adapter.ts";
 import {
   approvalStatement,
   latestDelegationJobs,
@@ -2872,6 +2874,61 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
         audit("core", null, "review_complete", item.sessionId, `failed: ${message}`);
         emit("Harness review", [`Review ${item.id} failed: ${message}`]);
       }
+    },
+  });
+
+  /**
+   * Render an evaluation report for the terminal. Pure formatting - it names no
+   * change and recommends nothing (that is Phase 4.3); it only reports whether
+   * observed outcomes matched recorded decisions, and keeps the four meanings
+   * of "empty" distinct so "nothing evaluated" is never read as "all correct".
+   */
+  const renderEvaluation = (report: EvaluationReport): string[] => {
+    const { coverage: cov, provenance: prov } = report;
+    const lines: string[] = [
+      `Decisions observed: ${cov.decisionsObserved}  (measured ${cov.measured}, unmeasured ${cov.unmeasured}, unsupported ${cov.unsupported})`,
+      `Audit chain: ${prov.chainOk ? "ok" : "BROKEN"} (verified ${prov.verifiedPrefix}/${prov.totalRecords})`,
+      `Evidence: ${prov.evidenceCount} records (${prov.claims} claims, ${prov.observations} observations)`,
+    ];
+    if (cov.decisionsObserved === 0) {
+      lines.push("", "No recorded decisions to evaluate yet. This means telemetry is empty, not that every decision was correct.");
+    } else {
+      lines.push("", "By action:");
+      for (const action of Object.keys(report.byAction).sort()) {
+        const b = report.byAction[action];
+        lines.push(`  ${action}: ${b.total} total  ${b.match} match  ${b.mismatch} mismatch  ${b.unmeasured} unmeasured`);
+      }
+      const mismatches = report.decisions.filter((d) => d.verdict === "mismatch");
+      lines.push("", mismatches.length > 0 ? "Mismatches (telemetry claim vs observed evidence):" : "No mismatches among measured decisions.");
+      for (const d of mismatches) {
+        lines.push(
+          `  ${d.decisionId} [${d.action}] ${d.verdictReason}` +
+            (d.observedEvidence ? ` (evidence: ${d.observedEvidence.source} ${d.observedEvidence.refId})` : ""),
+        );
+      }
+    }
+    lines.push("", "This is observation only. Nothing here changes how Pi behaves; nothing was written.");
+    return lines;
+  };
+
+  pi.registerCommand("harness-eval", {
+    description: "Read-only outcome evaluation: did observed outcomes match recorded decisions? (writes nothing)",
+    handler: async () => {
+      const state = requireSession();
+      if (state === null || store === null) return;
+
+      // Strictly read-only. This command must leave the system byte-identical:
+      // it calls no audit(), persists no session, writes no checkpoint or
+      // workstate. Phase 4.2 observes; it does not act.
+      const auditRead = store.readAudit();
+      const verification = store.verifyAudit();
+      const delegations = store.readDelegations().records;
+      const reviews = store.readReviewGenerations(state.id);
+
+      const evidence = toEvidence({ audit: auditRead.records, delegations, reviews });
+      const report = evaluate({ evidence, chain: chainTrust(verification, auditRead.records.length) });
+
+      emit("Harness outcome evaluation", renderEvaluation(report));
     },
   });
 }
