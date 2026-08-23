@@ -133,6 +133,7 @@ import {
 } from "../src/harness/policy.ts";
 import { inferProjectRoot } from "../src/harness/project.ts";
 import { formatIncident, makeDecision, makeIncident } from "../src/harness/records.ts";
+import { buildDecisionTelemetry, type DecisionTelemetryInput } from "../src/harness/decision-telemetry.ts";
 import {
   approvalStatement,
   latestDelegationJobs,
@@ -527,6 +528,30 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
   ): void => {
     if (store === null) return;
     store.appendAudit(makeAuditEvent(auditContext(actor, model), { eventType, request, result, metadata }));
+  };
+
+  /**
+   * Phase 4.1 decision telemetry (evidence layer, not a control plane).
+   *
+   * Records the CLASS of an important decision and its outcome as a bounded,
+   * tamper-evident `decision_telemetry` audit event. It is called strictly
+   * AFTER a decision has been made: it never gates a verdict, never widens a
+   * capability, and writes only through the same append-only `audit()` path,
+   * so it opens no parallel store. `buildDecisionTelemetry` drops any decision
+   * that is not one of the important classes (migration risk 1) and copies
+   * only the contract fields (no reasoning traces), so a bad call site records
+   * nothing rather than recording the wrong thing.
+   */
+  const recordDecision = (
+    actor: AuditContext["actor"],
+    model: ModelConfiguration | null,
+    input: DecisionTelemetryInput,
+  ): void => {
+    const decision = buildDecisionTelemetry(input);
+    if (decision === null) return;
+    audit(actor, model, "decision_telemetry", `${decision.action}: ${decision.category}`, decision.outcome.status, {
+      decision,
+    });
   };
 
   const persistSession = (): void => {
@@ -1859,6 +1884,24 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
             job = transitionDelegationJob(job, "completed", "structured handoff returned");
             store!.appendDelegation(job);
           }
+
+          // Phase 4.1 decision telemetry: record that Pi chose to delegate/
+          // consult, and the measured outcome. This runs after the contract,
+          // attestation, drift checks, and job transition have all completed -
+          // it only observes; it changes no verdict and grants no authority.
+          recordDecision("coordinator", currentModel(ctx), {
+            decisionId: built.contract.id,
+            action: p.kind === "advisor" ? "consult" : "delegate",
+            category: p.kind === "advisor" ? "advisory_consult" : "subagent_delegation",
+            rule: "bounded_read_only_delegation",
+            confidence: null,
+            context: {
+              taskClass: null,
+              estimatedComplexity: null,
+              availableCapabilities: DELEGATE_TOOL_NAMES.slice(),
+            },
+            outcome: { status: job.status, retries: 0, userOverride: false },
+          });
 
           return {
             content: [
