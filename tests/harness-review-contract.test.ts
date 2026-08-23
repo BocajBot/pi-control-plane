@@ -20,6 +20,7 @@ import { test } from "node:test";
 import {
   checkReviewEvidence,
   extractCitations,
+  isEmptySectionPlaceholder,
   nextReviewGeneration,
   parseReviewProposals,
   renderReviewPrompt,
@@ -399,6 +400,107 @@ test("evidence gate: the parser feeds the gate; the parser does not enforce the 
   assert.deepEqual(filtered.memoryCandidates, [
     { content: "the user prefers pkexec over sudo", sources: [DEC] },
   ]);
+});
+
+/* --- lone "nothing to report" placeholder is an empty section ------ */
+/* Measured (VALIDATION §12): the dominant citation-gate rejection was a
+ * model writing a "none"-class placeholder into an otherwise-empty section,
+ * which the parser then counted as one uncited item and, under M5
+ * all-or-nothing, used to sink the whole review. parseReviewProposals now
+ * drops a *lone* placeholder so the section reads as empty. The three cases
+ * that fix must satisfy - and the classifier it rests on - are pinned here. */
+
+test("placeholder: a section whose only line is a 'none'-class placeholder parses to empty", () => {
+  const parsed = parseReviewProposals(
+    [
+      "FINDINGS:",
+      `- the sandbox refuses without bwrap || ${AUD}`,
+      "MISTAKES:",
+      "- None observed.",
+    ].join("\n"),
+  );
+  assert.deepEqual(parsed.mistakes, [], "the lone placeholder is not counted as an item");
+  assert.equal(parsed.findings.length, 1, "real sections are untouched");
+
+  // With the empty section gone, a fully-cited review is accepted rather than
+  // being sunk by a placeholder nobody could cite.
+  const { acceptance, filtered } = checkReviewEvidence(parsed, SESSION_IDS, COMPLETE_READ);
+  assert.equal(acceptance.accepted, true);
+  assert.deepEqual(acceptance.rejectedItems, [], "no placeholder survives to be rejected");
+  assert.deepEqual(filtered.mistakes, []);
+});
+
+test("placeholder: alongside a real item the placeholder stays an item and (uncited) rejects", () => {
+  // Scope guard: the collapse fires only when the placeholder is ALONE. Here it
+  // shares the section with a real cited item, so it cannot hide - it stays an
+  // item and, being uncited, still sinks the review.
+  const parsed = parseReviewProposals(
+    [
+      "MISTAKES:",
+      `- scope was widened without approval (cause: model) || ${INC}`,
+      "- None observed.",
+    ].join("\n"),
+  );
+  assert.equal(parsed.mistakes.length, 2, "the placeholder is not dropped when it is not alone");
+
+  const { acceptance, filtered } = checkReviewEvidence(parsed, SESSION_IDS, COMPLETE_READ);
+  assert.equal(acceptance.accepted, false);
+  assert.deepEqual(
+    filtered.mistakes,
+    [`scope was widened without approval (cause: model) || ${INC}`],
+    "the cited item survives",
+  );
+  assert.deepEqual(acceptance.rejectedItems, ["None observed."], "the placeholder rejects as uncited");
+});
+
+test("placeholder: a lone genuine uncited fact is not a placeholder - it stays an item and rejects", () => {
+  // The gate keeps its teeth: a real observation that simply lacks a citation is
+  // not a "nothing to report" declaration, so it is not collapsed and still sinks
+  // the review.
+  const parsed = parseReviewProposals(
+    ["MISTAKES:", "- scope was widened without approval (cause: model)"].join("\n"),
+  );
+  assert.equal(parsed.mistakes.length, 1, "a genuine fact is still an item");
+
+  const { acceptance } = checkReviewEvidence(parsed, SESSION_IDS, COMPLETE_READ);
+  assert.equal(acceptance.accepted, false);
+  assert.deepEqual(acceptance.rejectedItems, ["scope was widened without approval (cause: model)"]);
+});
+
+test("isEmptySectionPlaceholder: emptiness declarations are placeholders", () => {
+  for (const s of [
+    "",
+    "   ",
+    "_none_",
+    "none",
+    "None.",
+    "None observed.",
+    "None identified in this session.",
+    "No guidance corrections needed",
+    "no issues found",
+    "Nothing to report.",
+    "N/A",
+    "n/a",
+    "nil",
+    "-",
+    "—",
+    "TBD",
+    "not applicable",
+  ]) {
+    assert.equal(isEmptySectionPlaceholder(s), true, `expected placeholder: ${JSON.stringify(s)}`);
+  }
+});
+
+test("isEmptySectionPlaceholder: substantive claims are NOT placeholders", () => {
+  for (const s of [
+    "none of the tools were denied",
+    "None were denied this session",
+    "the user prefers pkexec over sudo",
+    "scope was widened without approval (cause: model)",
+    "no-build documented for test_output",
+  ]) {
+    assert.equal(isEmptySectionPlaceholder(s), false, `expected substantive: ${JSON.stringify(s)}`);
+  }
 });
 
 /* --- generations --------------------------------------------------- */

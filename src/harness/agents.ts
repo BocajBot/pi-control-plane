@@ -439,6 +439,29 @@ export function stripEchoedPrompt(reply: string, prompt: string): string {
   return (reply.slice(0, at) + reply.slice(at + needle.length)).trim();
 }
 
+/**
+ * Whether a line is a bare "this section has nothing to report" placeholder
+ * rather than a substantive item. Measured (VALIDATION §12): models emit these -
+ * `_none_`, "None observed.", "No guidance corrections needed", "None identified
+ * in this session." - into empty sections, and each becomes an uncited item that
+ * sinks the whole review. This recognizes the emptiness declaration so a *lone*
+ * one can be treated as an empty section (see parseReviewProposals).
+ *
+ * Deliberately narrow: "none of/none were/none was/…" are substantive claims and
+ * are NOT placeholders, and an "no <x> …" line only counts when it declares
+ * absence (needed/observed/identified/…). A genuine uncited fact must still read
+ * as an item and still reject.
+ */
+export function isEmptySectionPlaceholder(content: string): boolean {
+  const c = content.trim().replace(/[.…\s]+$/u, "").toLowerCase();
+  if (c.length === 0) return true;
+  if (["_none_", "none", "n/a", "na", "nil", "-", "—", "tbd", "not applicable"].includes(c)) return true;
+  if (/^none\b/.test(c) && !/^none (of|were|was|are|is|had|have|has|will|would|remain)\b/.test(c)) return true;
+  if (/^no\b.*\b(needed|observed|identified|found|required|to report|applicable|noted|detected)\b/.test(c)) return true;
+  if (/^nothing\b/.test(c)) return true;
+  return false;
+}
+
 export function parseReviewProposals(raw: string): ReviewProposals {
   const headings = new Set([...REVIEW_KEYS.map(([, key]) => key), "MEMORY"]);
   const sections = new Map<string, string[]>();
@@ -456,6 +479,20 @@ export function parseReviewProposals(raw: string): ReviewProposals {
     if (current === null) continue;
     const item = line.replace(/^\s*[-*]\s+/, "").trim();
     if (item.length > 0) sections.get(current)!.push(item);
+  }
+
+  // A section whose ONLY line is a "nothing to report" placeholder is an empty
+  // section, not an item (VALIDATION §12). Scope is deliberately tight so the
+  // gate keeps its teeth: this fires only when the placeholder is alone -
+  // a placeholder alongside real items stays an item (a model cannot hide an
+  // uncited claim behind one), and a lone genuine uncited fact is not a
+  // placeholder, so it still reads as an item and still rejects. The citation
+  // check and M5 all-or-nothing are untouched; this only changes what counts as
+  // an item in the first place.
+  for (const [key, items] of sections) {
+    if (items.length === 1 && isEmptySectionPlaceholder(items[0].split("||")[0])) {
+      sections.set(key, []);
+    }
   }
 
   const proposals: ReviewProposals = {
