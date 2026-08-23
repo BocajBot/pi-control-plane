@@ -137,6 +137,12 @@ import { buildDecisionTelemetry, type DecisionTelemetryInput } from "../src/harn
 import { evaluate, type EvaluationReport } from "../src/harness/decision-evaluation.ts";
 import { toEvidence, chainTrust } from "../src/harness/decision-evaluation-adapter.ts";
 import {
+  generateProposals,
+  selectNewProposals,
+  classifyStaleness,
+  type ImprovementProposal,
+} from "../src/harness/decision-proposal.ts";
+import {
   approvalStatement,
   latestDelegationJobs,
   makeDelegationJob,
@@ -2929,6 +2935,86 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
       const report = evaluate({ evidence, chain: chainTrust(verification, auditRead.records.length) });
 
       emit("Harness outcome evaluation", renderEvaluation(report));
+    },
+  });
+
+  /** Proposals older than this render as stale (Amendment 2). A display rule
+   * only - no status is stored. */
+  const PROPOSAL_STALE_DAYS = 14;
+
+  /**
+   * Render proposals for a human, with staleness computed at read time. Names
+   * no change beyond the drafted suggestion text and enacts nothing.
+   */
+  const renderProposals = (
+    all: ImprovementProposal[],
+    freshCount: number,
+    stale: { now: string; maxAgeDays: number; currentByDecision: Map<string, string> },
+  ): string[] => {
+    if (all.length === 0) {
+      return [
+        "No proposals. Either no outcome mismatches have been observed, or none map to a proposable class.",
+        "This is not evidence that every decision was correct - run /harness-eval for coverage.",
+      ];
+    }
+    const lines = [`${all.length} proposal(s) on file; ${freshCount} new this run.`, ""];
+    let staleCount = 0;
+    for (const p of all) {
+      const s = classifyStaleness(p, stale);
+      if (s !== "fresh") staleCount++;
+      const tag = s === "fresh" ? "" : ` [${s.toUpperCase()}]`;
+      lines.push(`- ${p.proposalClass}${tag}: ${p.text}`);
+      lines.push(`    evidence: ${p.evidence.decisionIds.length} decision(s); proposed ${p.proposedAt}`);
+    }
+    lines.push(
+      "",
+      `${staleCount} of ${all.length} render as stale (older than ${stale.maxAgeDays} days or evidence superseded).`,
+      "These are DRAFTS. Nothing here has changed how Pi behaves; apply one only by editing AGENTS.md / config / memory yourself.",
+    );
+    return lines;
+  };
+
+  pi.registerCommand("harness-propose", {
+    description: "Draft human-reviewable improvement proposals from evaluated outcome mismatches (writes proposals only; applies nothing)",
+    handler: async (_args, ctx) => {
+      const state = requireSession();
+      if (state === null || store === null) return;
+
+      // Same evidence the evaluator uses. Read-only up to the point of writing
+      // the proposals themselves: this command writes ONLY improvement-proposal
+      // records and one proposal_created audit line per new proposal. It edits
+      // no AGENTS.md, no policy, no config, no memory, no session state - a
+      // proposal is enacted only by a human (Phase 4.3 generation-only).
+      const auditRead = store.readAudit();
+      const verification = store.verifyAudit();
+      const delegations = store.readDelegations().records;
+      const reviews = store.readReviewGenerations(state.id);
+      const report = evaluate({
+        evidence: toEvidence({ audit: auditRead.records, delegations, reviews }),
+        chain: chainTrust(verification, auditRead.records.length),
+      });
+
+      const now = nowIso();
+      const model = currentModel(ctx);
+      const generated = generateProposals(report, { model, proposedAt: now });
+      const existing = store.readImprovementProposals().records;
+      const fresh = selectNewProposals(existing, generated);
+
+      for (const proposal of fresh) {
+        store.appendImprovementProposal(proposal);
+        // A draft is a MODEL assertion (AU2): actor coordinator + its model,
+        // never "user".
+        audit("coordinator", model, "proposal_created", `${proposal.proposalClass}: ${proposal.text}`, "proposed", {
+          proposalId: proposal.id,
+          decisionIds: proposal.evidence.decisionIds,
+        });
+      }
+
+      const currentByDecision = new Map(report.decisions.map((d) => [d.decisionId, d.verdict]));
+      emit(
+        "Harness proposals",
+        renderProposals([...existing, ...fresh], fresh.length, { now, maxAgeDays: PROPOSAL_STALE_DAYS, currentByDecision }),
+      );
     },
   });
 }

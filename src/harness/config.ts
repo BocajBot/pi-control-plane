@@ -82,6 +82,10 @@ export interface HarnessPaths {
    * parent are reconciled to orphaned; no seamless child survival is
    * implied. */
   delegationsFile: string;
+  /** Phase 4.3 write-only proposal channel. Human-reviewed drafts derived from
+   * the evaluator; the runtime never reads it - a proposal becomes behavior
+   * only when a human bridges it into AGENTS.md / config / memory. */
+  improvementProposalsFile: string;
   incidentsFile: string;
   /** In-project recovery file (spec section 16). Normally gitignored. */
   workstateFile: string;
@@ -145,6 +149,7 @@ export function harnessPaths(
     auditTipFile: path.join(projectDir, "audit.tip.json"),
     decisionsFile: path.join(projectDir, "decisions.jsonl"),
     delegationsFile: path.join(projectDir, "delegations.jsonl"),
+    improvementProposalsFile: path.join(projectDir, "improvement-proposals.jsonl"),
     incidentsFile: path.join(projectDir, "incidents.jsonl"),
     workstateFile: path.join(projectRoot, ".pi", "WORKSTATE.md"),
     workstatesDir: path.join(projectRoot, ".pi", "workstates"),

@@ -358,6 +358,7 @@ export const AUDIT_EVENT_TYPES = [
   "task_status",
   "decision_record",
   "decision_telemetry",
+  "proposal_created",
   "incident_record",
   "memory_write",
   "memory_promote",

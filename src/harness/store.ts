@@ -39,6 +39,7 @@ import {
 import { idKind } from "./util.ts";
 import { emptyIdentity, validateIdentity } from "./identity.ts";
 import { validateDelegationJob } from "./delegation-jobs.ts";
+import { validateImprovementProposal, type ImprovementProposal } from "./decision-proposal.ts";
 import { validateSoftPolicyRecord } from "./policy.ts";
 import {
   defaultConfig,
@@ -719,6 +720,17 @@ export class HarnessStore {
 
   readDelegations(): JsonlReadResult<DelegationJobRecord> {
     return readJsonl(this.paths.delegationsFile, validateDelegationJob);
+  }
+
+  /** Phase 4.3: append one improvement proposal to the write-only channel.
+   * There is deliberately no update or apply method - a proposal is enacted
+   * only by a human editing AGENTS.md / config / memory. */
+  appendImprovementProposal(record: ImprovementProposal): void {
+    appendJsonl(this.paths.improvementProposalsFile, record);
+  }
+
+  readImprovementProposals(): JsonlReadResult<ImprovementProposal> {
+    return readJsonl(this.paths.improvementProposalsFile, validateImprovementProposal);
   }
 
   appendIncident(incident: IncidentRecord): void {
