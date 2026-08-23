@@ -14,8 +14,14 @@ review gate now runs live against the packaged tarball extract — one accepted
 review with 24 grounded proposals, and a rejected empty/length-truncated reply
 (`reviewProduced=false`) that v0.3.1 had accepted vacuously — and coordinator
 enforcement is confirmed standalone (14/14). Load provenance is proven by
-ablation, not asserted. Still not shown: a multi-model live reviewer panel, and
-an executable (not prose) reproduction of the pre-fix audit fork.
+ablation, not asserted.
+
+**Update (Phase 4 follow-up).** The pre-fix audit fork now has an **executable**
+reproduction, not a prose one: `tests/harness-audit-fork-repro.test.ts` shows two
+unlocked appends from a cached tip forking the chain (prevHashes
+`[<anchor>, X, X]`, `verifyAudit ok=false brokenAt=2`), then the same interleave
+through the current locked append staying linear (`[<anchor>, X, Y]`, `ok=true`).
+Still not shown: a multi-model live reviewer panel.
 
 ---
 
@@ -94,9 +100,11 @@ That was true and is now fixed. The three claims, kept distinct on purpose:
   Reproduced pre-fix (32 concurrent appenders → 3 prevHash collisions,
   `verifyAudit` broke at event 12) and closed post-fix (32/32, one linear
   chain). Covered by a real multi-process regression test
-  (`tests/harness-audit-concurrency.test.ts`) and four discriminating
-  mutations (remove the lock; use the cached tip; make a live lock stealable;
-  disable stale recovery — each fails the matching test).
+  (`tests/harness-audit-concurrency.test.ts`), a deterministic executable
+  fork-then-fixed reproduction (`tests/harness-audit-fork-repro.test.ts` — the
+  fork shown, not just described), and four discriminating mutations (remove the
+  lock; use the cached tip; make a live lock stealable; disable stale recovery —
+  each fails the matching test).
 - *Detectable but not prevented.* A crash between the JSONL append and the
   tip commit leaves the tip *behind* the log. That is reported as behind — a
   benign, expected state — and the next locked append reconciles it. The
