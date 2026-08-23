@@ -97,6 +97,7 @@ import {
   validatePolicy,
   type PathOps,
 } from "../src/control-plane/tool-policy.ts";
+import { isSensitiveReadTarget, type SensitiveReadExtra } from "../src/control-plane/sensitive-paths.ts";
 import {
   buildInjectionBlock,
   contextWarningLevel,
@@ -396,6 +397,28 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     realpath: (p) => fs.realpathSync(p),
     exists: (p) => fs.existsSync(p),
   };
+
+  /** Canonical path of the harness agent directory (`<harness-home>/agent`),
+   * which reads freely (Pi reading its own skills/config is not exfil). Computed
+   * from PI_HARNESS_HOME, else ~/.pi, matching the harness's own path logic.
+   * Cached; null only if it cannot be resolved. */
+  let agentDirCache: string | null | undefined;
+  const agentDir = (): string | null => {
+    if (agentDirCache !== undefined) return agentDirCache;
+    const base = process.env.PI_HARNESS_HOME && process.env.PI_HARNESS_HOME.trim().length > 0
+      ? process.env.PI_HARNESS_HOME
+      : path.join(os.homedir(), ".pi");
+    agentDirCache = canonicalizePath(path.join(base, "agent"), os.homedir(), pathOps);
+    return agentDirCache;
+  };
+
+  /** Sensitive-read denylist extensions drawn from the Restricted policy's deny
+   * patterns, so the list is configurable via policy/default-policy.json on top
+   * of the built-in defaults. */
+  const sensitiveReadExtra = (): SensitiveReadExtra =>
+    policy === null
+      ? {}
+      : { basenames: policy.denyPathBasenames, pathSubstrings: policy.denyPathSubstrings };
 
   /** mtimeMs of a file, or null if it cannot be stat'd. */
   const mtimeOf = (canonical: string): number | null => {
@@ -1501,6 +1524,24 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       ops: pathOps,
       hasAcceptedTask: state.acceptedTask !== null,
     });
+
+    // Reads free by default: a read outside the project root would otherwise
+    // confirm (attended:read-outside-root), which turns a normal read workload
+    // into a yes/no every few seconds. Downgrade it to a silent (still scope-
+    // checked, still read-before-edit-crediting) allow UNLESS the target is on
+    // the sensitive-path denylist — those keep the exfil confirm. In-scope reads
+    // were already allowed, so this only touches the out-of-root read prompt.
+    if (decision.action === "confirm" && decision.rule === "attended:read-outside-root") {
+      const rawPath = typeof (event.input as Record<string, unknown>).path === "string"
+        ? ((event.input as Record<string, unknown>).path as string)
+        : null;
+      const canonical = rawPath !== null ? canonicalizePath(rawPath, ctx.cwd, pathOps) : null;
+      if (canonical !== null && !isSensitiveReadTarget(canonical, agentDir(), sensitiveReadExtra())) {
+        recordReadCredit(event, ctx);
+        return; // allow silently
+      }
+      // Sensitive (or unresolvable): fall through to the confirm below.
+    }
 
     // Read-before-edit (hard rule): an edit/write targeting an EXISTING file
     // must have read that file this session (and it must not have changed on
