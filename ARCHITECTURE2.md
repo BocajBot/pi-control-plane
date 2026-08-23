@@ -1260,21 +1260,40 @@ This layout is not a permanent database commitment. It makes evidence and recove
 
 ## 29. Current implementation mapping
 
+Repo layout (`src/harness/*`); the isolated build rewrites these to `src/core/*`
+(see `bin/build-isolated.mjs`). The Pi extension entry point is
+`extensions/pi-harness.ts`.
+
 ```text
-src/index.ts              Pi extension / lifecycle / tools / enforcement
-src/agents.ts             advisor, bounded subagent, retrospective reviewer
-src/types.ts              state contracts
-src/core/state.ts         session initialization
-src/core/store.ts         local durable state + append-only records
-src/core/scope.ts         canonical path and symlink-safe scope checks
-src/core/policy.ts        hard policy decisions
-src/core/sandbox.ts       Linux bubblewrap shell boundary
-src/core/workstate.ts     WORKSTATE renderer
-src/core/audit.ts         audit-event construction
-src/core/project.ts       project-root inference
-src/core/config.ts        runtime configuration
-src/core/util.ts          ids/timestamps/device/project keys
+extensions/pi-harness.ts        Pi extension / lifecycle / tools / commands / enforcement wiring
+src/harness/agents.ts           advisor, bounded subagent, retrospective reviewer + evidence contract
+src/harness/types.ts            state contracts + audit event types + schema version
+src/harness/state.ts            session initialization
+src/harness/store.ts            local durable state + append-only hash-chained records
+src/harness/scope.ts            canonical path and symlink-safe scope checks
+src/harness/policy.ts           authorize(): single monotonic verdict source
+src/harness/capability.ts       tool catalog + per-session capability exceptions
+src/harness/memory.ts           promote(): durable-memory chokepoint (PROMOTION_ACTORS)
+src/harness/sandbox.ts          Linux bubblewrap shell boundary
+src/harness/delegate-runtime.ts read-only delegate tools + attestation + runtime log
+src/harness/delegation-jobs.ts  delegation lifecycle records (+ repoAnchor, Phase 4.2)
+src/harness/workstate.ts        WORKSTATE renderer
+src/harness/audit.ts            audit-event construction + hash chain + verifyAuditChain
+src/harness/project.ts          project-root inference
+src/harness/config.ts           runtime configuration + path layout
+src/harness/util.ts             ids/timestamps/device/project keys
+
+Phase 4 — adaptive DECISION layer (observational; no authority):
+src/harness/decision-telemetry.ts           4.1 bounded decision telemetry contract (allowlist)
+src/harness/decision-evaluation.ts          4.2 pure read-only evaluator (claim vs evidence)
+src/harness/decision-evaluation-adapter.ts  4.2 store-shape -> evidence adapter (+ execution records)
+src/harness/decision-proposal.ts            4.3 pure proposal generator (generation-only)
+src/harness/external-evidence.ts            4.2-fu file_diff + exit_code external witnesses
 ```
+
+Phase 4 wiring lives in `extensions/pi-harness.ts`: `recordDecision` (telemetry
+seam), `/harness-eval` (read-only evaluator), `/harness-propose` (generation-only
+proposals), the `command_run` recording + run-id capture in `pi_harness_bash`.
 
 ---
 
