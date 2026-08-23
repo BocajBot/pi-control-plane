@@ -945,3 +945,59 @@ decisions, not made here:
 The prompt edit `e8d134d` is correct guidance on its own merits but did not move
 the metric; whether to keep or revert it is part of the morning citation-gate
 decision. Logs: `~/pi-harness-work/panel/rate2-<model>-<n>.log` (transient).
+
+### §12 third addendum — parser fix measured (N=5 per model, 2026-08-23)
+
+The parser lever named as "most promising, untested" above was implemented
+(`24f5bce`): `parseReviewProposals` now collapses a section whose **only** line
+is a "nothing to report" placeholder to empty, so it is not counted as an uncited
+item. Same N=5×4 protocol as the first two addenda; prompt edit `e8d134d` left in
+place (this measures parser-on, prompt-on).
+
+**Engagement proof (established before reading the acceptance number, and
+independent of it):** the dominant rate2 rejection was a "none"-class placeholder
+counted as an uncited item. The discriminating, low-variance signal for whether
+the parser engaged is therefore the count of **placeholder-class `UNCITED:`
+lines** in the reviewer output. That count is **0 across all 20 runs** (rate2's
+were pervasive). The parser demonstrably fired; the acceptance movement below is
+attributable to it and not to a mis-load.
+
+| Model | accepted rate2 /5 | accepted rate3 /5 |
+|-------|:--:|:--:|
+| qwen3-8-27b | 0 | 4 |
+| hermes-4-3-36b | 0 | 5 |
+| gemma-4-26b-a4b-it | 1 | 3 |
+| glm-4.7-flash-mxfp4 | 2 | 5 |
+| **aggregate** | **3/20 (15%)** | **17/20 (85%)** |
+| placeholder-class `UNCITED:` lines (all 20) | pervasive | **0** |
+
+(rate2's before-column here is the *ablation* run — prompt-on. The pre-prompt
+baseline was 9/20.)
+
+**The 3 residual rejections were inspected; none is a parser miss of the kind the
+fix targets, and none is the gate failing:**
+- **gemma #3, gemma #4 — the gate working correctly.** Their uncited items cite a
+  bare `|| 20` and ISO timestamps (`|| 2026-08-23T12:36:20.815Z`), not real
+  session entry ids. These are exactly the genuine-but-ungrounded items the
+  citation gate exists to refuse. Correct rejection; M5 all-or-nothing held.
+- **qwen #4 — a classifier gap, not a gate failure.** Three `_None observed_`
+  lines. These *are* none-class placeholders, but underscore-wrapped (markdown
+  italic). `isEmptySectionPlaceholder` strips trailing dots/whitespace, not
+  surrounding `_`/`*` emphasis, so it did not recognize them and the lone-
+  placeholder collapse did not fire. This is a recognized residual of the SAME
+  fix (semantically identical to `None observed`, which is classified), addressed
+  separately in the next commit with its own unit test — kept out of this
+  measurement step so the observation and the follow-up edit stay distinct.
+
+**Decision on `e8d134d` (prompt edit): KEEP.** Rationale, on the evidence:
+- The **parser** is the effective lever (placeholder rejections → 0; 15% → 85%).
+  `e8d134d` was already refuted as a lever in the second addendum (it did not
+  suppress placeholders) and that stands.
+- `e8d134d` is correct guidance (tell the reviewer to leave sections empty rather
+  than write a placeholder), is now **complementary** to the parser (fewer
+  placeholders written; the parser catches the ones still written), and shows
+  **no measured harm**. Reverting correct, inert-to-helpful guidance is a change
+  with no evidence behind it; the smaller correct move is to keep it. It is
+  recorded here as *not the effective lever* so no one mistakes it for one.
+
+Logs: `~/pi-harness-work/panel/rate3-<model>-<n>.log` (transient).
