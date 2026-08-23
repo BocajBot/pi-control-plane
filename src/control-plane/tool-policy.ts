@@ -257,9 +257,10 @@ function confirm(
   return { action: "confirm", rule, reason, riskCategory, insideRoot };
 }
 
-const HINT_PHASE = "Mutation is only possible in the Execute phase: /phase execute (autonomy must also permit it).";
+const HINT_PHASE =
+  "Mutation is only possible in an Execute mode: /mode execute (or /mode execute-restricted / execute-unattended).";
 const HINT_AUTONOMY =
-  "Raise autonomy for this to run: /autonomy attended (confirm each risky action) or /autonomy restricted (project-bound policy).";
+  "Switch to an Execute mode for this to run: /mode execute (confirm each risky action) or /mode execute-restricted (project-bound policy).";
 
 export function evaluateToolCall(input: EvaluateInput): ToolDecision {
   const { toolName, guardActive, phase, autonomy, projectRoot, cwd, policy, ops } = input;
@@ -398,7 +399,7 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
         "Shell execution is blocked by the Restricted policy (allowBash: false). Commands are never pattern-parsed to decide safety.",
         risk,
         insideRoot,
-        "Use /autonomy attended to approve individual shell commands interactively.",
+        "Use /mode execute to approve individual shell commands interactively.",
       );
     }
     return confirm(
@@ -414,7 +415,7 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
       `Tool "${toolName}" is unknown to the control plane. Unknown tools are categorically denied in Restricted mode.`,
       risk,
       insideRoot,
-      "Use /autonomy attended to approve unknown tools interactively.",
+      "Use /mode execute to approve unknown tools interactively.",
     );
   }
   // Mutating tool under Restricted: destination checks.
