@@ -108,6 +108,13 @@ records a `command_run` decision and stamps its `decisionId`. `policy.ts`,
    its evidence path are already built to receive it.
 4. **Branch cleanup.** `phase4-decision-telemetry` is stale at `3a66dd0` (master
    is ahead); delete or keep as you prefer.
+5. **Citation-gate acceptance design.** Measured N=5×4 models (VALIDATION §12
+   addendum): 9/20 = 45% accepted, and the dominant rejection is a *systematic*
+   artifact — models writing a "none"-class placeholder into an empty section,
+   which the gate counts as an uncited item. Evidence points to a fix **upstream**
+   of the gate (reviewer prompt or parser: an empty-section placeholder is not a
+   citable item), not to loosening M5. No change was made — this is a design
+   decision for you, with the measured table as its evidence.
 
 ---
 

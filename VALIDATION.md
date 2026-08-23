@@ -842,3 +842,59 @@ templates and still produced shape-valid content.
 
 Logs: `~/pi-harness-work/panel/<model>.log` (transient; regenerate with
 `HARNESS_SMOKE_MODEL=llama-swap/<id> node tests/smoke/harness-review-smoke.mjs`).
+
+### §12 addendum — acceptance rate measured (N=5 per model, 2026-08-23)
+
+Tonight's panel graded one run per model (n=1); the "acceptance is
+nondeterministic" claim needed a measured rate. Same four local models, same
+`harness-review-smoke.mjs` path and scripted session, **five runs each, gate and
+config untouched** (measurement only — no tuning, no edits to the acceptance
+condition).
+
+| Model | accepted /5 | uncited counts per run | notes |
+|-------|:-----------:|------------------------|-------|
+| qwen3-8-27b | **0/5** | 2, 1, 2, 3, (2) | placeholder line every run |
+| hermes-4-3-36b | **2/5** | 1, 2, 0, 1, 0 | |
+| gemma-4-26b-a4b-it | **4/5** | 0, 0, 1, 0, 0 | leaves empty sections empty |
+| glm-4.7-flash-mxfp4 | **3/5** | 3, 0, 0, 1, 0 | |
+| **aggregate** | **9/20 = 45%** | | acceptance is real and achievable |
+
+**Nondeterminism confirmed, and it is not uniform:** 45% overall, ranging 0/5 to
+4/5 by model — so "always rejects" (tonight's n=1 impression) was sampling. The
+gate is not failing closed on every real reviewer.
+
+**Failure mode is systematic in kind, not scattered — this is the important
+finding.** Across the 11 rejecting runs the dominant uncited item is a
+natural-language *"nothing to report" placeholder* a model writes into a section
+it has no content for, instead of leaving it empty:
+
+```
+_none_        None observed.        None observed. The session was short and correct.
+No guidance corrections needed for this model in this session
+None identified in this session.   None — the session was too brief to yield lessons.
+```
+
+The gate treats that placeholder as an *item*, which then has no citable source,
+and condition 3 (all-or-nothing) sinks the whole review on it. A minority of
+uncited items are genuine unsourced factual claims — "the session lasted ~3
+minutes", "ran in /tmp/pi-review-smoke-…/proj" — and those are *correct*
+rejections (an assertion with no session-entry source).
+
+Mapping to the three morning stories:
+- **(a) gate fine, models just flaky** — partly true (rate varies by model) but
+  not the whole story.
+- **(b) systematic template/prompt artifact producing one predictable stray
+  line — fixable UPSTREAM of the gate** — **yes, dominant.** The "none"-class
+  placeholder is model-independent in kind (only its frequency varies:
+  qwen every run, gemma almost never). The fix is upstream and does not touch M5:
+  the reviewer prompt should instruct "leave a section empty rather than writing
+  'none'", or the parser should treat a lone "none"-class placeholder in an
+  otherwise-empty section as *empty*, not as an item.
+- **(c) all-or-nothing M5 too brittle** — contributory amplifier, not root cause:
+  M5 correctly rejects the genuine unsourced facts; it is only the placeholder
+  (a (b) problem) that makes it look harsh.
+
+Recommendation for the morning decision (evidence only; no change made): treat
+this as (b) first — fix the placeholder upstream (prompt or parser) and
+re-measure — before considering any change to the M5 condition itself. Per-run
+logs: `~/pi-harness-work/panel/rate-<model>-<n>.log` (transient).
