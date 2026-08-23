@@ -54,6 +54,16 @@ const KIND_CAPABILITIES: Record<DelegateKind, ReadonlySet<string>> = {
     "scoped_read", "scoped_list", "request_read_scope",
   ]),
   reviewer: new Set(["read", "grep", "find", "ls"]),
+  // An operator holds the read tools plus scoped_exec: a single tool that runs
+  // a command inside an OS-level sandbox whose only writable path is the
+  // operator's own narrowed scope root. scoped_exec is deliberately absent from
+  // every other kind's set, so exec is impossible for advisor/subagent/reviewer
+  // and cannot be acquired by asking. The child never gets the coordinator's
+  // pi_harness_bash; scoped_exec is its only execution surface.
+  operator: new Set([
+    "read", "grep", "find", "ls",
+    "scoped_read", "scoped_list", "request_read_scope", "scoped_exec",
+  ]),
 };
 
 export interface DelegationRequest {
@@ -185,7 +195,9 @@ export function renderContractPrompt(contract: DelegationContract): string {
     "## Boundaries",
     "",
     "- You may not act outside the scope above, and you may not enlarge it.",
-    "- You may not modify files. Your output is evidence and recommendation; the parent decides what to act on.",
+    contract.allowedCapabilities.includes("scoped_exec")
+      ? "- You may run commands only through scoped_exec, which runs each command in an OS-level sandbox whose one writable path is your scope root; the command is refused if it would reach outside your scope or if the sandbox is unavailable. You have no other way to act."
+      : "- You may not modify files. Your output is evidence and recommendation; the parent decides what to act on.",
     `- ${contract.escalationBehavior}`,
     "",
     "## Context provided",

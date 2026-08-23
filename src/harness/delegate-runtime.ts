@@ -226,19 +226,50 @@ export interface DelegateToolAttestation {
   attest: (phase: "before" | "after", tool: string) => void;
 }
 
+/** Result of one delegated command execution. */
+export interface DelegateExecResult {
+  /** True when the command was refused before running (out of scope, or the
+   * sandbox was unavailable). A refusal is audited by the runtime. */
+  refused: boolean;
+  reason?: string;
+  /** The real OS exit code, present only when the command actually ran. */
+  exitCode?: number;
+  /** Text to return to the delegate model. */
+  output: string;
+}
+
+/**
+ * The harness-provided execution path for an exec-capable (operator) delegate.
+ *
+ * The child holds no `pi`, no session, and no store handle; it cannot run a
+ * command or write an audit line by itself. This function is built by the
+ * extension, closed over the operator's OWN narrowed scope (never the
+ * parent's), the sandbox planner, `pi.exec`, and the parent's audit/decision
+ * writers, and injected here. `scoped_exec` is a thin wrapper over it, exactly
+ * as `scoped_read` is a thin wrapper over `openInScope`: the authority is baked
+ * in at build time and the child can pass only a command string. Present only
+ * for operator delegations; when absent, `scoped_exec` is not built at all.
+ */
+export interface DelegateExecRuntime {
+  run: (command: string, expectSuccess: boolean) => Promise<DelegateExecResult>;
+}
+
 /**
  * The child's entire tool surface.
  *
- * Three tools, all read-only, all closing over the same canonical roots.
+ * The read tools are all read-only and close over the same canonical roots.
  * There is deliberately no way to widen `roots` from in here: a grant
  * replaces the contract and rebuilds the tools, so an approved expansion is
- * a new runtime rather than a mutated one.
+ * a new runtime rather than a mutated one. `scoped_exec` is added only when an
+ * `execRuntime` is supplied (operator delegations); its scope is likewise baked
+ * into that runtime and cannot be widened from here.
  */
 export function buildDelegateTools(
   contract: DelegateRuntimeContract,
   log: DelegateRuntimeLog,
   now: () => string = () => new Date().toISOString(),
   runtimeAttestation?: DelegateToolAttestation,
+  execRuntime?: DelegateExecRuntime,
 ): unknown[] {
   const roots = canonicalRoots(contract.readRoots);
 
@@ -374,6 +405,48 @@ export function buildDelegateTools(
         );
       }),
     },
+    // Present only for operator delegations (execRuntime supplied). The tool
+    // itself enforces nothing: the scope-bound sandbox, the harness-minted
+    // run/decision ids, and the shell_exec/command_run audit writes all live in
+    // execRuntime.run, closed over the operator's own narrowed scope. The child
+    // can pass only a command string; it cannot widen scope or forge an id.
+    ...(execRuntime
+      ? [
+          {
+            name: "scoped_exec",
+            label: "Scoped Exec",
+            description:
+              "Run a command inside an OS-level sandbox whose only writable path is the delegated scope root. The command is refused if it would reach outside the scope or if the sandbox is unavailable. Absolute paths only; the working directory is the scope root.",
+            promptSnippet: "scoped_exec(command) - run a command in the sandboxed delegated scope",
+            parameters: {
+              type: "object",
+              properties: {
+                command: { type: "string", description: "The shell command to run." },
+                expect_success: {
+                  type: "boolean",
+                  description:
+                    "The outcome you are asserting: true = you expect success (default). Recorded before the exit code is known, so the real exit code is an independent check.",
+                },
+              },
+              required: ["command"],
+            },
+            execute: async (_id: unknown, params: unknown) => guarded("scoped_exec", async () => {
+              const p = params as { command?: unknown; expect_success?: unknown };
+              const command = String(p.command ?? "");
+              const expectSuccess = p.expect_success !== false;
+              const result = await execRuntime.run(command, expectSuccess);
+              record("scoped_exec", command, {
+                allowed: !result.refused,
+                resolved: null,
+                reason: result.refused
+                  ? result.reason ?? "refused"
+                  : `exit ${result.exitCode ?? 0}`,
+              });
+              return text(result.output);
+            }),
+          },
+        ]
+      : []),
   ];
 }
 

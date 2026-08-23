@@ -25,6 +25,24 @@ scope-bounded command and produces a live externally-corroborated verdict throug
 
 ---
 
+## RESOLUTION (implemented)
+
+§1 below found that a *dedicated actor* for exec would force a `policy.ts`
+change, while a correct design existed that avoided it (exec as a
+coordinator-gated capability on the existing `subagent` kind). That is a
+STOP-and-report point, so it was surfaced to the user, who chose the **dedicated
+`operator` actor** for authority legibility and **explicitly authorized the one
+minimal `policy.ts` edit** it needs: `ACTORS += "operator"` and a single
+`CAPABILITIES.operator = {read, delegate, shell}` entry, which is a strict subset
+of the coordinator's set (A3/SA1 holds at the matrix axis too). No
+`CONSTITUTIONAL_RULES` are touched; no other actor gains anything. Everything
+else in this design is implemented as written, with two corrections noted inline:
+`operator` is both a `DelegateKind` and an `Actor`; and `scoped_exec` is a
+child-only inline `customTool` (like `scoped_read`), so it is **not** added to
+`HARNESS_TOOLS` — putting it there would wrongly hand the coordinator exec.
+
+---
+
 ## 1. The load-bearing architecture fact (why no policy.ts change is forced)
 
 The peer's stop-condition is: *if the design forces a hard-policy/constitutional
@@ -226,16 +244,22 @@ already produced the non-delegated version (`harness-live-eval-demo.mjs`).
   allowlist (do **not** append to shared `DELEGATE_TOOL_NAMES`); allow `operator`
   at the two `kind` gates (`:905` marker adoption, `:1642` `harness_delegate`
   request); telemetry action/category for `operator` (`:1972`).
-- `src/harness/capability.ts` — `HARNESS_TOOLS += "scoped_exec"` so `classifyTool`
-  returns `"harness"` (not `"unconfined"`); keep `harness-capability.test.ts:120`
-  ("every registered tool declared in HARNESS_TOOLS") in sync.
-- **Untouched (asserted): `policy.ts`, `scope.ts`, `memory.ts`, and the
-  `capability.ts` actor matrix / CONSTITUTIONAL_RULES.**
+- `src/harness/capability.ts` — **untouched.** Correction to the map: `scoped_exec`
+  is a child-only inline `customTool` (like `scoped_read`), never registered via
+  `pi.registerTool` and never routed through `classifyTool` (the isolated child
+  bypasses that gate). It is therefore **not** in `HARNESS_TOOLS`; adding it there
+  would classify it `harness` for the *coordinator* too and hand the coordinator
+  an exec tool it should not have. `harness-capability.test.ts:120` only covers
+  `pi.registerTool` tools, so it neither requires nor forbids `scoped_exec`.
+- `src/harness/policy.ts` — the user-authorized minimal edit (see RESOLUTION):
+  `CAPABILITIES.operator = {read, delegate, shell}` (⊆ coordinator). No
+  `CONSTITUTIONAL_RULES`, no `authorize()` ordering, no other actor changed.
+- **Untouched: `scope.ts`, `memory.ts` (operator is absent from
+  `PROMOTION_ACTORS`, so it cannot promote memory), and `CONSTITUTIONAL_RULES`.**
 
-The five places a new tool name must appear together (or `attestChild` trips):
-`KIND_CAPABILITIES[operator]`, the `operator` tool allowlist, the
-`buildDelegateTools` returned array, `HARNESS_TOOLS`, and the capability test's
-declared set.
+The places a new tool name must appear together (or `attestChild` trips):
+`KIND_CAPABILITIES[operator]`, the `operator` tool allowlist (`delegateToolNames`),
+and the `buildDelegateTools` returned array (gated on the injected exec runtime).
 
 ---
 

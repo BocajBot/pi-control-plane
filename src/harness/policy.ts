@@ -190,6 +190,18 @@ const CAPABILITIES: Record<Actor, ReadonlySet<Action>> = {
     "memory-write-session",
     "audit-append",
   ]),
+  // An exec-capable delegate. A strict subset of the coordinator (which holds
+  // read/shell/delegate and more), so A3/SA1 - a delegate's authority is a
+  // subset of its parent's - holds at the capability-matrix axis too. This
+  // entry is the legible source of truth for "an operator may run commands".
+  // Enforcement of a *specific* operator's exec still happens on the isolated
+  // child path (bwrap sandbox bound to the operator's own narrowed scope root,
+  // plus attestChild/attestCalls), which does not route through authorize();
+  // this matrix entry is defense-in-depth for any path that does, and the place
+  // an auditor reads to see that operators exec while advisors/subagents do not.
+  // It grants no "mutate": an operator writes only inside its sandbox scope,
+  // never through the coordinator-path mutate capability.
+  operator: new Set<Action>(["read", "delegate", "shell"]),
 };
 
 /* ------------------------------------------------------------------ *

@@ -78,6 +78,7 @@ import {
   attestChild,
   buildDelegateTools,
   isolatedDelegateResourceLoader,
+  type DelegateExecRuntime,
   type DelegateRuntimeContract,
   type DelegateRuntimeLog,
 } from "../src/harness/delegate-runtime.ts";
@@ -265,10 +266,17 @@ function extractPath(input: Record<string, unknown>): string | null {
  */
 const DELEGATE_ENV = "PI_HARNESS_DELEGATE_CONTRACT";
 
-/** The delegated child's entire tool surface. Hand-written, because an
+/** The delegated child's read-only tool surface. Hand-written, because an
  * unlisted tool must not be able to appear here by accident - this list is
  * what the pre-prompt attestation compares the real runtime against. */
 const DELEGATE_TOOL_NAMES = ["scoped_read", "scoped_list", "request_read_scope"];
+
+/** The exact tool surface for a given delegate kind. Only an `operator` gets
+ * `scoped_exec`, and it is appended here rather than in the shared constant so
+ * advisor/subagent/reviewer cannot acquire it - attestChild's set-equality
+ * check would reject the tool if it ever appeared on a non-operator child. */
+const delegateToolNames = (kind: DelegateKind): string[] =>
+  kind === "operator" ? [...DELEGATE_TOOL_NAMES, "scoped_exec"] : DELEGATE_TOOL_NAMES.slice();
 
 interface DelegateMarker {
   contractId: string;
@@ -902,7 +910,7 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
           typeof parsed?.root === "string" &&
           Array.isArray(parsed.allowedRoots) &&
           parsed.allowedRoots.every((root) => typeof root === "string") &&
-          (parsed.kind === "advisor" || parsed.kind === "subagent" || parsed.kind === "reviewer") &&
+          (parsed.kind === "advisor" || parsed.kind === "subagent" || parsed.kind === "reviewer" || parsed.kind === "operator") &&
           AUTONOMY_MODES.includes(parsed.autonomy) &&
           APPROVAL_POLICIES.includes(parsed.approvalPolicy)
         ) {
@@ -1615,10 +1623,10 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
         name: "harness_delegate",
         label: "Delegate",
         description:
-          "Consult a read-only advisor or run a bounded read-only subagent under an explicit delegation contract. The result is evidence and recommendations; nothing is applied.",
-        promptSnippet: "harness_delegate(kind, objective) - consult an advisor or bounded subagent",
+          "Consult a read-only advisor, run a bounded read-only subagent, or run a bounded operator that may execute commands inside an OS-level sandbox scoped to its own root - all under an explicit delegation contract. The result is evidence and recommendations; nothing is applied.",
+        promptSnippet: "harness_delegate(kind, objective) - consult an advisor, or run a bounded subagent/operator",
         parameters: T.Object({
-          kind: T.String({ description: 'Either "advisor" or "subagent".' }),
+          kind: T.String({ description: 'One of "advisor", "subagent", or "operator" (operator may run sandboxed, scope-bounded commands).' }),
           objective: T.String({ description: "What the delegate should determine." }),
           scopePath: T.Optional(T.String({ description: "Subdirectory of the current scope." })),
           context: T.Optional(T.String({ description: "Minimum context the delegate needs." })),
@@ -1639,8 +1647,8 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
           if (session === null) {
             return { content: [{ type: "text", text: "Harness session is not initialized." }] } as never;
           }
-          if (p.kind !== "advisor" && p.kind !== "subagent") {
-            return { content: [{ type: "text", text: 'kind must be "advisor" or "subagent".' }] } as never;
+          if (p.kind !== "advisor" && p.kind !== "subagent" && p.kind !== "operator") {
+            return { content: [{ type: "text", text: 'kind must be "advisor", "subagent", or "operator".' }] } as never;
           }
           const parent: ParentAuthority = {
             session: session.id,
@@ -1664,7 +1672,10 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
               // builtin names, which stopped being true when the child moved
               // to inline scoped tools - leaving the contract, and the audit
               // line recording it, describing a surface that did not exist.
-              requestedCapabilities: DELEGATE_TOOL_NAMES.slice(),
+              // An operator additionally requests scoped_exec; buildContract
+              // caps it against KIND_CAPABILITIES[kind], so a kind that may not
+              // hold it has it dropped rather than granted.
+              requestedCapabilities: delegateToolNames(p.kind as DelegateKind),
               // The child asks for exactly the parent's posture, which
               // `buildContract` then intersects - so it is equal to the
               // parent, never looser (A3). Leaving these unset took
@@ -1790,7 +1801,9 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
           const runtimeContract: DelegateRuntimeContract = {
             contractId: built.contract.id,
             readRoots: built.contract.scope.allowedRoots,
-            allowedTools: DELEGATE_TOOL_NAMES.slice(),
+            allowedTools: built.contract.allowedCapabilities.includes("scoped_exec")
+              ? delegateToolNames("operator")
+              : DELEGATE_TOOL_NAMES.slice(),
             maxBytes: 64_000,
           };
           const runtimeLog: DelegateRuntimeLog = {
@@ -1799,6 +1812,58 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
             attestationChecks: 0,
             runtimeViolations: [],
           };
+
+          // The operator's execution path. Built here, in the extension, closed
+          // over the OPERATOR's own narrowed scope (built.contract.scope, a
+          // parent-subset via narrowScope) - never session.scope. The child
+          // holds no pi/session/store; this is the only way it can run a
+          // command, and the scope it runs under cannot be widened from the
+          // child. It mirrors pi_harness_bash exactly: plan the sandbox, refuse
+          // + audit if out of scope or bwrap-unavailable, else mint a
+          // harness-side run id and decision id, record the command_run claim
+          // BEFORE the exit code is known (so the exit code is an independent
+          // witness), run under the sandbox, and write one shell_exec audit line
+          // carrying {runId, exitCode, decisionId} so the exit_code
+          // external-evidence seam joins with no reader-side change. Every write
+          // is attributed to the operator actor, never relabeled coordinator.
+          const execRuntime: DelegateExecRuntime | undefined =
+            built.contract.allowedCapabilities.includes("scoped_exec")
+              ? {
+                  run: async (command: string, expectSuccess: boolean) => {
+                    const outcome = planSandbox(
+                      command,
+                      built.contract.scope,
+                      config,
+                      built.contract.scope.root,
+                      { bwrapAvailable, exists: (pp: string) => fs.existsSync(pp) },
+                    );
+                    if (!outcome.ok) {
+                      audit("operator", currentModel(ctx), "shell_exec", command, `refused: ${outcome.reason}`);
+                      return { refused: true, reason: outcome.reason, output: `Refused: ${outcome.reason}` };
+                    }
+                    const decisionId = makeId("decision");
+                    recordDecision("operator", currentModel(ctx), {
+                      decisionId,
+                      action: "command_run",
+                      category: "command_execution",
+                      rule: "operator_delegated_exec",
+                      confidence: null,
+                      context: { taskClass: null, estimatedComplexity: null, availableCapabilities: ["scoped_exec"] },
+                      outcome: { status: expectSuccess ? "completed" : "failed", retries: 0, userOverride: false },
+                    });
+                    const runId = makeId("run");
+                    const result = await pi.exec("/bin/sh", ["-c", outcome.command], { cwd: built.contract.scope.root });
+                    audit("operator", currentModel(ctx), "shell_exec", command, `exit ${result.exitCode ?? 0}`, {
+                      mounts: outcome.mounts,
+                      runId,
+                      exitCode: result.exitCode ?? 0,
+                      decisionId,
+                    });
+                    const out = [result.stdout ?? "", result.stderr ?? ""].filter((s) => s.length > 0).join("\n");
+                    return { refused: false, exitCode: result.exitCode ?? 0, output: out.length > 0 ? out : "(no output)" };
+                  },
+                }
+              : undefined;
 
           let agent: unknown;
           try {
@@ -1826,7 +1891,7 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
               tools: runtimeContract.allowedTools,
               customTools: buildDelegateTools(runtimeContract, runtimeLog, undefined, {
                 attest: continuouslyAttest,
-              }),
+              }, execRuntime),
               resourceLoader: isolatedResourceLoader(),
             });
             agent = created.session;
@@ -1971,12 +2036,12 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
             decisionId: built.contract.id,
             action: p.kind === "advisor" ? "consult" : "delegate",
             category: p.kind === "advisor" ? "advisory_consult" : "subagent_delegation",
-            rule: "bounded_read_only_delegation",
+            rule: p.kind === "operator" ? "bounded_sandboxed_delegation" : "bounded_read_only_delegation",
             confidence: null,
             context: {
               taskClass: null,
               estimatedComplexity: null,
-              availableCapabilities: DELEGATE_TOOL_NAMES.slice(),
+              availableCapabilities: built.contract.allowedCapabilities.slice(),
             },
             outcome: { status: job.status, retries: 0, userOverride: false },
           });

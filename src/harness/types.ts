@@ -63,7 +63,7 @@ export type PolicyLevel = (typeof POLICY_LEVELS)[number];
 
 /** Who is acting. Authority differs per actor (spec section 20), so every
  * audit event and every authorization request carries one. */
-export const ACTORS = ["user", "core", "coordinator", "advisor", "subagent", "reviewer"] as const;
+export const ACTORS = ["user", "core", "coordinator", "advisor", "subagent", "reviewer", "operator"] as const;
 export type Actor = (typeof ACTORS)[number];
 
 /* ------------------------------------------------------------------ *
@@ -468,7 +468,7 @@ export interface AuditTip {
  * Delegation (spec section 7, invariants SA1-SA5)
  * ------------------------------------------------------------------ */
 
-export const DELEGATE_KINDS = ["advisor", "subagent", "reviewer"] as const;
+export const DELEGATE_KINDS = ["advisor", "subagent", "reviewer", "operator"] as const;
 export type DelegateKind = (typeof DELEGATE_KINDS)[number];
 
 export interface DelegationContract {
