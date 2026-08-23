@@ -337,6 +337,132 @@ test("phase-switch dialog: no-UI session gets the plain block, never a dialog", 
   assert.deepEqual(titles, [], "no confirmation dialog without a UI");
 });
 
+// ---- read-before-edit (hard rule) ----
+// An edit/write of an EXISTING file must have read that exact file this session
+// (and it must be unchanged on disk since). New files are exempt; the rule
+// preempts the attended confirm and the phase-switch dialog. Each denial is
+// audited. Read credit is per control-plane activation, so a separate session
+// (an isolated delegate/operator) inherits none.
+
+const findRbeAudit = (pi: FakePi) =>
+  pi.entries.find(
+    (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "blocked-read-before-edit",
+  );
+
+test("read-before-edit: a blind edit of an existing file is blocked and audited, before any confirm", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  fs.writeFileSync(path.join(root, "data.txt"), "original\n");
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const titles: string[] = [];
+  scriptConfirm(ctx, { "Allow edit?": true }, titles);
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "edit", input: { path: "data.txt", oldText: "original", newText: "changed" } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true);
+  assert.match(blocked?.reason ?? "", /Rule: read-before-edit\b/);
+  assert.match(blocked?.reason ?? "", /read .*data\.txt first/);
+  assert.deepEqual(titles, [], "a blind edit is refused before any confirmation dialog");
+  const audit = findRbeAudit(pi);
+  assert.ok(audit, "blind edit must be audited");
+  assert.equal((audit!.data as { stale?: boolean }).stale, false);
+});
+
+test("read-before-edit: reading the file first lets the edit through", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  fs.writeFileSync(path.join(root, "data.txt"), "original\n");
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const readResult = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "data.txt" } },
+    ctx,
+  );
+  assert.equal(readResult, undefined, "the read itself passes through");
+  const editResult = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "data.txt", oldText: "original", newText: "changed" } },
+    ctx,
+  );
+  assert.equal(editResult, undefined, "an edit after reading the file proceeds (subject to the attended confirm)");
+  assert.ok(!findRbeAudit(pi), "no read-before-edit denial when the file was read first");
+});
+
+test("read-before-edit: an external change after the read forces a re-read", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const file = path.join(root, "data.txt");
+  fs.writeFileSync(file, "original\n");
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "data.txt" } }, ctx);
+  // Simulate an external modification (another session or the user): bump mtime.
+  const later = new Date(Date.now() + 10_000);
+  fs.utimesSync(file, later, later);
+  const stale = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "data.txt", oldText: "original", newText: "changed" } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(stale?.block, true, "an external change since the read blocks the edit");
+  assert.match(stale?.reason ?? "", /Rule: read-before-edit:stale/);
+  assert.equal((findRbeAudit(pi)!.data as { stale?: boolean }).stale, true);
+  // Re-reading clears the staleness; the edit then proceeds.
+  await pi.emit("tool_call", { type: "tool_call", toolCallId: "3", toolName: "read", input: { path: "data.txt" } }, ctx);
+  const ok = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "4", toolName: "edit", input: { path: "data.txt", oldText: "original", newText: "changed" } },
+    ctx,
+  );
+  assert.equal(ok, undefined, "re-reading after the external change lets the edit through");
+});
+
+test("read-before-edit: creating a new file needs no prior read", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const result = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "brand-new.txt", content: "hello\n" } },
+    ctx,
+  );
+  assert.equal(result, undefined, "writing a file that does not exist is exempt (nothing to read)");
+  assert.ok(!findRbeAudit(pi), "creating a new file is not a read-before-edit denial");
+});
+
+test("read-before-edit: read credit does not cross sessions (a delegate/operator inherits none)", async () => {
+  const root = tmpRoot();
+  fs.writeFileSync(path.join(root, "shared.txt"), "x\n");
+  // Session 1 reads the file — credit accrues to this activation's read-set only.
+  const pi1 = await boot();
+  const ctx1 = makeCtx({ cwd: root });
+  await pi1.emit("session_start", { type: "session_start", reason: "startup" }, ctx1);
+  await pi1.commands.get("mode")!.handler("execute", ctx1);
+  await pi1.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "shared.txt" } }, ctx1);
+  // Session 2 is a separate activation (e.g. an isolated delegate) that never
+  // read the file; it must not ride session 1's read credit.
+  const pi2 = await boot();
+  const ctx2 = makeCtx({ cwd: root, confirmResult: true });
+  await pi2.emit("session_start", { type: "session_start", reason: "startup" }, ctx2);
+  await pi2.commands.get("mode")!.handler("execute", ctx2);
+  const blocked = (await pi2.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "shared.txt", oldText: "x", newText: "y" } },
+    ctx2,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true, "session 2 never read the file, so its edit is blocked");
+  assert.match(blocked?.reason ?? "", /Rule: read-before-edit\b/);
+});
+
 /** These tests exercise the real `bwrap` availability check
  * (isBwrapAvailable in extensions/control-plane.ts), so they skip rather
  * than fail on a machine without bubblewrap installed - same reasoning as

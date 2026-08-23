@@ -89,7 +89,14 @@ import {
   serializeForCounting,
   type TokenCountResult,
 } from "../src/control-plane/token-counter.ts";
-import { evaluateToolCall, validatePolicy, type PathOps } from "../src/control-plane/tool-policy.ts";
+import {
+  canonicalizePath,
+  classifyTool,
+  evaluateToolCall,
+  riskCategoryFor,
+  validatePolicy,
+  type PathOps,
+} from "../src/control-plane/tool-policy.ts";
 import {
   buildInjectionBlock,
   contextWarningLevel,
@@ -256,6 +263,13 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // never persisted). Feeds the /verify completion-criteria match on toolName,
   // targetPath and command; cleared by a restart like writtenFiles.
   const sessionAudit: VerifyAuditEntry[] = [];
+  // Read-before-edit read-set (memory only, never persisted): resolved absolute
+  // paths this session has actually read via the `read` tool, each mapped to the
+  // file's mtimeMs at read time. A restart clears it, so a fresh session must
+  // re-read before it may modify — the safe direction. This set is per
+  // control-plane activation: a separate session (e.g. an isolated delegate)
+  // starts empty and inherits no read credit from any other session.
+  const readSet = new Map<string, number>();
   // Exact token counting (memory only; raw payloads are never persisted).
   let lastProviderRequest: { payload: unknown; model: string; baseUrl: string } | null = null;
   let lastTokenCount: TokenCountResult | null = null;
@@ -381,6 +395,61 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   const pathOps: PathOps = {
     realpath: (p) => fs.realpathSync(p),
     exists: (p) => fs.existsSync(p),
+  };
+
+  /** mtimeMs of a file, or null if it cannot be stat'd. */
+  const mtimeOf = (canonical: string): number | null => {
+    try {
+      return fs.statSync(canonical).mtimeMs;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * Record read credit for the `read` tool: an existing file the coordinator
+   * actually read this session, stamped with its current mtime. Only the read
+   * tool grants credit (grep/find/ls enumerate, they do not establish that a
+   * specific file's contents were seen). Called when a read is permitted.
+   */
+  const recordReadCredit = (event: ToolCallEvent, ctx: ExtensionContext): void => {
+    if (event.toolName !== "read") return;
+    const rawPath = (event.input as Record<string, unknown>).path;
+    if (typeof rawPath !== "string" || rawPath.trim().length === 0) return;
+    const canonical = canonicalizePath(rawPath, ctx.cwd, pathOps);
+    if (canonical === null || !fs.existsSync(canonical)) return;
+    const mtime = mtimeOf(canonical);
+    if (mtime !== null) readSet.set(canonical, mtime);
+  };
+
+  /**
+   * Read-before-edit hard rule: an edit/write-class call targeting an EXISTING
+   * file must have read that exact file this session, and the file must not have
+   * changed on disk since (mtime match) — an external modification requires a
+   * re-read. Returns the violation (with the canonical target) or null.
+   *
+   * Scope is exactly read-before-mutate: shell (bash) is not covered (the peer
+   * scoped this to edit/write-class tools; shell mutation is out of scope),
+   * unknown tools are not covered, and creating a NEW file is exempt (there is
+   * nothing to read). Harness-mediated append-only records (audit, proposals)
+   * are written through pi.appendEntry, not the generic write tool, so they
+   * never reach this rule.
+   */
+  const readBeforeEditViolation = (
+    event: ToolCallEvent,
+    ctx: ExtensionContext,
+  ): { canonical: string; stale: boolean } | null => {
+    if (classifyTool(event.toolName) !== "mutate") return null;
+    const rawPath = (event.input as Record<string, unknown>).path;
+    if (typeof rawPath !== "string" || rawPath.trim().length === 0) return null;
+    const canonical = canonicalizePath(rawPath, ctx.cwd, pathOps);
+    if (canonical === null) return null; // unresolvable target: handled by the normal policy path
+    if (!fs.existsSync(canonical)) return null; // creating a new file: nothing to read
+    const recorded = readSet.get(canonical);
+    if (recorded === undefined) return { canonical, stale: false };
+    const current = mtimeOf(canonical);
+    if (current === null || current !== recorded) return { canonical, stale: true };
+    return null;
   };
 
   // ---- profiles loading (invalid file -> profiles unavailable; safety unaffected) ----
@@ -1313,6 +1382,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     decision: ToolDecision,
   ): Promise<{ block: true; reason: string } | undefined> => {
     if (decision.action === "allow") {
+      // A permitted read establishes read-before-edit credit for that file.
+      recordReadCredit(event, ctx);
       // Record files written/edited this session so /verify has observable
       // evidence of what actually changed (independent of autonomy mode).
       const input = event.input as Record<string, unknown>;
@@ -1374,6 +1445,9 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         .join("\n");
       const approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, detail);
       if (approved) {
+        // A confirmed read (e.g. an outside-root read approved in Attended)
+        // also earns read-before-edit credit for that file.
+        recordReadCredit(event, ctx);
         const sandboxResult = applySandboxIfEnabled(event, ctx);
         if (!sandboxResult.ok) return { block: true, reason: sandboxResult.reason };
         return;
@@ -1408,6 +1482,36 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       ops: pathOps,
       hasAcceptedTask: state.acceptedTask !== null,
     });
+
+    // Read-before-edit (hard rule): an edit/write targeting an EXISTING file
+    // must have read that file this session (and it must not have changed on
+    // disk since). This is a strict precondition on mutation — it preempts both
+    // the attended per-call confirm and the phase-switch dialog, because the
+    // actionable fix for a blind edit is to read the file first, not to confirm
+    // it or switch phase. New files are exempt; shell and reads are out of
+    // scope. Each denial is audited so refused blind writes are visible to
+    // /harness-eval and the retrospective reviewer.
+    const rbe = readBeforeEditViolation(event, ctx);
+    if (rbe !== null) {
+      const rule = rbe.stale ? "read-before-edit:stale" : "read-before-edit";
+      const why = rbe.stale
+        ? `"${rbe.canonical}" changed on disk since this session last read it (external modification).`
+        : `"${rbe.canonical}" has not been read in this session.`;
+      pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+        kind: "blocked-read-before-edit",
+        toolName: event.toolName,
+        target: rbe.canonical,
+        stale: rbe.stale,
+        at: new Date().toISOString(),
+      });
+      return {
+        block: true,
+        reason:
+          `[control plane] Blocked tool "${event.toolName}" (${riskCategoryFor(event.toolName)}). ` +
+          `Rule: ${rule}. ${why} Inspect before editing — do not infer source state. ` +
+          `Fix: read ${rbe.canonical} first, then retry.`,
+      };
+    }
 
     // Attended phase-switch dialog: when a call is blocked SOLELY by the phase
     // rule (a non-Execute phase prohibiting a mutating tool) and a UI is
