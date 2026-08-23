@@ -463,6 +463,56 @@ test("read-before-edit: read credit does not cross sessions (a delegate/operator
   assert.match(blocked?.reason ?? "", /Rule: read-before-edit\b/);
 });
 
+// ---- Decision B: record declined out-of-scope reads ----
+// A read outside the project root prompts (attended:read-outside-root); on a
+// decline it is recorded as a control-plane diagnostic so a refused read is a
+// first-class event, not just an inline block reason. Approved reads record no
+// denial (no double-count). This is control-plane's own log; by AU1 + the
+// tool_call short-circuit it does not reach the harness tamper-evident chain.
+
+const findReadDenied = (pi: FakePi) =>
+  pi.entries.find(
+    (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "read-out-of-scope-denied",
+  );
+
+test("Decision B: a declined out-of-scope read is recorded as a control-plane diagnostic", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const outsideFile = path.join(tmpRoot(), "secret.txt");
+  fs.writeFileSync(outsideFile, "secret\n");
+  const ctx = makeCtx({ cwd: root, confirmResult: false }); // decline the prompt
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx); // attended
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: outsideFile } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true);
+  assert.match(blocked?.reason ?? "", /read-outside-root/);
+  const rec = findReadDenied(pi);
+  assert.ok(rec, "a declined out-of-scope read must be recorded");
+  assert.equal((rec!.data as { target?: string }).target, outsideFile);
+  assert.equal((rec!.data as { rule?: string }).rule, "attended:read-outside-root");
+});
+
+test("Decision B: an approved out-of-scope read records no denial (no double-count)", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const outsideFile = path.join(tmpRoot(), "secret.txt");
+  fs.writeFileSync(outsideFile, "secret\n");
+  const ctx = makeCtx({ cwd: root, confirmResult: true }); // approve the prompt
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const result = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: outsideFile } },
+    ctx,
+  );
+  assert.equal(result, undefined, "an approved out-of-scope read proceeds");
+  assert.ok(!findReadDenied(pi), "an approved read must not be recorded as a denial");
+});
+
 /** These tests exercise the real `bwrap` availability check
  * (isBwrapAvailable in extensions/control-plane.ts), so they skip rather
  * than fail on a machine without bubblewrap installed - same reasoning as

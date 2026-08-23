@@ -1452,6 +1452,25 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         if (!sandboxResult.ok) return { block: true, reason: sandboxResult.reason };
         return;
       }
+      // Decision B: record a declined out-of-scope READ so a refused read is a
+      // first-class event, not just an inline block reason. Emitted only on the
+      // decline of a read-risk confirm (attended:read-outside-root) — an
+      // approved read takes the branch above and records nothing here, so there
+      // is no double-count. This lands in the control-plane diagnostic log (the
+      // retrospective reviewer reads the session transcript); it does NOT reach
+      // the harness tamper-evident chain — AU1 makes the harness audit() the
+      // sole writer of that chain and control-plane's block short-circuits the
+      // harness, so a control-plane-refused read cannot appear there. Closing
+      // that fully is a harness-side change tracked separately.
+      if (decision.riskCategory === "read") {
+        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+          kind: "read-out-of-scope-denied",
+          toolName: event.toolName,
+          ...(target !== null ? { target } : {}),
+          rule: decision.rule,
+          at: new Date().toISOString(),
+        });
+      }
       return {
         block: true,
         reason: `[control plane] Denied by user confirmation (${decision.rule}). The operation did not run.`,
