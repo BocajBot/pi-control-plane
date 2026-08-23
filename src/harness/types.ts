@@ -542,6 +542,15 @@ export interface DelegationJobRecord {
   detail: string;
   ownerPid: number;
   at: string;
+  /**
+   * Repo-state anchor (HEAD sha) captured by the harness execution layer at
+   * delegation start - never by the model. Phase 4.2 external-evidence seam: a
+   * file_diff reader diffs `repoAnchor .. eval-time` over the contract roots, so
+   * a change is attributable to a baseline the agent did not author. Null on
+   * records written before this field existed, or when HEAD could not be read;
+   * the reader drops the signal rather than diffing against a guessed baseline.
+   */
+  repoAnchor: string | null;
 }
 
 /* ------------------------------------------------------------------ *

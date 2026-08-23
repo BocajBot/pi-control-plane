@@ -84,3 +84,19 @@ test("delegation jobs: malformed durable lifecycle records fail closed", () => {
   assert.equal(validateDelegationJob({ ...running, ownerPid: -1 }), null);
   assert.equal(validateDelegationJob({ ...running, id: "dec_wrong-kind" }), null);
 });
+
+test("delegation jobs: repoAnchor (Phase 4.2 external-evidence baseline) round-trips and is backward-compatible", () => {
+  // Recorded by the harness at delegation start; carried forward across transitions.
+  const running = makeDelegationJob(contract, { status: "running", detail: "started", repoAnchor: "abc123def4567890" });
+  assert.equal(running.repoAnchor, "abc123def4567890");
+  const done = transitionDelegationJob(running, "completed", "handoff returned");
+  assert.equal(done.repoAnchor, "abc123def4567890", "anchor survives a status transition");
+
+  // A record written before the field existed validates and normalizes to null,
+  // so the reader's no-faith-join drop path sees null, never undefined.
+  const legacy = { ...running } as Record<string, unknown>;
+  delete legacy.repoAnchor;
+  assert.equal(validateDelegationJob(legacy)?.repoAnchor, null);
+  // A job with no anchor requested defaults to null, not undefined.
+  assert.equal(makeDelegationJob(contract, { status: "running", detail: "x" }).repoAnchor, null);
+});

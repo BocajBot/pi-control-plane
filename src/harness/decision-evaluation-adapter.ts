@@ -104,6 +104,10 @@ export function toEvidence(src: EvidenceSources): Evidence[] {
     const observation: DecisionObservation = {
       kind: "observation",
       source: "delegate_runtime",
+      // Written by the harness while running the child - inside the agent
+      // process. Always agent-authored; only an external reader may stamp
+      // externally_observed (unforgeability).
+      origin: "agent_authored",
       refId: job.id,
       at: job.at,
       // The delegation contract id is the telemetry decisionId join key.
@@ -119,6 +123,7 @@ export function toEvidence(src: EvidenceSources): Evidence[] {
     const observation: DecisionObservation = {
       kind: "observation",
       source: "review",
+      origin: "agent_authored",
       refId: `${review.sessionId}#${review.generation}`,
       at: review.createdAt,
       // No review-class telemetry is wired yet, so this keys on the session and

@@ -27,6 +27,7 @@ export function makeDelegationJob(
     resumesContract?: string | null;
     approvalDecisionId?: string | null;
     ownerPid?: number;
+    repoAnchor?: string | null;
   },
   clock: Clock = () => new Date(),
 ): DelegationJobRecord {
@@ -49,6 +50,7 @@ export function makeDelegationJob(
     detail: options.detail,
     ownerPid: options.ownerPid ?? process.pid,
     at: nowIso(clock),
+    repoAnchor: options.repoAnchor ?? null,
   };
 }
 
@@ -66,7 +68,10 @@ export function validateDelegationJob(value: unknown): DelegationJobRecord | nul
     typeof v.ownerPid !== "number" || !Number.isInteger(v.ownerPid) || v.ownerPid <= 0 ||
     typeof v.at !== "string" || !Number.isFinite(Date.parse(v.at))
   ) return null;
-  return v as DelegationJobRecord;
+  // repoAnchor is additive (Phase 4.2 external-evidence): older records lack it.
+  // Normalize a missing/non-string anchor to null so the reader's no-faith-join
+  // drop path sees null, never undefined.
+  return { ...(v as DelegationJobRecord), repoAnchor: typeof v.repoAnchor === "string" ? v.repoAnchor : null };
 }
 
 /** Latest append wins for each attempt id; history remains in the file. */

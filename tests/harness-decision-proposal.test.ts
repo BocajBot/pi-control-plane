@@ -32,7 +32,7 @@ function decision(over: Partial<EvaluatedDecision> & { decisionId: string; verdi
     category: "subagent_delegation",
     rule: "bounded_read_only_delegation",
     telemetryClaim: { source: "decision_telemetry", outcome: "completed" },
-    observedEvidence: { source: "delegate_runtime", outcome: "aborted", refId: "job" },
+    observedEvidence: { source: "delegate_runtime", origin: "agent_authored", outcome: "aborted", refId: "job" },
     verdictReason: "reason",
     ...over,
   };

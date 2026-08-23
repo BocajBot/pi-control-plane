@@ -38,6 +38,7 @@ function obs(over: Partial<DecisionObservation> & { decisionId: string }): Decis
   return {
     kind: "observation",
     source: "delegate_runtime",
+    origin: "agent_authored",
     refId: `job-${over.decisionId}`,
     at: "2026-02-01T00:01:00.000Z",
     observedOutcome: "completed",
@@ -142,7 +143,7 @@ test("eval: claim and evidence are provenance-tagged, not two equal outcome fiel
   ]);
   const d = r.decisions[0];
   assert.deepEqual(d.telemetryClaim, { source: "decision_telemetry", outcome: "completed" });
-  assert.deepEqual(d.observedEvidence, { source: "review", outcome: "accepted", refId: "rev-7" });
+  assert.deepEqual(d.observedEvidence, { source: "review", origin: "agent_authored", outcome: "accepted", refId: "rev-7" });
   assert.equal(d.verdict, "match", "a review-sourced observation joins by decisionId like any other");
 });
 

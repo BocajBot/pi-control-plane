@@ -134,8 +134,9 @@ import {
 import { inferProjectRoot } from "../src/harness/project.ts";
 import { formatIncident, makeDecision, makeIncident } from "../src/harness/records.ts";
 import { buildDecisionTelemetry, type DecisionTelemetryInput } from "../src/harness/decision-telemetry.ts";
-import { evaluate, type EvaluationReport } from "../src/harness/decision-evaluation.ts";
+import { evaluate, type EvaluationReport, type DecisionClaim } from "../src/harness/decision-evaluation.ts";
 import { toEvidence, chainTrust } from "../src/harness/decision-evaluation-adapter.ts";
+import { readFileDiffEvidence } from "../src/harness/external-evidence.ts";
 import {
   generateProposals,
   selectNewProposals,
@@ -514,6 +515,33 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
       model: model.id,
       ...(thinkingLevel ? { thinkingLevel } : {}),
     };
+  };
+
+  /** HEAD sha of the repo at a point in time, captured by the harness (never by
+   * a model). Phase 4.2 external-evidence baseline anchor. Null when the tree is
+   * not a git repo or HEAD cannot be read. */
+  const gitHeadSha = (cwd: string): string | null => {
+    try {
+      const r = spawnSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" });
+      if (r.status !== 0) return null;
+      const sha = r.stdout.trim();
+      return /^[0-9a-f]{7,64}$/.test(sha) ? sha : null;
+    } catch {
+      return null;
+    }
+  };
+
+  /** Changed paths between `anchor` and the working tree, restricted to `roots`.
+   * Empty array = nothing changed; null = could not diff (bad anchor / git
+   * failure). Read-only; the external-evidence reader injects this. */
+  const gitDiffSince = (cwd: string, anchor: string, roots: readonly string[]): string[] | null => {
+    try {
+      const r = spawnSync("git", ["diff", "--name-only", anchor, "--", ...roots], { cwd, encoding: "utf8" });
+      if (r.status !== 0) return null;
+      return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+    } catch {
+      return null;
+    }
   };
 
   const auditContext = (actor: AuditContext["actor"], model: ModelConfiguration | null): AuditContext => ({
@@ -1684,6 +1712,9 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
             detail: isApprovedRestart ? "approved restart constructed" : "child construction started",
             resumesContract: p.resumesContract ?? null,
             approvalDecisionId: p.approvalDecisionId ?? null,
+            // Baseline anchor for the Phase 4.2 file_diff external-evidence
+            // reader, captured by the harness at delegation start.
+            repoAnchor: gitHeadSha(paths?.projectRoot ?? process.cwd()),
           });
           store!.appendDelegation(job);
 
@@ -2899,6 +2930,9 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
     if (cov.decisionsObserved === 0) {
       lines.push("", "No recorded decisions to evaluate yet. This means telemetry is empty, not that every decision was correct.");
     } else {
+      lines.push(
+        `Corroboration: ${cov.externallyCorroborated} externally observed, ${cov.agentAuthoredOnly} on Pi's own account only (unconfirmed).`,
+      );
       lines.push("", "By action:");
       for (const action of Object.keys(report.byAction).sort()) {
         const b = report.byAction[action];
@@ -2917,24 +2951,41 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
     return lines;
   };
 
+  /**
+   * Build the current outcome evaluation. Strictly read-only: reads the audit
+   * chain, delegation records, and reviews, folds in the Phase 4.2
+   * external-evidence (file_diff) reader, and evaluates. The reader's
+   * edit-expectation predicate is conservatively false today - the only
+   * telemetry seam is read-only delegation, which is meant to produce no diff -
+   * so it emits nothing until an edit-class decision is recorded. This is the one
+   * read-only entry point shared by /harness-eval and /harness-propose (§C).
+   */
+  const evaluateCurrent = (state: NonNullable<ReturnType<typeof requireSession>>): EvaluationReport => {
+    const auditRead = store!.readAudit();
+    const verification = store!.verifyAudit();
+    const delegations = store!.readDelegations().records;
+    const reviews = store!.readReviewGenerations(state.id);
+    const evidence = toEvidence({ audit: auditRead.records, delegations, reviews });
+    const claims = evidence.filter((e): e is DecisionClaim => e.kind === "claim");
+    const external = readFileDiffEvidence(claims, delegations, {
+      gitDiff: (anchor, roots) => gitDiffSince(paths?.projectRoot ?? process.cwd(), anchor, roots),
+      now: nowIso(),
+      expectsFileChange: () => false,
+    });
+    return evaluate({
+      evidence: [...evidence, ...external],
+      chain: chainTrust(verification, auditRead.records.length),
+    });
+  };
+
   pi.registerCommand("harness-eval", {
     description: "Read-only outcome evaluation: did observed outcomes match recorded decisions? (writes nothing)",
     handler: async () => {
       const state = requireSession();
       if (state === null || store === null) return;
-
-      // Strictly read-only. This command must leave the system byte-identical:
-      // it calls no audit(), persists no session, writes no checkpoint or
-      // workstate. Phase 4.2 observes; it does not act.
-      const auditRead = store.readAudit();
-      const verification = store.verifyAudit();
-      const delegations = store.readDelegations().records;
-      const reviews = store.readReviewGenerations(state.id);
-
-      const evidence = toEvidence({ audit: auditRead.records, delegations, reviews });
-      const report = evaluate({ evidence, chain: chainTrust(verification, auditRead.records.length) });
-
-      emit("Harness outcome evaluation", renderEvaluation(report));
+      // Strictly read-only. Leaves the system byte-identical: no audit(), no
+      // session persist, no checkpoint or workstate. Phase 4.2 observes.
+      emit("Harness outcome evaluation", renderEvaluation(evaluateCurrent(state)));
     },
   });
 
@@ -2980,19 +3031,12 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
       const state = requireSession();
       if (state === null || store === null) return;
 
-      // Same evidence the evaluator uses. Read-only up to the point of writing
-      // the proposals themselves: this command writes ONLY improvement-proposal
-      // records and one proposal_created audit line per new proposal. It edits
-      // no AGENTS.md, no policy, no config, no memory, no session state - a
-      // proposal is enacted only by a human (Phase 4.3 generation-only).
-      const auditRead = store.readAudit();
-      const verification = store.verifyAudit();
-      const delegations = store.readDelegations().records;
-      const reviews = store.readReviewGenerations(state.id);
-      const report = evaluate({
-        evidence: toEvidence({ audit: auditRead.records, delegations, reviews }),
-        chain: chainTrust(verification, auditRead.records.length),
-      });
+      // Same evaluation the read-only evaluator produces (external-evidence
+      // folded in). This command writes ONLY improvement-proposal records and one
+      // proposal_created audit line per new proposal. It edits no AGENTS.md, no
+      // policy, no config, no memory, no session state - a proposal is enacted
+      // only by a human (Phase 4.3 generation-only).
+      const report = evaluateCurrent(state);
 
       const now = nowIso();
       const model = currentModel(ctx);

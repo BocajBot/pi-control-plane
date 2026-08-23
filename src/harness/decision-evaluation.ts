@@ -43,9 +43,26 @@ import { IMPORTANT_DECISION_ACTIONS } from "./decision-telemetry.ts";
  * Where a piece of observed evidence came from. This is the *kind of witness*,
  * not a storage path - the evaluator stays storage-unaware. `delegate_runtime`
  * is the measured tool-call log of a delegation; `review` is a retrospective
- * reviewer's acceptance record.
+ * reviewer's acceptance record. `exit_code` / `file_diff` / `test_output` are
+ * externally-observed signals (Phase 4.2 follow-up) read from a channel the
+ * agent does not author.
  */
-export type ObservationSource = "delegate_runtime" | "review";
+export type ObservationSource =
+  | "delegate_runtime"
+  | "review"
+  | "exit_code"
+  | "file_diff"
+  | "test_output";
+
+/**
+ * Whether an observation was authored by the agent process or observed from
+ * outside it. Agent-authored evidence (telemetry, delegate runtime, review) can
+ * be self-serving; externally-observed evidence (a real exit code, a file diff,
+ * test output) cannot be written by the agent, so it outranks agent-authored
+ * evidence when the two disagree. This field is set by whichever reader produced
+ * the observation and must never be relabeled (unforgeability).
+ */
+export type EvidenceOrigin = "agent_authored" | "externally_observed";
 
 /** A telemetry record: Pi's own assertion about a decision and its outcome. */
 export interface DecisionClaim {
@@ -66,6 +83,10 @@ export interface DecisionClaim {
 export interface DecisionObservation {
   kind: "observation";
   source: ObservationSource;
+  /** Agent-authored or externally observed. Set by the producing reader; the
+   * agent-authored adapter always stamps `agent_authored`, only an external
+   * reader stamps `externally_observed`. */
+  origin: EvidenceOrigin;
   /** Delegation job / review id - provenance and tiebreak. */
   refId: string;
   at: string;
@@ -113,8 +134,9 @@ export interface EvaluatedDecision {
    * that a claim is an assertion, tagged with its source). */
   telemetryClaim: { source: "decision_telemetry"; outcome: string } | null;
   /** The observed evidence the verdict rests on. Null when nothing was
-   * observed for this decision (verdict is then "unmeasured"). */
-  observedEvidence: { source: ObservationSource; outcome: string; refId: string } | null;
+   * observed for this decision (verdict is then "unmeasured"). `origin` shows
+   * whether the deciding witness was agent-authored or externally observed. */
+  observedEvidence: { source: ObservationSource; origin: EvidenceOrigin; outcome: string; refId: string } | null;
   verdict: Verdict;
   /** Why this verdict - a short class label, never a recommendation. */
   verdictReason: string;
@@ -146,6 +168,12 @@ export interface EvaluationReport {
     measured: number;
     unmeasured: number;
     unsupported: number;
+    /** Of the measured decisions, how many rest on an externally-observed
+     * witness vs only on agent-authored evidence. `agentAuthoredOnly` is the
+     * blind spot the external-evidence seam exists to shrink: those verdicts are
+     * graded, but only against Pi's own account. */
+    externallyCorroborated: number;
+    agentAuthoredOnly: number;
   };
   decisions: EvaluatedDecision[];
   byAction: Record<string, { total: number; match: number; mismatch: number; unmeasured: number }>;
@@ -185,6 +213,21 @@ function laterBy<T extends { at: string }>(a: T, aId: string, b: T, bId: string)
 }
 
 /**
+ * Which of two observations is the authoritative witness for a decision.
+ * Externally-observed evidence outranks agent-authored evidence (§B): a witness
+ * the agent could not author wins when the two disagree. Within the same origin
+ * tier, the latest by intrinsic (at, refId) wins. Order-independent: `candidate`
+ * replaces `incumbent` only when strictly preferred, so reshuffling the input
+ * cannot change the outcome.
+ */
+function prefersObs(candidate: DecisionObservation, incumbent: DecisionObservation): boolean {
+  const cExternal = candidate.origin === "externally_observed";
+  const iExternal = incumbent.origin === "externally_observed";
+  if (cExternal !== iExternal) return cExternal;
+  return laterBy(candidate, candidate.refId, incumbent, incumbent.refId);
+}
+
+/**
  * Evaluate a set of evidence into a report.
  *
  * Pure and order-independent: the result is a function of the evidence *set*.
@@ -209,7 +252,7 @@ export function evaluate(input: EvaluationInput): EvaluationReport {
     } else {
       observationCount++;
       const prev = observations.get(ev.decisionId);
-      if (prev === undefined || laterBy(ev, ev.refId, prev, prev.refId)) {
+      if (prev === undefined || prefersObs(ev, prev)) {
         observations.set(ev.decisionId, ev);
       }
     }
@@ -219,6 +262,8 @@ export function evaluate(input: EvaluationInput): EvaluationReport {
   let measured = 0;
   let unmeasured = 0;
   let unsupported = 0;
+  let externallyCorroborated = 0;
+  let agentAuthoredOnly = 0;
 
   // Sort by decisionId (intrinsic) so output order never depends on input
   // order, map insertion order, or filesystem enumeration.
@@ -246,15 +291,22 @@ export function evaluate(input: EvaluationInput): EvaluationReport {
         reason = "telemetry made no terminal claim to compare";
         unmeasured++;
       } else {
+        const external = obs.origin === "externally_observed";
         const claimSuccess = claimClass === "success";
         if (claimSuccess === obs.success) {
           verdict = "match";
-          reason = "claimed outcome agrees with observed evidence";
+          reason = external
+            ? "claimed outcome agrees with externally observed evidence"
+            : "claimed outcome agrees with observed evidence";
         } else {
           verdict = "mismatch";
-          reason = `telemetry claimed "${claim.claimedOutcome}" but evidence shows "${obs.observedOutcome}"`;
+          reason = external
+            ? `telemetry claimed "${claim.claimedOutcome}" but externally observed ${obs.source} shows "${obs.observedOutcome}"`
+            : `telemetry claimed "${claim.claimedOutcome}" but evidence shows "${obs.observedOutcome}"`;
         }
         measured++;
+        if (external) externallyCorroborated++;
+        else agentAuthoredOnly++;
       }
     }
 
@@ -266,7 +318,7 @@ export function evaluate(input: EvaluationInput): EvaluationReport {
       telemetryClaim: { source: "decision_telemetry", outcome: claim.claimedOutcome },
       observedEvidence: obs === null
         ? null
-        : { source: obs.source, outcome: obs.observedOutcome, refId: obs.refId },
+        : { source: obs.source, origin: obs.origin, outcome: obs.observedOutcome, refId: obs.refId },
       verdict,
       verdictReason: reason,
     });
@@ -298,6 +350,8 @@ export function evaluate(input: EvaluationInput): EvaluationReport {
       measured,
       unmeasured,
       unsupported,
+      externallyCorroborated,
+      agentAuthoredOnly,
     },
     decisions,
     byAction,
