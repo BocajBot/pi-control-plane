@@ -48,6 +48,28 @@ function evalInput(overrides: Partial<EvaluateInput> & { toolName: string }): Ev
   };
 }
 
+test("denial hints reference the merged /mode command, never the retired /phase or /autonomy", () => {
+  // /phase and /autonomy were merged into /mode; a hint that still names them
+  // is user-facing misinformation (the coordinator relays it verbatim).
+  const root = makeTempRoot();
+  const hints = [
+    // phase gate
+    evaluateToolCall(evalInput({ toolName: "write", phase: "discuss", autonomy: "read-only", projectRoot: root, cwd: root, toolInput: { path: "f.txt" } })).hint,
+    // autonomy read-only gate
+    evaluateToolCall(evalInput({ toolName: "write", phase: "execute", autonomy: "read-only", projectRoot: root, cwd: root, toolInput: { path: "f.txt" } })).hint,
+    // restricted shell gate (policy.allowBash === false)
+    evaluateToolCall(evalInput({ toolName: "bash", phase: "execute", autonomy: "restricted", projectRoot: root, cwd: root, toolInput: { command: "ls" } })).hint,
+    // restricted unknown-tool gate
+    evaluateToolCall(evalInput({ toolName: "wget_tool", phase: "execute", autonomy: "restricted", projectRoot: root, cwd: root })).hint,
+  ];
+  for (const hint of hints) {
+    assert.ok(hint, "each of these blocks must carry an actionable hint");
+    assert.match(hint!, /\/mode\b/, `hint must point at /mode: "${hint}"`);
+    assert.doesNotMatch(hint!, /\/phase\b/, `hint must not name the retired /phase: "${hint}"`);
+    assert.doesNotMatch(hint!, /\/autonomy\b/, `hint must not name the retired /autonomy: "${hint}"`);
+  }
+});
+
 test("tool classification: read tools known, unknown tools never safe", () => {
   assert.equal(classifyTool("read"), "read");
   assert.equal(classifyTool("grep"), "read");
