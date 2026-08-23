@@ -246,6 +246,37 @@ whose command really exits 1 → MISMATCH, both `origin: externally_observed`.
 edit-class decision exists yet), which is correct: read-only delegations produce
 no diff to refute.
 
+## test_output source — DOCUMENTED NO-BUILD (not implemented)
+
+Queued after exit_code, evaluated, and deliberately **not built**. The reasoning,
+recorded so the decision is reviewable rather than silent:
+
+- **For every current decision class it adds nothing over exit_code.** The only
+  command-executing decision today is `command_run`, and when that command is a
+  test/build/validation run, the **process exit code already *is* the outcome** —
+  captured directly and joined to the decision by the harness-minted run id
+  (§A). A results artifact could only agree with, or be weaker than, that exit
+  code; it cannot change the decision-level verdict (match/mismatch), which the
+  exit code already settles.
+- **A results file is strictly weaker evidence.** Unlike an exit code (the direct
+  OS result of the specific command the harness ran), a `results.json`/TAP file
+  is a *downstream artifact* — like a file diff. It can be stale, partial, or
+  left behind by a different run. Treating it as authoritative would be a
+  regression from the exit_code guarantee, not an addition.
+- **The join would be machinery for no gain.** To trust a results file we would
+  need a harness-verifiable run id embedded in its path or content, which means
+  instructing the run to emit a run-id-tagged artifact — real work whose payoff
+  is evidence weaker than the exit code we already have.
+
+**When test_output WOULD justify itself (the future condition):** only when the
+attesting artifact is produced by a process the **harness did not run** — e.g.
+external CI writing `junit.xml` — tagged with an anchor the harness recorded (the
+commit sha, or a run id the harness assigned to the CI trigger). Then it is a
+genuinely new witness that exit_code cannot provide, because the harness never saw
+that process exit. Until such a source exists, building test_output adds surface
+that measures nothing new. **No-build stands; revisit when an off-host attesting
+artifact with a harness-verifiable anchor exists.**
+
 ## Open decisions
 
 - **[RESOLVED §A] `file_diff` first**, with the anchor + asymmetry amendment
