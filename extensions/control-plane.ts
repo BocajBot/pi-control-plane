@@ -99,6 +99,14 @@ import {
 } from "../src/control-plane/tool-policy.ts";
 import { isSensitiveReadTarget, type SensitiveReadExtra } from "../src/control-plane/sensitive-paths.ts";
 import {
+  addRule,
+  emptyRules,
+  matchRule,
+  removeRule,
+  renderRulesList,
+  restoreRulesFromEntries,
+} from "../src/control-plane/rules.ts";
+import {
   buildInjectionBlock,
   contextWarningLevel,
   displayMode,
@@ -133,6 +141,8 @@ import {
   type SnapshotItem,
   STATE_ENTRY_TYPE,
   type ToolDecision,
+  RULES_ENTRY_TYPE,
+  type RememberedRulesState,
 } from "../src/control-plane/types.ts";
 import {
   verifyCompletion,
@@ -236,6 +246,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
   let state: ControlPlaneState = defaultState();
   let scratchpad: ScratchpadState = emptyScratchpad();
+  let rememberedRules: RememberedRulesState = emptyRules();
   let sandbox: SandboxState = emptySandboxState();
   /** Cached bwrap-on-PATH check (spawnSync is not free; the binary does not
    * appear or disappear mid-session). Null = not checked yet. */
@@ -522,6 +533,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   const persistScratchpad = () => {
     scratchpad.updatedAt = new Date().toISOString();
     pi.appendEntry(SCRATCHPAD_ENTRY_TYPE, scratchpad);
+  };
+
+  const persistRules = () => {
+    rememberedRules.updatedAt = new Date().toISOString();
+    pi.appendEntry(RULES_ENTRY_TYPE, rememberedRules);
   };
 
   const persistSandbox = () => {
@@ -1120,6 +1136,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         "warning",
       );
     }
+    const rulesResult = restoreRulesFromEntries(entries, RULES_ENTRY_TYPE);
+    rememberedRules = rulesResult.rules;
+    if (rulesResult.ignoredMalformed > 0) {
+      ctx.ui.notify(
+        `Control plane: ignored ${rulesResult.ignoredMalformed} malformed remembered-rule entr${rulesResult.ignoredMalformed === 1 ? "y" : "ies"}; ${rulesResult.restored ? "restored the latest valid rule set" : "starting with no remembered rules"}.`,
+        "warning",
+      );
+    }
     const sandboxResult = restoreSandboxFromEntries(entries, SANDBOX_ENTRY_TYPE);
     sandbox = sandboxResult.sandbox;
     if (sandboxResult.ignoredMalformed > 0) {
@@ -1571,6 +1595,40 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           `Rule: ${rule}. ${why} Inspect before editing — do not infer source state. ` +
           `Fix: read ${rbe.canonical} first, then retry.`,
       };
+    }
+
+    // Remembered decisions: a soft-policy rule the user saved converts a
+    // matching attended confirm into an allow, so the same prompt never recurs.
+    // Placed AFTER read-before-edit (a rule cannot resurrect a blind edit) and
+    // it never matches a sensitive-read confirm, so it can only skip a prompt
+    // the user has already, explicitly, agreed to skip — never loosen a hard
+    // boundary. Gated on hasUI: a rule suppresses a PROMPT, and a no-UI session
+    // has none — it fails closed as today, never auto-allowed by a rule.
+    if (decision.action === "confirm" && ctx.hasUI) {
+      const rawPath = typeof (event.input as Record<string, unknown>).path === "string"
+        ? ((event.input as Record<string, unknown>).path as string)
+        : null;
+      const canonical = rawPath !== null ? canonicalizePath(rawPath, ctx.cwd, pathOps) : null;
+      const sensitiveRead =
+        decision.rule === "attended:read-outside-root" &&
+        canonical !== null &&
+        isSensitiveReadTarget(canonical, agentDir(), sensitiveReadExtra());
+      if (
+        canonical !== null &&
+        !sensitiveRead &&
+        matchRule(rememberedRules, event.toolName, canonical, rootOf(ctx)) !== null
+      ) {
+        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+          kind: "remembered-rule-allow",
+          toolName: event.toolName,
+          target: canonical,
+          at: new Date().toISOString(),
+        });
+        recordReadCredit(event, ctx);
+        const sandboxResult = applySandboxIfEnabled(event, ctx);
+        if (!sandboxResult.ok) return { block: true, reason: sandboxResult.reason };
+        return; // allowed by a remembered rule, no prompt
+      }
     }
 
     // Attended phase-switch dialog: when a call is blocked SOLELY by the phase
@@ -2143,6 +2201,114 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           return;
         }
       }
+    },
+  });
+
+  pi.registerCommand("harness-rules", {
+    description: "Save, list, or revoke remembered soft-policy rules (Always-allow decisions)",
+    getArgumentCompletions: (prefix) => {
+      const subs = ["list", "allow ", "revoke ", "clear"];
+      const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
+      return matches.length > 0 ? matches.map((s) => ({ value: s, label: s.trim() })) : null;
+    },
+    handler: async (args, ctx) => {
+      const parts = args.trim().split(/\s+/).filter(Boolean);
+      const sub = (parts[0] ?? "list").toLowerCase();
+      if (sub === "list" || parts.length === 0) {
+        emit("harness-rules", [
+          ...renderRulesList(rememberedRules),
+          "",
+          "Save: /harness-rules allow <tool> <path>   Revoke: /harness-rules revoke <id>   Clear: /harness-rules clear",
+        ]);
+        return;
+      }
+      if (sub === "allow") {
+        const tool = parts[1];
+        const rawTarget = parts.slice(2).join(" ");
+        if (tool === undefined || rawTarget.length === 0) {
+          ctx.ui.notify("Usage: /harness-rules allow <tool> <path>", "warning");
+          return;
+        }
+        const canonical = canonicalizePath(rawTarget, ctx.cwd, pathOps);
+        if (canonical === null) {
+          ctx.ui.notify(`Could not resolve path "${rawTarget}".`, "warning");
+          return;
+        }
+        // Sensitive reads stay unrememberable-as-allow (hard boundary).
+        if (tool === "read" && isSensitiveReadTarget(canonical, agentDir(), sensitiveReadExtra())) {
+          ctx.ui.notify(
+            `Refused: "${canonical}" is a sensitive path; a sensitive read cannot be remembered as allow.`,
+            "warning",
+          );
+          return;
+        }
+        const scopeRoot = rootOf(ctx as ExtensionContext);
+        const result = addRule(rememberedRules, { tool, target: canonical, scopeRoot }, new Date().toISOString());
+        if (result.rule === null) {
+          ctx.ui.notify("Remembered-rule limit reached; not saved.", "warning");
+          return;
+        }
+        if (result.duplicate) {
+          ctx.ui.notify(`Already remembered: allow ${tool} on ${canonical} (rule ${result.rule.id}).`, "info");
+          return;
+        }
+        rememberedRules = result.state;
+        persistRules();
+        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+          kind: "remembered-rule-added",
+          actor: "user",
+          provenance: "harness-rules-command",
+          ruleId: result.rule.id,
+          toolName: tool,
+          target: canonical,
+          scopeRoot,
+          at: new Date().toISOString(),
+        });
+        ctx.ui.notify(
+          `Remembered: allow ${tool} on ${canonical} (rule ${result.rule.id}). Revoke with /harness-rules revoke ${result.rule.id}.`,
+          "info",
+        );
+        return;
+      }
+      if (sub === "revoke" || sub === "remove") {
+        const id = parts[1];
+        if (id === undefined) {
+          ctx.ui.notify("Usage: /harness-rules revoke <id>  (see /harness-rules list for ids)", "warning");
+          return;
+        }
+        const result = removeRule(rememberedRules, id, new Date().toISOString());
+        if (result.removed === null) {
+          ctx.ui.notify(`No remembered rule with id "${id}".`, "warning");
+          return;
+        }
+        rememberedRules = result.state;
+        persistRules();
+        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+          kind: "remembered-rule-revoked",
+          actor: "user",
+          ruleId: id,
+          at: new Date().toISOString(),
+        });
+        ctx.ui.notify(
+          `Revoked rule ${id} (was: allow ${result.removed.tool} on ${result.removed.target}).`,
+          "info",
+        );
+        return;
+      }
+      if (sub === "clear") {
+        const count = rememberedRules.rules.length;
+        rememberedRules = emptyRules(new Date().toISOString());
+        persistRules();
+        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+          kind: "remembered-rules-cleared",
+          actor: "user",
+          count,
+          at: new Date().toISOString(),
+        });
+        ctx.ui.notify(`Cleared ${count} remembered rule(s).`, "info");
+        return;
+      }
+      ctx.ui.notify("Usage: /harness-rules [list|revoke <id>|clear]", "warning");
     },
   });
 
