@@ -1,8 +1,36 @@
-# Decisions pending — daily-usage evidence phase
+# Decisions — daily-usage evidence phase
 
 Two authority-adjacent findings surfaced by the live coordinator tests
-(`LIVE-COORDINATOR-TEST.md`). **Nothing here is implemented** — both are the
-user's call. Recommendations only. `project.ts` and the audit path are unchanged.
+(`LIVE-COORDINATOR-TEST.md`). Originally recommend-only; **both were decided by
+the user directly on 2026-08-23 and are now RESOLVED** (see the resolution notes
+under each). The original analysis is retained below for the record.
+
+## Resolution summary (2026-08-23)
+
+- **Decision A — RESOLVED: A1 implemented.** `inferProjectRoot` now weighs a
+  `.pi/` and a VCS root by distance: the nearer wins, a same-depth `.pi/` wins,
+  so a project-local `.git` outranks an ancestor `~/.pi`; a bare directory with
+  no local marker still falls back to the ancestor `.pi/`. Read-only survey
+  before the change found nothing that depends on home-wide scope: the only
+  workflow that ever resolved to `/home/bocaj` was launched from
+  `~/pi-harness-work`, a bare dir with no local marker, which A1 leaves
+  home-scoped; the git repos that would narrow have never been run under the
+  harness (narrowing a repo to itself is the intended fix). Tests in
+  `tests/harness-state.test.ts` (A1: local .git / local .pi / bare-dir fallback
+  / same-depth override). Full suite 703 pass.
+- **Decision B — RESOLVED: control-plane record (a scoped-down B1).** A declined
+  out-of-scope read now appends a control-plane diagnostic
+  (`kind:"read-out-of-scope-denied"`). NOTE: the original B1 ("one additive line
+  visible to `/harness-eval` / the tamper-evident chain") turned out not to be
+  achievable as written — AU1 makes the harness `audit()` the sole writer of
+  that chain, and a control-plane block short-circuits the harness
+  (ARCHITECTURE.md:1393), so a control-plane-refused read cannot reach it. The
+  retrospective reviewer already sees the refusal via the session transcript;
+  this change makes it a first-class record in control-plane's own log too.
+  Full tamper-evident-chain visibility remains OPEN as a harness-side change
+  that touches AU1 + the short-circuit (deferred; needs its own design). Tests
+  in `tests/extension-harness.test.ts` (declined read recorded; approved read
+  not — no double-count).
 
 ---
 

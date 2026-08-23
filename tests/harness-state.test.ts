@@ -305,6 +305,39 @@ test("project: with no markers at all, inference stops at the start directory, n
   assert.equal(result.reason, "start-directory");
 });
 
+// Decision A1 (2026-08-23): a nearer project marker outranks a farther ancestor
+// `.pi/` such as a home-level `~/.pi`; a bare directory with no local marker
+// still falls back to that ancestor `.pi/` as before.
+
+test("A1: a project-local .git outranks an ancestor .pi home", () => {
+  const ops = fakeTree([], ["/home/u/.pi", "/home/u/proj/.git"]);
+  const result = inferProjectRoot("/home/u/proj/src", "/home/u", ops);
+  assert.equal(result.root, "/home/u/proj");
+  assert.equal(result.reason, "vcs-root");
+  assert.equal(result.marker, ".git");
+});
+
+test("A1: a project-local .pi outranks an ancestor .pi home", () => {
+  const ops = fakeTree([], ["/home/u/.pi", "/home/u/proj/.pi"]);
+  const result = inferProjectRoot("/home/u/proj/src", "/home/u", ops);
+  assert.equal(result.root, "/home/u/proj");
+  assert.equal(result.reason, "pi-directory");
+});
+
+test("A1: a bare directory under $HOME still resolves to the ancestor .pi home", () => {
+  const ops = fakeTree([], ["/home/u/.pi"]);
+  const result = inferProjectRoot("/home/u/scratch/work", "/home/u", ops);
+  assert.equal(result.root, "/home/u");
+  assert.equal(result.reason, "pi-directory");
+});
+
+test("A1: an explicit .pi at the same depth as .git still wins (override unaffected)", () => {
+  const ops = fakeTree([], ["/home/u/.pi", "/home/u/proj/.pi", "/home/u/proj/.git"]);
+  const result = inferProjectRoot("/home/u/proj/src", "/home/u", ops);
+  assert.equal(result.root, "/home/u/proj");
+  assert.equal(result.reason, "pi-directory");
+});
+
 /* ---------------------------------------------------------------- *
  * Sandbox boundary
  * ---------------------------------------------------------------- */

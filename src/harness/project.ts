@@ -6,19 +6,27 @@
  * authority error, not a cosmetic one. Filesystem access is injected so the
  * marker-precedence rules below are testable against a fake tree.
  *
- * Precedence is deliberate and is *not* "nearest marker wins":
+ * Precedence is deliberate and is *not* simply "nearest marker wins":
  *
- *   1. An explicit `.pi/` directory. If someone created harness state here,
- *      here is the project, full stop.
- *   2. The outermost VCS root at or above the start directory. Outermost,
+ *   1. A `.pi/` directory and a VCS root are weighed by distance from the
+ *      start directory: the NEARER of the two wins, and a `.pi/` at the same
+ *      depth as a VCS root wins (an explicit `.pi/` is a deliberate override).
+ *      So a project-local `.git` outranks a `.pi/` that exists only at an
+ *      ancestor such as the home directory (`~/.pi`), while a project-local or
+ *      otherwise-nearer `.pi/` still wins. VCS selection itself is OUTERMOST,
  *      not innermost, because a git submodule or nested worktree inside a
- *      repository is part of that repository's authority domain; treating
- *      the submodule as its own project would silently narrow scope below
- *      what the user means by "this project".
- *   3. The nearest package/build marker, for directories under version
- *      control at some unreachable ancestor or none at all.
- *   4. The start directory itself. Never the home directory and never `/`:
+ *      repository is part of that repository's authority domain; treating the
+ *      submodule as its own project would silently narrow scope below what the
+ *      user means by "this project".
+ *   2. The nearest package/build marker, when neither a `.pi/` nor a VCS root
+ *      is on the chain.
+ *   3. The start directory itself. Never the home directory and never `/`:
  *      those are the absence of a boundary (see scope.ts:nextBoundary).
+ *
+ * (Decision A1, 2026-08-23: previously ANY `.pi/` on the ancestor chain won
+ * outright, so a project under $HOME with a `~/.pi` inherited home-wide scope
+ * unless it carried its own `.pi/`. Now a nearer project marker wins, and a
+ * bare directory with no local marker still falls back to the ancestor `.pi/`.)
  */
 
 import * as path from "node:path";
@@ -72,21 +80,41 @@ function ancestors(start: string, home: string): string[] {
 export function inferProjectRoot(start: string, home: string, ops: ProjectFsOps): ProjectInference {
   const chain = ancestors(start, home);
 
-  for (const dir of chain) {
-    const piDir = path.join(dir, ".pi");
+  // Nearest `.pi/` directory, nearest-first (smaller index = closer to start).
+  let piIdx = -1;
+  for (let i = 0; i < chain.length; i++) {
+    const piDir = path.join(chain[i], ".pi");
     if (ops.exists(piDir) && ops.isDirectory(piDir)) {
-      return { root: dir, reason: "pi-directory", marker: ".pi" };
+      piIdx = i;
+      break;
     }
   }
 
-  // Outermost VCS root: walk the chain furthest-first and take the first hit.
-  for (const dir of [...chain].reverse()) {
+  // Outermost VCS root: walk the chain furthest-first and take the first hit,
+  // recording its distance so it can be weighed against the `.pi/` above.
+  let vcsIdx = -1;
+  let vcsMarker: string | null = null;
+  for (let i = chain.length - 1; i >= 0; i--) {
     for (const marker of VCS_MARKERS) {
-      const candidate = path.join(dir, marker);
-      if (ops.exists(candidate)) {
-        return { root: dir, reason: "vcs-root", marker };
+      if (ops.exists(path.join(chain[i], marker))) {
+        vcsIdx = i;
+        vcsMarker = marker;
+        break;
       }
     }
+    if (vcsIdx !== -1) break;
+  }
+
+  // A1: the nearer of {`.pi/`, VCS root} wins; a `.pi/` at the same depth wins
+  // (explicit override). A project-local `.git` thus outranks an ancestor
+  // `~/.pi`, while a nearer or same-depth `.pi/` still wins. A bare directory
+  // with neither still falls through to the ancestor `.pi/` (piIdx set, vcsIdx
+  // unset) exactly as before.
+  if (piIdx !== -1 && (vcsIdx === -1 || piIdx <= vcsIdx)) {
+    return { root: chain[piIdx], reason: "pi-directory", marker: ".pi" };
+  }
+  if (vcsIdx !== -1) {
+    return { root: chain[vcsIdx], reason: "vcs-root", marker: vcsMarker };
   }
 
   // Nearest package marker.
