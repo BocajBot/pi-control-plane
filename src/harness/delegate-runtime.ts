@@ -405,12 +405,17 @@ export function buildDelegateTools(
         );
       }),
     },
-    // Present only for operator delegations (execRuntime supplied). The tool
-    // itself enforces nothing: the scope-bound sandbox, the harness-minted
-    // run/decision ids, and the shell_exec/command_run audit writes all live in
-    // execRuntime.run, closed over the operator's own narrowed scope. The child
-    // can pass only a command string; it cannot widen scope or forge an id.
-    ...(execRuntime
+    // Present only for operator delegations: the exec runtime must be injected
+    // AND the contract must list scoped_exec. Requiring both here (not just the
+    // injected runtime) means this builder cannot hand out an exec tool the
+    // contract did not grant even if a future caller passed an execRuntime by
+    // mistake - it does not rely on caller discipline alone. attestChild's
+    // set-equality check is the outer belt; this is the inner one.
+    // The tool itself enforces nothing: the scope-bound sandbox, the
+    // harness-minted run/decision ids, and the shell_exec/command_run audit
+    // writes all live in execRuntime.run, closed over the operator's own
+    // narrowed scope. The child can pass only a command string.
+    ...(execRuntime && contract.allowedTools.includes("scoped_exec")
       ? [
           {
             name: "scoped_exec",

@@ -118,6 +118,9 @@ function req(overrides: Partial<DelegationRequest> = {}): DelegationRequest {
   return {
     kind: "operator",
     objective: "run the build check",
+    // An operator must be given an explicit scope subtree (see the SA3 test
+    // below); a subdirectory of the parent's /home/u/proj scope.
+    scopeTarget: "/home/u/proj/build",
     requestedCapabilities: ["scoped_read", "scoped_list", "request_read_scope", "scoped_exec"],
     contextPackage: ["the project builds with npm test"],
     expectedOutput: "the build result",
@@ -153,6 +156,21 @@ test("an operator's scope is still narrowed to a subset - a target outside the p
   assert.equal(outcome.rule, "SA3");
 });
 
+test("an operator with no explicit scope is refused - exec is never defaulted to the parent's whole scope (SA3)", () => {
+  // The least-privilege gap the adversarial pass surfaced: an omitted scopeTarget
+  // used to default an operator to the parent's own root (equal, a valid subset,
+  // but the wrong default for the highest-privilege delegate on a model-driven
+  // omitted param). Now it is refused; the coordinator must name the scope.
+  const outcome = buildContract(parent, req({ scopeTarget: undefined }), ops);
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.rule, "SA3");
+  assert.match(outcome.reason, /explicit scope/);
+
+  // Read-only kinds keep the inherit-on-omit default (lower stake, read-only seams).
+  assert.equal(buildContract(parent, req({ kind: "subagent", scopeTarget: undefined, requestedCapabilities: ["scoped_read"] }), ops).ok, true);
+});
+
 /* ================================================================== *
  * C. Tool wiring - scoped_exec exists only when the exec path is
  *    injected, is attested, and forwards without enforcing itself.
@@ -183,6 +201,18 @@ test("scoped_exec is present only when an exec runtime is injected", () => {
 
   const withoutExec = buildDelegateTools(runtimeContract(["scoped_read", "scoped_list", "request_read_scope"]), freshLog());
   assert.ok(!toolNames(withoutExec).includes("scoped_exec"), "no exec runtime => no scoped_exec tool at all");
+
+  // Defense-in-depth: even with an exec runtime, the tool is not built unless the
+  // contract's allowedTools lists it. The builder does not rely on caller
+  // discipline alone to keep exec off a contract that never granted it.
+  const runtimeButNotContracted = buildDelegateTools(
+    runtimeContract(["scoped_read"]),
+    freshLog(),
+    undefined,
+    undefined,
+    { run: async () => ({ refused: false, exitCode: 0, output: "ok" }) },
+  );
+  assert.ok(!toolNames(runtimeButNotContracted).includes("scoped_exec"), "an execRuntime cannot smuggle exec onto a contract that omits it");
 });
 
 test("scoped_exec forwards the command and expect_success to the injected runtime and returns its output", async () => {

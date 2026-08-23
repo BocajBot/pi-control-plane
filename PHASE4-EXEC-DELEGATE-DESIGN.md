@@ -275,3 +275,35 @@ and the `buildDelegateTools` returned array (gated on the injected exec runtime)
 
 Nothing in the design above requires any of these; they are tripwires for
 implementation.
+
+---
+
+## 9. Adversarial verification outcomes
+
+Six independent skeptics each tried to break one invariant against the committed
+code. Five held (forgery barrier; no-exec-leak-to-other-kinds; child isolation +
+policy scope; refusal audited; A3/SA1 subset). Two things were changed in
+response, plus two caveats recorded:
+
+- **Least-privilege default (fixed).** An operator delegation with no `scopeTarget`
+  used to narrow to the *parent's own root* — a valid subset (equal ≤ parent, so
+  A3/SA1 was **not** violated), but the wrong default for the highest-privilege
+  delegate on a model-driven omitted param. `buildContract` now **refuses an
+  operator with no explicit scope** (rule SA3); the coordinator may still delegate
+  its own root, but only by naming it. Read-only kinds keep the inherit-on-omit
+  default (lower stake, read-only seams).
+- **Builder self-check (fixed, defense-in-depth).** `buildDelegateTools` now builds
+  `scoped_exec` only when the exec runtime is injected **and** the contract's
+  `allowedTools` lists it, so the builder cannot hand out an exec tool the contract
+  did not grant even if a caller passed an `execRuntime` by mistake. `attestChild`
+  set-equality remains the outer belt.
+- **networkGrant (accepted, not a violation).** `narrowScope` passes
+  `networkGrant` through unchanged, so an operator inherits the parent's network
+  grant (equal ≤ parent, never wider). This is consistent across all delegate
+  kinds and gated by a user-set, default-false scope field; left as-is.
+- **Recursive delegation (defended, with a noted assumption).** A delegate cannot
+  call `harness_delegate` because the child's exact tool allowlist excludes it
+  (`noTools:"all"` + `tools:` = the contract surface, D6). The extra belt — that a
+  nested session never dispatches `session_start`, leaving the parent handlers
+  inert — rests on measured Pi SDK behavior recorded in a comment, not repo-
+  enforced code; the allowlist is the load-bearing defense and holds regardless.

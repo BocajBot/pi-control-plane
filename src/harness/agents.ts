@@ -113,6 +113,22 @@ export function buildContract(
     return { ok: false, reason: "a delegation needs an objective", rule: "SA1" };
   }
 
+  // An operator (exec-capable) delegate must be given an EXPLICIT scope subtree.
+  // The caller is often model-driven, so an omitted scopeTarget must not
+  // silently default an exec delegate to the parent's whole scope - defaulting
+  // the highest-privilege delegate to maximum reach on a missing param is the
+  // model-driven-caller failure the harness exists to prevent. The coordinator
+  // may still delegate its own root, but only by naming it, never by omission.
+  // Read-only kinds keep the inherit-on-omit default: their stake is lower and
+  // every seam they touch is read-only.
+  if (request.kind === "operator" && (request.scopeTarget === undefined || request.scopeTarget.trim().length === 0)) {
+    return {
+      ok: false,
+      reason: "an operator must be delegated an explicit scope subtree; exec authority is never defaulted to the parent's whole scope",
+      rule: "SA3",
+    };
+  }
+
   // Scope: a strict subset of the parent's, never a sibling or a superset.
   const childScope =
     request.scopeTarget === undefined
