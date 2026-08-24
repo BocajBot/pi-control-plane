@@ -61,6 +61,32 @@ function underABoundPath(p: string, boundPaths: string[]): boolean {
   return boundPaths.some((b) => p === b || p.startsWith(b + path.sep));
 }
 
+/**
+ * The install prefix of the interpreter currently running the harness, to be
+ * mounted read-only so a runtime living outside the system prefixes (nvm, asdf,
+ * Nix, a homedir install) still resolves inside the sandbox. Without this, a
+ * `node --test` inside the sandbox fails with "node: not found" on any machine
+ * whose node is under $HOME - the exact case that made the sandboxed shell look
+ * broken and pushed work toward heavier authority (GATE-FATIGUE-REDESIGN.md P4).
+ *
+ * `<prefix>/bin/node` -> `<prefix>`. Refused (returns null) when the computed
+ * prefix is $HOME itself, an ancestor of $HOME, or a filesystem root: binding
+ * any of those would drag the user's whole home - credentials included - into
+ * the sandbox, which is precisely what the mount table exists to prevent.
+ * Narrow toolchain prefix or nothing.
+ */
+export function runtimeToolchainPath(execPath: string, homeDir?: string): string | null {
+  if (typeof execPath !== "string" || execPath.length === 0) return null;
+  const prefix = path.dirname(path.dirname(execPath));
+  if (prefix === "" || prefix === path.sep || path.dirname(prefix) === prefix) return null;
+  if (homeDir !== undefined && homeDir.length > 0) {
+    const home = homeDir.replace(new RegExp(`${path.sep}+$`), "");
+    // prefix === home, or prefix is an ANCESTOR of home (home under prefix).
+    if (prefix === home || home.startsWith(prefix + path.sep)) return null;
+  }
+  return prefix;
+}
+
 function sensitiveShadows(
   rel: readonly string[],
   homeDir: string | undefined,
@@ -86,7 +112,7 @@ export function plan(
   config: HarnessConfig,
   cwd: string,
   probe: SandboxProbe,
-  opts: { writable?: boolean; homeDir?: string } = {},
+  opts: { writable?: boolean; homeDir?: string; execPath?: string } = {},
 ): SandboxPlan {
   if (rawCommand.trim().length === 0) {
     return { ok: false, reason: "empty command", rule: "section 9" };
@@ -113,12 +139,30 @@ export function plan(
   // Only paths that exist are bound: bwrap fails hard on a missing bind
   // target, and an unconfigured entry in the list should not take the whole
   // shell down.
-  const readOnly = config.sandboxReadOnlyPaths.filter((p) => probe.exists(p));
-  if (readOnly.length === 0) {
+  const configured = config.sandboxReadOnlyPaths.filter((p) => probe.exists(p));
+  // The interpreter's own prefix, so a runtime outside the system prefixes
+  // still resolves inside the sandbox. Never $HOME (see runtimeToolchainPath).
+  const toolchain = opts.execPath === undefined ? null : runtimeToolchainPath(opts.execPath, opts.homeDir);
+  const readOnly =
+    toolchain !== null && probe.exists(toolchain) && !underABoundPath(toolchain, configured)
+      ? [...configured, toolchain]
+      : configured;
+  // Deliberately keyed on `configured`, NOT on `readOnly`: the interpreter
+  // prefix is an ADDITION to a configured mount set, never a substitute for
+  // one. Keying on readOnly would mean an unconfigured instance quietly ran
+  // with only the runtime bound instead of refusing - silently dropping the
+  // "refuse rather than guess at the host" guarantee this check exists for.
+  if (configured.length === 0) {
+    // Actionable: name the file, the key, and a copyable value. A refusal that
+    // only names the key costs the reader a search, and (before P4) it cost a
+    // confirmation prompt too.
     return {
       ok: false,
       reason:
-        "no runtime mounts are configured; set sandboxReadOnlyPaths (for example /usr, /bin, /lib, /etc) before using the harness shell",
+        'no runtime mounts are configured, so the sandboxed shell cannot run. Set "sandboxReadOnlyPaths" in ' +
+        "<harness-home>/config.json, for example: " +
+        '"sandboxReadOnlyPaths": ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt"]. ' +
+        "Do not add $HOME: the sandbox binds only what is listed, and $HOME would expose credential paths.",
       rule: "section 9",
     };
   }

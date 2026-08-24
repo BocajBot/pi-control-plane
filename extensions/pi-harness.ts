@@ -1158,6 +1158,12 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
    * prompt it did not strictly need, whereas an unknown tool that writes
    * would otherwise skip the scope check, the approval gate, and the audit
    * entry all at once.
+   *
+   * Note for anyone tracing gate fatigue here: the read-effect harness tools
+   * (harness_memory_search, harness_find_capability, harness_note,
+   * harness_request_scope) are ALREADY in READ_TOOLS above, so this seam does
+   * not gate them and never did. A prompt seen for one of those comes from the
+   * control plane's attended layer, not from section 21.
    */
   const toolAction = (toolName: string): Action => {
     if (SHELL_TOOLS.has(toolName)) return "shell";
@@ -1228,6 +1234,33 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
       }
       capabilityExceptions.set(event.toolName, outcome.exception);
       audit("user", null, "capability_grant", label, "granted for this session only");
+    }
+
+    // P4 (GATE-FATIGUE-REDESIGN.md): a harness-shell call that CANNOT run for
+    // configuration reasons is refused here, BEFORE the approval gate. Asking
+    // the user to approve a command that the sandbox will then refuse spends a
+    // confirmation on nothing - it was one of the five prompts in the observed
+    // trace - and the refusal that follows makes the sandboxed shell look
+    // broken, pushing work toward heavier authority (delegation) instead. This
+    // is a configuration check, not an authority check: it can only ever turn
+    // an approval prompt into an immediate refusal, never allow anything.
+    if (event.toolName === "pi_harness_bash") {
+      const rawCommand = typeof input.command === "string" ? input.command : "";
+      const preflight = planSandbox(
+        rawCommand,
+        session.scope,
+        config,
+        session.scope.root,
+        { bwrapAvailable, exists: (p) => fs.existsSync(p) },
+        { writable: input.mode === "write", homeDir: os.homedir(), execPath: process.execPath },
+      );
+      if (!preflight.ok) {
+        audit(actingAs, currentModel(ctx), "shell_exec", rawCommand, `refused before approval: ${preflight.reason}`);
+        return {
+          block: true,
+          reason: `[harness] Refused: ${preflight.reason} (${preflight.rule}). No approval was requested - this call cannot run as configured.`,
+        };
+      }
     }
 
     const check = rawPath === null ? null : checkPath(rawPath, session.scope, ctx.cwd, pathOps);
@@ -1416,7 +1449,7 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
         const outcome = planSandbox(command, session.scope, config, session.scope.root, {
           bwrapAvailable,
           exists: (p) => fs.existsSync(p),
-        }, { writable, homeDir: os.homedir() });
+        }, { writable, homeDir: os.homedir(), execPath: process.execPath });
         if (!outcome.ok) {
           audit(actingAs, null, "shell_exec", command, `refused: ${outcome.reason}`);
           return { content: [{ type: "text", text: `Refused: ${outcome.reason}` }] } as never;
@@ -1853,7 +1886,7 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
                       // surface (its scope root is writable, as before the
                       // read-only default); it is separately gated by the
                       // delegation contract.
-                      { writable: true, homeDir: os.homedir() },
+                      { writable: true, homeDir: os.homedir(), execPath: process.execPath },
                     );
                     if (!outcome.ok) {
                       audit("operator", currentModel(ctx), "shell_exec", command, `refused: ${outcome.reason}`);

@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { after, test } from "node:test";
 
 import piHarnessExtension from "../extensions/pi-harness.ts";
+import { defaultConfig } from "../src/harness/config.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -909,4 +910,95 @@ test("a delegate marker that does not parse degrades to the floor, never to the 
   // And the degradation itself is on the record rather than silent.
   const auditFile = path.join(projectDir(harnessHome), "audit.jsonl");
   assert.match(fs.readFileSync(auditFile, "utf8"), /unparseable; degraded to a read-only advisor/);
+});
+
+/* ---------------------------------------------------------------- *
+ * Gate fatigue (GATE-FATIGUE-REDESIGN.md): P1 effect-based gating,
+ * P4 configuration refusals that never spend an approval.
+ * ---------------------------------------------------------------- */
+
+/** A ctx that COUNTS confirmation prompts, so a test can assert that a call
+ * cost zero approvals rather than merely that it was allowed. */
+function countingCtx(cwd: string, answer: boolean) {
+  const prompts: string[] = [];
+  return {
+    prompts,
+    hasUI: true,
+    cwd,
+    ui: {
+      confirm: async (title: string) => {
+        prompts.push(title);
+        return answer;
+      },
+      notify: () => {},
+      setStatus: () => {},
+      setWidget: () => {},
+    },
+    sessionManager: { getBranch: () => [] },
+    model: { id: "test-model", provider: "test-provider" },
+    isIdle: () => true,
+  };
+}
+
+test("P1: read-effect harness tools cost no approval (gate on effect, not mechanism)", async () => {
+  const { root, harnessHome } = tmpProject();
+  process.env.PI_HARNESS_HOME = harnessHome;
+  const pi = new FakePi();
+  await piHarnessExtension(pi as never);
+  // answer=false: if any of these DID prompt, the call would be blocked and the
+  // assertion below would catch it - the test cannot pass by accident.
+  const ctx = countingCtx(root, false);
+  await pi.emit("session_start", { type: "session_start" }, ctx);
+
+  for (const toolName of ["harness_find_capability", "harness_memory_search", "harness_request_scope"]) {
+    const result = (await pi.emit("tool_call", { toolName, input: {} }, ctx)) as { block?: boolean } | undefined;
+    assert.equal(result?.block, undefined, `${toolName} must not be blocked`);
+  }
+  assert.deepEqual(ctx.prompts, [], "read-effect harness tools must not prompt at all");
+});
+
+test("P1: harness_delegate (escalation) still passes the section 21 gate", async () => {
+  const { root, harnessHome } = tmpProject();
+  process.env.PI_HARNESS_HOME = harnessHome;
+  const pi = new FakePi();
+  await piHarnessExtension(pi as never);
+  const ctx = countingCtx(root, false); // decline
+  await pi.emit("session_start", { type: "session_start" }, ctx);
+
+  // harness_delegate is deliberately absent from READ_TOOLS: it spawns an
+  // actor, so it maps to "mutate" and section 21 asks. This is the gate the
+  // gate-fatigue work must NOT remove.
+  const result = (await pi.emit("tool_call", { toolName: "harness_delegate", input: {} }, ctx)) as {
+    block?: boolean;
+  };
+  assert.equal(result?.block, true, "delegation stays gated");
+  assert.equal(ctx.prompts.length, 1, "and it asks exactly once at this seam");
+});
+
+test("P4: a harness-shell call that cannot run as configured is refused BEFORE any approval", async () => {
+  const { root, harnessHome } = tmpProject();
+  // A COMPLETE, valid config whose mount set is empty. (A partial config would
+  // fail validation and silently fall back to the defaults, which now ship
+  // system mounts - so this has to be a full config to exercise the refusal.)
+  fs.mkdirSync(harnessHome, { recursive: true });
+  const unconfigured = { ...defaultConfig(() => new Date("2026-01-01T00:00:00.000Z")), sandboxReadOnlyPaths: [] };
+  fs.writeFileSync(path.join(harnessHome, "config.json"), JSON.stringify(unconfigured, null, 2));
+
+  process.env.PI_HARNESS_HOME = harnessHome;
+  const pi = new FakePi();
+  await piHarnessExtension(pi as never);
+  const ctx = countingCtx(root, true); // would APPROVE if it were asked
+  await pi.emit("session_start", { type: "session_start" }, ctx);
+
+  const result = (await pi.emit(
+    "tool_call",
+    { toolName: "pi_harness_bash", input: { command: "node --test" } },
+    ctx,
+  )) as { block?: boolean; reason?: string } | undefined;
+
+  assert.equal(result?.block, true, "an unrunnable-by-config shell call is refused");
+  assert.deepEqual(ctx.prompts, [], "and it costs NO approval prompt");
+  assert.match(result?.reason ?? "", /config\.json/, "the refusal names the file to fix");
+  assert.match(result?.reason ?? "", /sandboxReadOnlyPaths/, "and the key");
+  assert.match(result?.reason ?? "", /No approval was requested/);
 });

@@ -244,7 +244,15 @@ export function defaultConfig(clock: Clock = () => new Date()): HarnessConfig {
     defaultReasoningMode: "balanced",
     defaultAutonomy: "guided",
     defaultApprovalPolicy: "mutations",
-    sandboxReadOnlyPaths: [],
+    // System toolchain, loader and resolver config, read-only. Without these
+    // the sandboxed shell refuses outright (plan() rejects an empty mount set),
+    // which used to push the coordinator toward heavier authority (delegation)
+    // just to run a test - see GATE-FATIGUE-REDESIGN.md P4. $HOME is
+    // deliberately absent: binding it would expose the credential paths the
+    // sandbox otherwise only shadows. A runtime installed outside these
+    // prefixes (nvm, asdf, Nix) is handled separately by the interpreter-prefix
+    // mount in sandbox.ts, not by widening this list.
+    sandboxReadOnlyPaths: ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt"],
     sandboxShadowDirs: [],
     sandboxShadowFiles: [],
     updatedAt: nowIso(clock),

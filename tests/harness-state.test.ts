@@ -18,7 +18,7 @@ import { formatAuditEvent, makeAuditEvent, makeCorrectionEvent, validateAuditEve
 import { defaultConfig, harnessPaths, modelAgentsFile, validateConfig } from "../src/harness/config.ts";
 import { inferProjectRoot, type ProjectFsOps } from "../src/harness/project.ts";
 import { createScope } from "../src/harness/scope.ts";
-import { builtinBashBlocked, plan, withoutBuiltinBash, type SandboxProbe } from "../src/harness/sandbox.ts";
+import { builtinBashBlocked, plan, runtimeToolchainPath, withoutBuiltinBash, type SandboxProbe } from "../src/harness/sandbox.ts";
 import { addNote, checkpoint, createSession, reconcile, switchCoordinator } from "../src/harness/state.ts";
 import { appendJsonl, HarnessStore, readJsonl, writeAtomic } from "../src/harness/store.ts";
 import { HARNESS_SCHEMA_VERSION, type AuditEvent } from "../src/harness/types.ts";
@@ -249,11 +249,18 @@ test("config: a model directory is one directory per model, slashes flattened", 
   assert.match(file, /models\/openrouter__meta-llama-Llama-3\.3\/AGENTS\.md$/);
 });
 
-test("config: defaults are guided autonomy with mutation approval, and no sandbox mounts assumed", () => {
+test("config: defaults are guided autonomy with mutation approval, and system-only sandbox mounts", () => {
   const config = defaultConfig(at("2026-01-01T00:00:00.000Z"));
   assert.equal(config.defaultAutonomy, "guided");
   assert.equal(config.defaultApprovalPolicy, "mutations");
-  assert.deepEqual(config.sandboxReadOnlyPaths, []);
+  // GATE-FATIGUE-REDESIGN.md P4: an empty default made the sandboxed shell
+  // refuse on a fresh install, which pushed work toward heavier authority.
+  // The default now mounts the system toolchain read-only - and nothing else.
+  assert.deepEqual(config.sandboxReadOnlyPaths, ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt"]);
+  // The security property that matters: no home/user data is mounted by default.
+  for (const p of config.sandboxReadOnlyPaths) {
+    assert.ok(p.startsWith("/") && !p.startsWith("/home") && !p.startsWith("/root"), `${p} must be a system path`);
+  }
 });
 
 test("config: validation rejects an unknown key rather than accepting a partial config", () => {
@@ -386,9 +393,48 @@ test("section 9: a working directory outside the scope root is refused", () => {
 });
 
 test("section 9: an unconfigured mount set refuses rather than guessing at the host", () => {
-  const outcome = plan("ls", scope, defaultConfig(at("2026-01-01T00:00:00.000Z")), "/home/u/proj", available);
+  // The default config now ships system mounts (P4), so an UNCONFIGURED set has
+  // to be constructed explicitly. The behaviour under test is unchanged and
+  // still covered: an empty mount set refuses instead of guessing.
+  const unconfigured = { ...defaultConfig(at("2026-01-01T00:00:00.000Z")), sandboxReadOnlyPaths: [] };
+  const outcome = plan("ls", scope, unconfigured, "/home/u/proj", available);
   assert.equal(outcome.ok, false);
   assert.match(outcome.ok === false ? outcome.reason : "", /no runtime mounts are configured/);
+  // The refusal must be actionable: name the file, the key, and a value.
+  const reason = outcome.ok === false ? outcome.reason : "";
+  assert.match(reason, /config\.json/);
+  assert.match(reason, /sandboxReadOnlyPaths/);
+  assert.ok(!/\$HOME"/.test(reason.replace("Do not add $HOME", "")), "must not suggest mounting $HOME");
+});
+
+test("section 9: the interpreter prefix is mounted read-only, but never $HOME itself", () => {
+  // A runtime outside the system prefixes (nvm/asdf/Nix, or any homedir
+  // install) must still resolve inside the sandbox, or `node --test` fails with
+  // "node: not found" - the case that made the sandboxed shell look broken.
+  assert.equal(runtimeToolchainPath("/home/u/.nvm/versions/node/v22.22.3/bin/node", "/home/u"), "/home/u/.nvm/versions/node/v22.22.3");
+  assert.equal(runtimeToolchainPath("/usr/bin/node", "/home/u"), "/usr");
+  // Refused: binding these would drag the whole home (credentials) into the box.
+  assert.equal(runtimeToolchainPath("/home/u/bin/node", "/home/u"), null, "$HOME itself is never a mount");
+  assert.equal(runtimeToolchainPath("/home/bin/node", "/home/u"), null, "an ancestor of $HOME is never a mount");
+  assert.equal(runtimeToolchainPath("", "/home/u"), null);
+
+  // Wired into plan(): the prefix is ADDED to the configured system mounts.
+  const cfg = { ...defaultConfig(at("2026-01-01T00:00:00.000Z")), sandboxReadOnlyPaths: ["/usr"] };
+  const outcome = plan("node --test", scope, cfg, "/home/u/proj", available, {
+    execPath: "/home/u/.nvm/versions/node/v22.22.3/bin/node",
+    homeDir: "/home/u",
+  });
+  assert.ok(outcome.ok);
+  assert.ok(outcome.mounts.readOnly.includes("/home/u/.nvm/versions/node/v22.22.3"), "interpreter prefix is mounted");
+  assert.ok(outcome.mounts.readOnly.includes("/usr"), "configured mounts are kept");
+
+  // It is an ADDITION, never a substitute: an empty configured set still refuses.
+  const empty = { ...defaultConfig(at("2026-01-01T00:00:00.000Z")), sandboxReadOnlyPaths: [] };
+  const refused = plan("node --test", scope, empty, "/home/u/proj", available, {
+    execPath: "/home/u/.nvm/versions/node/v22.22.3/bin/node",
+    homeDir: "/home/u",
+  });
+  assert.equal(refused.ok, false, "the interpreter prefix must not silently satisfy an unconfigured instance");
 });
 
 test("section 9: the builtin shell is blocked unless explicitly granted, and dropped from the tool set", () => {
