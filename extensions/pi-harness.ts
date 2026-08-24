@@ -1165,7 +1165,15 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
    * not gate them and never did. A prompt seen for one of those comes from the
    * control plane's attended layer, not from section 21.
    */
-  const toolAction = (toolName: string): Action => {
+  const toolAction = (toolName: string, input?: Record<string, unknown>): Action => {
+    // The harness shell in its default READ mode cannot mutate: the scope root
+    // is mounted read-only, so a write fails with EROFS, the network is
+    // unshared and credential paths are shadowed. Its effect is a read, and
+    // gating it as a mutation is gating on the mechanism ("it is a shell")
+    // rather than on the effect - the last door in the hallway for read-only
+    // work (GATE-FATIGUE-REDESIGN.md P1, and the point of the read-only default
+    // itself). mode:"write" is a real mutation and keeps the shell gate.
+    if (toolName === "pi_harness_bash" && input?.mode !== "write") return "read";
     if (SHELL_TOOLS.has(toolName)) return "shell";
     if (READ_TOOLS.has(toolName)) return "read";
     return "mutate";
@@ -1176,7 +1184,7 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
 
     const input = event.input as Record<string, unknown>;
     const rawPath = extractPath(input);
-    const action = toolAction(event.toolName);
+    const action = toolAction(event.toolName, input);
 
     // Section 9, enforced independently of the active tool set.
     if (event.toolName === "bash" && builtinBashBlocked(session.scope)) {
@@ -1265,6 +1273,49 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
 
     const check = rawPath === null ? null : checkPath(rawPath, session.scope, ctx.cwd, pathOps);
 
+    // P2 "one door per decision" (GATE-FATIGUE-REDESIGN.md): the control plane
+    // runs first and, when it obtains a human approval for a call, stamps that
+    // answer onto the event. Consume it here instead of asking the identical
+    // question again - the duplicate dialog was two of the five prompts in the
+    // observed trace. Both layers still EVALUATE and still ENFORCE: everything
+    // authorize() checks before the approval step (constitutional refusals,
+    // actor capability, scope, soft-policy denials) still runs and can still
+    // deny. Only the second QUESTION disappears.
+    //
+    // The stamp must name THIS tool call, so it cannot be replayed onto a later
+    // one, and it is never persisted.
+    //
+    // ESCALATING ACTIONS ARE EXCLUDED ON PURPOSE. authorize() short-circuits to
+    // allow on userApproved BEFORE the posture rule (section 32: "loosening
+    // autonomy or approval is an authority expansion and needs the user"), so
+    // honouring a generic "Allow harness_set_posture?" answer would let consent
+    // to a tool call stand in for consent to an authority expansion. Those keep
+    // their own question, which is the one that actually describes what is
+    // being granted.
+    const ESCALATING_ACTIONS: ReadonlySet<Action> = new Set<Action>([
+      "posture-loosen",
+      "scope-expand",
+      "memory-promote-global",
+      "policy-change-hard",
+    ]);
+    // ...and by TOOL, because at THIS seam an authority-expanding tool does not
+    // announce itself in `action`: harness_set_posture maps to a plain "mutate"
+    // here (the "posture-loosen" action only arises on the /harness-mode path),
+    // so the action list above would never catch it. Verified by test. The tool
+    // asks its own specific "Change autonomy to X?" question in execute(); this
+    // keeps a generic "Allow harness_set_posture?" answer from standing in for
+    // it. harness_delegate is deliberately NOT here: the control plane's dialog
+    // names the tool, so that consent is specific, and merging those two
+    // identical prompts is exactly what P2 is for.
+    const ESCALATING_TOOLS: ReadonlySet<string> = new Set(["harness_set_posture"]);
+    const stamp = (event as { __cpUserApproved?: { callId: string | null } }).__cpUserApproved;
+    const eventCallId = (event as { toolCallId?: string }).toolCallId ?? null;
+    const controlPlaneApproved =
+      stamp !== undefined &&
+      stamp.callId === eventCallId &&
+      !ESCALATING_ACTIONS.has(action) &&
+      !ESCALATING_TOOLS.has(event.toolName);
+
     const decision = authorize({
       // A delegate's instance authorizes as its own kind, so the capability
       // matrix that applies is the subagent's or advisor's, not the
@@ -1278,7 +1329,7 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
       autonomy: session.autonomy,
       approvalPolicy: session.approvalPolicy,
       soft,
-      userApproved: false,
+      userApproved: controlPlaneApproved,
     });
 
     if (decision.verdict === "allow") {
@@ -1288,6 +1339,14 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
       if (action !== "read") {
         audit(actingAs, currentModel(ctx), "tool_call", `${event.toolName} ${rawPath ?? ""}`.trim(), "allowed", {
           rule: decision.rule,
+          // P2: TWO decisions, ONE confirmation. When this allow rests on the
+          // human answer the control plane already collected, the audit says so
+          // and names the call it belonged to - so a reader sees that this layer
+          // evaluated and where its approval came from, rather than a silently
+          // skipped gate.
+          ...(controlPlaneApproved
+            ? { confirmation: { source: "control-plane", callId: eventCallId } }
+            : {}),
         });
       }
       return;

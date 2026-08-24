@@ -1002,3 +1002,117 @@ test("P4: a harness-shell call that cannot run as configured is refused BEFORE a
   assert.match(result?.reason ?? "", /sandboxReadOnlyPaths/, "and the key");
   assert.match(result?.reason ?? "", /No approval was requested/);
 });
+
+test("P2: a control-plane approval stamped on the event is consumed instead of re-asking", async () => {
+  const { root, harnessHome } = tmpProject();
+  process.env.PI_HARNESS_HOME = harnessHome;
+  const pi = new FakePi();
+  await piHarnessExtension(pi as never);
+  const ctx = countingCtx(root, false); // would DECLINE if asked
+  await pi.emit("session_start", { type: "session_start" }, ctx);
+
+  const file = path.join(root, "src", "a.ts");
+  fs.writeFileSync(file, "x");
+  // Same write that asks (and is refused) without a stamp - see the
+  // "default approval policy asks before an in-scope write" test above.
+  const event = {
+    toolName: "write",
+    toolCallId: "call-1",
+    input: { path: file },
+    __cpUserApproved: { callId: "call-1", at: "2026-01-01T00:00:00.000Z" },
+  };
+  const result = (await pi.emit("tool_call", event, ctx)) as { block?: boolean } | undefined;
+  assert.equal(result?.block, undefined, "the already-given answer is honoured");
+  assert.deepEqual(ctx.prompts, [], "and the identical question is NOT asked a second time");
+});
+
+test("P2: a stamp for a DIFFERENT call is ignored (no replay onto a later call)", async () => {
+  const { root, harnessHome } = tmpProject();
+  process.env.PI_HARNESS_HOME = harnessHome;
+  const pi = new FakePi();
+  await piHarnessExtension(pi as never);
+  const ctx = countingCtx(root, false);
+  await pi.emit("session_start", { type: "session_start" }, ctx);
+
+  const file = path.join(root, "src", "a.ts");
+  fs.writeFileSync(file, "x");
+  const event = {
+    toolName: "write",
+    toolCallId: "call-2",
+    input: { path: file },
+    __cpUserApproved: { callId: "call-1", at: "2026-01-01T00:00:00.000Z" }, // stale id
+  };
+  const result = (await pi.emit("tool_call", event, ctx)) as { block?: boolean } | undefined;
+  assert.equal(result?.block, true, "a stamp naming another call grants nothing");
+  assert.equal(ctx.prompts.length, 1, "the gate asks normally");
+});
+
+test("P2: hard checks still run - a stamped call outside scope is still denied", async () => {
+  const { root, harnessHome } = tmpProject();
+  process.env.PI_HARNESS_HOME = harnessHome;
+  const pi = new FakePi();
+  await piHarnessExtension(pi as never);
+  const ctx = countingCtx(root, true);
+  await pi.emit("session_start", { type: "session_start" }, ctx);
+
+  // Scope is checked BEFORE the approval step, so a stamp cannot buy it.
+  const event = {
+    toolName: "write",
+    toolCallId: "call-3",
+    input: { path: "/etc/passwd" },
+    __cpUserApproved: { callId: "call-3", at: "2026-01-01T00:00:00.000Z" },
+  };
+  const result = (await pi.emit("tool_call", event, ctx)) as { block?: boolean; reason?: string };
+  assert.equal(result?.block, true, "an out-of-scope target is denied despite the stamp");
+  assert.match(result?.reason ?? "", /outside scope/);
+});
+
+test("P2: an escalating action is NOT satisfied by a generic stamp (posture keeps its own question)", async () => {
+  const { root, harnessHome } = tmpProject();
+  process.env.PI_HARNESS_HOME = harnessHome;
+  const pi = new FakePi();
+  await piHarnessExtension(pi as never);
+  const ctx = countingCtx(root, false);
+  await pi.emit("session_start", { type: "session_start" }, ctx);
+
+  // authorize() short-circuits on userApproved BEFORE the section 32 posture
+  // rule, so honouring a generic tool-call answer here would let consent to a
+  // tool call stand in for consent to an authority expansion. It must not.
+  const event = {
+    toolName: "harness_set_posture",
+    toolCallId: "call-4",
+    input: { autonomy: "autonomous" },
+    __cpUserApproved: { callId: "call-4", at: "2026-01-01T00:00:00.000Z" },
+  };
+  const result = (await pi.emit("tool_call", event, ctx)) as { block?: boolean } | undefined;
+  assert.equal(result?.block, true, "posture loosening is not granted by a generic approval");
+});
+
+test("P1: read-mode harness shell is a read effect; mode:write keeps the shell gate", async () => {
+  const { root, harnessHome } = tmpProject();
+  process.env.PI_HARNESS_HOME = harnessHome;
+  const pi = new FakePi();
+  await piHarnessExtension(pi as never);
+  const ctx = countingCtx(root, false); // decline anything asked
+  await pi.emit("session_start", { type: "session_start" }, ctx);
+
+  // Read mode: the scope root is mounted read-only (a write fails with EROFS),
+  // network is unshared, credential paths shadowed - the effect is a read, so
+  // section 21's shell gate does not apply.
+  const read = (await pi.emit(
+    "tool_call",
+    { toolName: "pi_harness_bash", toolCallId: "r1", input: { command: "node --test" } },
+    ctx,
+  )) as { block?: boolean } | undefined;
+  assert.equal(read?.block, undefined, "a read-only sandboxed command runs without an approval");
+  assert.deepEqual(ctx.prompts, [], "and costs no prompt");
+
+  // Write mode makes the scope root writable: a real mutation, still gated.
+  const write = (await pi.emit(
+    "tool_call",
+    { toolName: "pi_harness_bash", toolCallId: "w1", input: { command: "touch f", mode: "write" } },
+    ctx,
+  )) as { block?: boolean } | undefined;
+  assert.equal(write?.block, true, "mode:write keeps the shell gate (declined here)");
+  assert.equal(ctx.prompts.length, 1, "exactly one question, for the write-mode call");
+});
