@@ -1596,6 +1596,44 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   };
 
   /**
+   * P2, control-plane side: stamp a human approval onto the tool-call event so
+   * the harness's own authorization seam can consume it instead of asking the
+   * same question a second time (GATE-FATIGUE-REDESIGN.md P2).
+   *
+   * Deliberately passed ON THE EVENT rather than through shared state: the two
+   * extensions share no state by design (docs/ARCHITECTURE.md), and each must
+   * keep working when the other is not installed. The harness reads the field
+   * if present and ignores it otherwise.
+   *
+   * The stamp carries the tool-call id so it authorizes exactly one call, and
+   * only an APPROVAL is ever stamped — a decline blocks here and never reaches
+   * the harness.
+   */
+  const markConfirmedForHarness = (event: ToolCallEvent): void => {
+    const callId = (event as { toolCallId?: string }).toolCallId;
+    (event as { __cpUserApproved?: { callId: string | null; at: string } }).__cpUserApproved = {
+      callId: typeof callId === "string" ? callId : null,
+      at: new Date().toISOString(),
+    };
+  };
+
+  /**
+   * Harness tools whose EFFECT is read-only: they answer a question and change
+   * nothing, so the attended layer lets them through silently (P1). The harness
+   * already treats these as reads at its own seam, so gating them here was the
+   * only thing standing between the coordinator and a free lookup — it cost a
+   * real prompt in the observed trace.
+   *
+   * Deliberately excluded and still gated: harness_note and
+   * harness_set_posture (they write) and harness_delegate (it spawns an actor).
+   */
+  const READ_EFFECT_HARNESS_TOOLS: ReadonlySet<string> = new Set([
+    "harness_find_capability",
+    "harness_memory_search",
+    "harness_request_scope",
+  ]);
+
+  /**
    * The over-budget advisor-consult gate: Yes (this once) / No / Always (lift
    * the cap for the session). Same three-option ctx.ui.custom dialog as the
    * attended per-call gate, but "Always" lifts a session budget rather than
@@ -1749,6 +1787,20 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, detail);
       }
       if (approved) {
+        // P2 "one door per decision" (GATE-FATIGUE-REDESIGN.md): the harness
+        // registered a tool_call handler too, and this extension only
+        // short-circuits on BLOCK — so an ALLOW here lets the same call reach
+        // the harness, whose authorize() may independently return
+        // needs-approval and ask the identical question again. That double
+        // dialog was two of the five prompts in the observed trace.
+        //
+        // Stamp the human's answer onto the event, keyed to THIS tool call. The
+        // harness consumes it in place of prompting. Both layers still evaluate
+        // and still enforce; only the second QUESTION disappears. Single-use and
+        // per-callId, so it can never be replayed onto a later call, and it is
+        // never persisted. A denial is never stamped: a decline blocks here, so
+        // the harness never sees the call.
+        markConfirmedForHarness(event);
         // A confirmed read (e.g. an outside-root read approved in Attended)
         // also earns read-before-edit credit for that file.
         recordReadCredit(event, ctx);
@@ -1822,6 +1874,18 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         return; // allow silently
       }
       // Sensitive (or unresolvable): fall through to the confirm below.
+    }
+
+    // P1 (GATE-FATIGUE-REDESIGN.md): a harness tool whose effect is read-only
+    // flows free. These answer a question and change nothing — the harness
+    // itself already classifies them as reads at its own seam, so the attended
+    // confirm here was the only prompt standing in front of a lookup, and it
+    // was one of the five in the observed trace. Same shape as the reads-free
+    // downgrade above. Write-effect (harness_note, harness_set_posture) and
+    // escalating (harness_delegate) harness tools are deliberately excluded and
+    // keep their gate; a hard block is never downgraded, only a confirm.
+    if (decision.action === "confirm" && READ_EFFECT_HARNESS_TOOLS.has(event.toolName)) {
+      return; // read-effect harness tool: silent allow
     }
 
     // Advisor-consult budget (soft policy): a read-only advisor consult

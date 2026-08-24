@@ -1532,3 +1532,57 @@ test("ro-shell: a write-mode pi_harness_bash command still gates and is remember
   assert.ok(added, "the write-mode confirm is rememberable");
   assert.equal((added!.data as { target: string }).target, "touch f", "keyed by the exact write command");
 });
+
+// ---- Gate fatigue: P1 (effect) + P2 (one door per decision) ---------------
+// GATE-FATIGUE-REDESIGN.md. Read-effect harness tools stop prompting; when the
+// attended layer collects an answer, it is stamped on the event so the harness
+// seam consumes it instead of asking the same question twice.
+
+test("P1: read-effect harness tools flow free; write/escalate ones still gate", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot(), withCustom: true, customChoice: "no" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx); // attended
+
+  for (const toolName of ["harness_find_capability", "harness_memory_search", "harness_request_scope"]) {
+    const r = await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName, input: {} }, ctx);
+    assert.equal(r, undefined, `${toolName} is allowed`);
+  }
+  assert.deepEqual(ctx.customCalls, [], "read-effect harness tools show no dialog at all");
+
+  // The ones that change something keep their gate (declined here -> blocked).
+  for (const toolName of ["harness_note", "harness_set_posture", "harness_delegate"]) {
+    const r = (await pi.emit("tool_call", { type: "tool_call", toolCallId: "2", toolName, input: {} }, ctx)) as {
+      block?: boolean;
+    };
+    assert.equal(r?.block, true, `${toolName} still gates`);
+  }
+  assert.equal(ctx.customCalls.length, 3, "one dialog each for the write/escalate tools");
+});
+
+test("P2: an approved call is stamped for the harness, keyed to that exact call", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "once" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+
+  const event = { type: "tool_call", toolCallId: "call-42", toolName: "write", input: { path: "out.txt", content: "x" } };
+  const r = await pi.emit("tool_call", event, ctx);
+  assert.equal(r, undefined, "approved");
+  const stamp = (event as { __cpUserApproved?: { callId: string } }).__cpUserApproved;
+  assert.ok(stamp, "the human's answer is stamped on the event for the harness seam");
+  assert.equal(stamp!.callId, "call-42", "stamped with THIS call's id, so it cannot be replayed");
+});
+
+test("P2: a declined call is never stamped (a denial cannot satisfy the second layer)", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot(), withCustom: true, customChoice: "no" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+
+  const event = { type: "tool_call", toolCallId: "call-7", toolName: "write", input: { path: "out.txt", content: "x" } };
+  const r = (await pi.emit("tool_call", event, ctx)) as { block?: boolean };
+  assert.equal(r?.block, true, "declined -> blocked here");
+  assert.equal((event as { __cpUserApproved?: unknown }).__cpUserApproved, undefined, "no stamp on a denial");
+});
