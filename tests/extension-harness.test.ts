@@ -483,6 +483,223 @@ test("read-before-edit: read credit does not cross sessions (a delegate/operator
   assert.match(blocked?.reason ?? "", /Rule: read-before-edit\b/);
 });
 
+// ---- backup-before-edit (hard rule) ----
+// A mutation of an EXISTING file must snapshot its pre-mutation bytes to a
+// durable location before it proceeds. Fails closed: if the snapshot cannot be
+// written, the mutation is refused. New files are exempt. The backup root is
+// pointed at a per-test tmp dir via PI_BACKUP_DIR so the tests never touch the
+// real ~/.pi/backups.
+
+const findBackupAudit = (pi: FakePi) =>
+  pi.entries.find(
+    (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "backup-before-edit",
+  );
+const findBackupFailedAudit = (pi: FakePi) =>
+  pi.entries.find(
+    (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "backup-before-edit-failed",
+  );
+
+/** Boot a control plane whose backup root is an isolated tmp dir. */
+async function bootWithBackupRoot(): Promise<{ pi: FakePi; backupRoot: string }> {
+  const backupRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cp-backup-")));
+  const prev = process.env.PI_BACKUP_DIR;
+  process.env.PI_BACKUP_DIR = backupRoot;
+  try {
+    const pi = await boot();
+    return { pi, backupRoot };
+  } finally {
+    if (prev === undefined) delete process.env.PI_BACKUP_DIR;
+    else process.env.PI_BACKUP_DIR = prev;
+  }
+}
+
+test("backup-before-edit: a blind edit is still blocked by read-before-edit (backup never reached)", async () => {
+  const { pi, backupRoot } = await bootWithBackupRoot();
+  const root = tmpRoot();
+  fs.writeFileSync(path.join(root, "data.txt"), "original\n");
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "edit", input: { path: "data.txt", oldText: "original", newText: "changed" } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true);
+  assert.match(blocked?.reason ?? "", /Rule: read-before-edit\b/);
+  // The backup step is downstream of read-before-edit, so no backup was taken.
+  assert.ok(!findBackupAudit(pi), "no backup diagnostic when read-before-edit blocks first");
+  assert.equal(fs.existsSync(backupRoot) ? fs.readdirSync(backupRoot).length : 0, 0, "no backup file written");
+});
+
+test("backup-before-edit: read then edit snapshots the pre-edit bytes and proceeds", async () => {
+  const { pi, backupRoot } = await bootWithBackupRoot();
+  const root = tmpRoot();
+  const file = path.join(root, "data.txt");
+  const PRE = "original-content\n";
+  fs.writeFileSync(file, PRE);
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "data.txt" } }, ctx);
+  const editResult = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "data.txt", oldText: "original-content", newText: "changed-content" } },
+    ctx,
+  );
+  assert.equal(editResult, undefined, "an edit after reading proceeds (backup succeeded)");
+  const audit = findBackupAudit(pi);
+  assert.ok(audit, "a backup-before-edit diagnostic must be emitted");
+  const d = audit!.data as { target: string; backupPath: string; bytes: number };
+  assert.equal(d.target, file);
+  // The snapshot must hold the PRE-mutation bytes, byte for byte.
+  assert.equal(fs.readFileSync(d.backupPath, "utf8"), PRE);
+  assert.equal(d.bytes, Buffer.byteLength(PRE));
+  assert.ok(d.backupPath.startsWith(backupRoot), "backup lives under the configured backup root");
+});
+
+test("backup-before-edit: writing a NEW file is exempt (no backup, no diagnostic)", async () => {
+  const { pi, backupRoot } = await bootWithBackupRoot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const result = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "brand-new.txt", content: "hello\n" } },
+    ctx,
+  );
+  assert.equal(result, undefined, "creating a new file proceeds (nothing to back up)");
+  assert.ok(!findBackupAudit(pi), "no backup diagnostic for a new file");
+  assert.equal(fs.existsSync(backupRoot) ? fs.readdirSync(backupRoot).length : 0, 0, "no backup written for a new file");
+});
+
+test("backup-before-edit: a failed snapshot blocks the mutation and leaves the target unchanged", async () => {
+  const { pi, backupRoot } = await bootWithBackupRoot();
+  const root = tmpRoot();
+  const file = path.join(root, "data.txt");
+  const PRE = "keep-me\n";
+  fs.writeFileSync(file, PRE);
+  // Make the backup root unwritable so copyFileSync throws (EACCES). Use the
+  // helper's returned backupRoot (NOT process.env.PI_BACKUP_DIR, which the
+  // helper already restored in its finally and is therefore undefined here).
+  fs.chmodSync(backupRoot, 0o555); // r-x: cannot create subdirs/files
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  try {
+    await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await pi.commands.get("mode")!.handler("execute", ctx);
+    await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "data.txt" } }, ctx);
+    const blocked = (await pi.emit(
+      "tool_call",
+      { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "data.txt", oldText: "keep-me", newText: "nope" } },
+      ctx,
+    )) as { block?: boolean; reason?: string };
+    assert.equal(blocked?.block, true, "a failed backup must block the mutation (fail closed)");
+    assert.match(blocked?.reason ?? "", /backup-before-edit/);
+    const failed = findBackupFailedAudit(pi);
+    assert.ok(failed, "a backup-before-edit-failed diagnostic must be emitted");
+    assert.equal(fs.readFileSync(file, "utf8"), PRE, "the target file is untouched when the backup fails");
+  } finally {
+    fs.chmodSync(backupRoot, 0o755); // restore so cleanup can remove it
+  }
+});
+
+test("backup-before-edit: external change after read is blocked by stale first; re-read then edit backs up the NEW content", async () => {
+  const { pi } = await bootWithBackupRoot();
+  const root = tmpRoot();
+  const file = path.join(root, "data.txt");
+  fs.writeFileSync(file, "v1\n");
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "data.txt" } }, ctx);
+  // External modification after the read.
+  fs.writeFileSync(file, "v2-external\n");
+  const later = new Date(Date.now() + 10_000);
+  fs.utimesSync(file, later, later);
+  const stale = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "data.txt", oldText: "v1", newText: "x" } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(stale?.block, true);
+  assert.match(stale?.reason ?? "", /read-before-edit:stale/);
+  assert.ok(!findBackupAudit(pi), "no backup when stale blocks first");
+  // Re-read (now sees v2), then edit: the backup must capture v2, not v1.
+  await pi.emit("tool_call", { type: "tool_call", toolCallId: "3", toolName: "read", input: { path: "data.txt" } }, ctx);
+  const ok = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "4", toolName: "edit", input: { path: "data.txt", oldText: "v2-external", newText: "v3" } },
+    ctx,
+  );
+  assert.equal(ok, undefined);
+  const audit = findBackupAudit(pi);
+  assert.ok(audit, "a backup is taken after the re-read");
+  assert.equal(fs.readFileSync((audit!.data as { backupPath: string }).backupPath, "utf8"), "v2-external\n");
+});
+
+test("backup-before-edit: an unattended allowed mutation still produces a backup", async () => {
+  const { pi } = await bootWithBackupRoot();
+  const root = tmpRoot();
+  const file = path.join(root, "data.txt");
+  fs.writeFileSync(file, "unattn\n");
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute-restricted", ctx);
+  await pi.commands.get("mode")!.handler("unattended", ctx);
+  await pi.commands.get("task")!.handler("set do the thing", ctx);
+  // Unattended read is allowed (reads are not gated); it earns read credit.
+  await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "data.txt" } }, ctx);
+  const result = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "data.txt", oldText: "unattn", newText: "done" } },
+    ctx,
+  )) as { block?: boolean; reason?: string } | undefined;
+  assert.equal(result?.block, undefined, "an unattended allowed edit must proceed (backup succeeded)");
+  const audit = findBackupAudit(pi);
+  assert.ok(audit, "the rule applies in unattended mode, not just attended");
+  assert.equal(fs.readFileSync((audit!.data as { backupPath: string }).backupPath, "utf8"), "unattn\n");
+});
+
+test("backup-before-edit: no cross-session inheritance (a second activation takes its own backup)", async () => {
+  const root = tmpRoot();
+  const file = path.join(root, "shared.txt");
+  fs.writeFileSync(file, "x\n");
+  // Two separate activations, each with its OWN isolated backup root.
+  const { pi: pi1, backupRoot: root1 } = await bootWithBackupRoot();
+  const ctx1 = makeCtx({ cwd: root, confirmResult: true });
+  await pi1.emit("session_start", { type: "session_start", reason: "startup" }, ctx1);
+  await pi1.commands.get("mode")!.handler("execute", ctx1);
+  await pi1.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "shared.txt" } }, ctx1);
+  const ok1 = await pi1.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "shared.txt", oldText: "x", newText: "y" } },
+    ctx1,
+  );
+  assert.equal(ok1, undefined);
+  const audit1 = findBackupAudit(pi1)!;
+  const tag1 = (audit1.data as { sessionTag: string }).sessionTag;
+  assert.ok(fs.existsSync((audit1.data as { backupPath: string }).backupPath), "session 1 wrote its own backup");
+
+  // Session 2 is a fresh activation with a different tag and its own root.
+  const { pi: pi2, backupRoot: root2 } = await bootWithBackupRoot();
+  assert.notEqual(root1, root2, "each activation gets an isolated backup root in this test");
+  const ctx2 = makeCtx({ cwd: root, confirmResult: true });
+  await pi2.emit("session_start", { type: "session_start", reason: "startup" }, ctx2);
+  await pi2.commands.get("mode")!.handler("execute", ctx2);
+  await pi2.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "shared.txt" } }, ctx2);
+  const ok2 = await pi2.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "shared.txt", oldText: "y", newText: "z" } },
+    ctx2,
+  );
+  assert.equal(ok2, undefined);
+  const audit2 = findBackupAudit(pi2)!;
+  const tag2 = (audit2.data as { sessionTag: string }).sessionTag;
+  assert.notEqual(tag1, tag2, "each activation mints its own session tag");
+  assert.ok(fs.existsSync((audit2.data as { backupPath: string }).backupPath), "session 2 wrote its own backup");
+});
+
 // ---- Decision B: record declined out-of-scope reads ----
 // A read outside the project root prompts (attended:read-outside-root); on a
 // decline it is recorded as a control-plane diagnostic so a refused read is a

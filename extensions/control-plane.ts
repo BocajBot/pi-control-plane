@@ -97,6 +97,11 @@ import {
   validatePolicy,
   type PathOps,
 } from "../src/control-plane/tool-policy.ts";
+import {
+  defaultBackupRoot,
+  planBackup,
+  resolveNonCollidingPath,
+} from "../src/control-plane/backup.ts";
 import { isSensitiveReadTarget, type SensitiveReadExtra } from "../src/control-plane/sensitive-paths.ts";
 import {
   addRule,
@@ -549,6 +554,83 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     if (canonical === null || !fs.existsSync(canonical)) return;
     const mtime = mtimeOf(canonical);
     if (mtime !== null) readSet.set(canonical, mtime);
+  };
+
+  // Per-control-plane-activation backup identity: a tag for naming and a
+  // resolved root directory. One (tag, root) pair per activation means a file
+  // edited N times in one session yields ONE backup (the pre-first-edit state),
+  // while the same file edited across two sessions yields two backups (each
+  // session's pre-edit state). Both are memory-only and minted ONCE when this
+  // extension instance is created, so a restart starts fresh and never reuses an
+  // old activation's backups.
+  //
+  // The root is resolved at EXTENSION INIT, not lazily per decision and not at
+  // session_start. This closure is created exactly once per control-plane
+  // activation (one `controlPlaneExtension(pi)` call), so capturing the env here
+  // pins the destination for the whole activation — matching the sessionTag. It
+  // also matches the test fixture, which sets PI_BACKUP_DIR only around boot()
+  // (i.e. around this very init) and restores it before session_start fires; a
+  // decision-time or session_start read would see the env after restore and fall
+  // back to the real ~/.pi/backups (spilling real backups into the user's home).
+  const backupSessionTag = `bk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const backupRoot = defaultBackupRoot();
+
+  /**
+   * Backup-before-edit: snapshot an existing file's pre-mutation bytes to a
+   * durable, reviewable location BEFORE the mutation proceeds. Returns undefined
+   * on success (or when exempt), or { block, reason } on failure — fail-closed,
+   * so a mutation never runs without a recoverable pre-image.
+   *
+   * Only called from handleDecision for mutate-class tools (edit/write) whose
+   * target is an existing file, after read-before-edit has already passed and
+   * the policy decision allows/approves the call, immediately before the sandbox.
+   * The copy is written by THIS process on the host fs (not inside any bwrap
+   * child), so it is unaffected by the read-only scope mount.
+   */
+  const takeBackup = (
+    event: ToolCallEvent,
+    ctx: ExtensionContext,
+  ): { block: true; reason: string } | undefined => {
+    if (classifyTool(event.toolName) !== "mutate") return undefined;
+    const rawPath = (event.input as Record<string, unknown>).path;
+    if (typeof rawPath !== "string" || rawPath.trim().length === 0) return undefined;
+    const canonical = canonicalizePath(rawPath, ctx.cwd, pathOps);
+    if (canonical === null) return undefined; // unresolvable: the normal policy path handles it
+    const plan = planBackup(canonical, backupSessionTag, backupRoot, { exists: (p) => fs.existsSync(p) });
+    if (plan === null) return undefined; // new file: nothing to back up (exempt)
+    try {
+      const targetPath = resolveNonCollidingPath(plan.targetPath, { exists: (p) => fs.existsSync(p) });
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.copyFileSync(canonical, targetPath);
+      const bytes = fs.statSync(targetPath).size;
+      pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+        kind: "backup-before-edit",
+        toolName: event.toolName,
+        target: canonical,
+        backupPath: targetPath,
+        sessionTag: backupSessionTag,
+        bytes,
+        at: new Date().toISOString(),
+      });
+      return undefined;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+        kind: "backup-before-edit-failed",
+        toolName: event.toolName,
+        target: canonical,
+        sessionTag: backupSessionTag,
+        error: msg,
+        at: new Date().toISOString(),
+      });
+      return {
+        block: true,
+        reason:
+          `[control plane] Blocked tool "${event.toolName}" (backup-before-edit). ` +
+          `Could not snapshot "${canonical}" before modifying it (${msg}). ` +
+          `Failing closed: the mutation did not run. Fix the backup path/disk and retry.`,
+      };
+    }
   };
 
   /**
@@ -1723,6 +1805,12 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           at: new Date().toISOString(),
         });
       }
+      // Backup-before-edit (hard rule): snapshot the pre-mutation state of an
+      // existing file before it changes. Runs on the allow path (attended or
+      // unattended) and fails closed — a mutation never proceeds without a
+      // recoverable pre-image. Exempt for new files and non-mutate tools.
+      const backupResult = takeBackup(event, ctx);
+      if (backupResult !== undefined) return backupResult;
       const sandboxResult = applySandboxIfEnabled(event, ctx);
       if (!sandboxResult.ok) return { block: true, reason: sandboxResult.reason };
       return;
@@ -1804,6 +1892,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         // A confirmed read (e.g. an outside-root read approved in Attended)
         // also earns read-before-edit credit for that file.
         recordReadCredit(event, ctx);
+        // Backup-before-edit: same hard precondition as the allow path — a
+        // user-approved mutation of an existing file still needs its pre-image
+        // snapshotted first. Fails closed on backup failure.
+        const backupResult = takeBackup(event, ctx);
+        if (backupResult !== undefined) return backupResult;
         const sandboxResult = applySandboxIfEnabled(event, ctx);
         if (!sandboxResult.ok) return { block: true, reason: sandboxResult.reason };
         return;
