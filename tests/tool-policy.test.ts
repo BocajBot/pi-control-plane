@@ -80,8 +80,60 @@ test("tool classification: read tools known, unknown tools never safe", () => {
   assert.equal(classifyTool("edit"), "mutate");
   assert.equal(classifyTool("write"), "mutate");
   assert.equal(classifyTool("bash"), "shell");
+  // Harness-own tools are named, not "unknown": the harness shell is its own
+  // class, meta-tools are "harness"; genuinely foreign tools stay "unknown".
+  assert.equal(classifyTool("pi_harness_bash"), "harness-shell");
+  assert.equal(classifyTool("harness_delegate"), "harness");
+  assert.equal(classifyTool("harness_note"), "harness");
+  assert.equal(classifyTool("harness_find_capability"), "harness");
   assert.equal(classifyTool("browser_navigate"), "unknown");
   assert.equal(classifyTool(""), "unknown");
+});
+
+test("harness shell: named 'shell' risk, inside-root resolves, and Restricted still blocks (non-loosening)", () => {
+  const root = fs.realpathSync(makeTempRoot());
+  // Attended: confirm, labelled shell (not unknown-tool), inside-root resolves
+  // to yes instead of "Unavailable".
+  const attended = evaluateToolCall(
+    evalInput({ toolName: "pi_harness_bash", phase: "execute", autonomy: "attended", projectRoot: root, cwd: root, toolInput: { command: "wc -l x" } }),
+  );
+  assert.equal(attended.action, "confirm");
+  assert.equal(attended.riskCategory, "shell");
+  assert.equal(attended.insideRoot, true, "the harness shell runs inside the scope root, not Unavailable");
+  assert.equal(attended.rule, "attended:harness-shell");
+
+  // Restricted (allowBash:false): still BLOCKED, exactly as the unknown path
+  // did before reclassification. Reclassification must never turn block->confirm.
+  const restricted = evaluateToolCall(
+    evalInput({ toolName: "pi_harness_bash", phase: "execute", autonomy: "restricted", projectRoot: root, cwd: root, toolInput: { command: "wc -l x" } }),
+  );
+  assert.equal(restricted.action, "block");
+  assert.equal(restricted.rule, "restricted:harness-shell");
+
+  // Even with allowBash:true (which turns a bare `bash` into a confirm), the
+  // harness shell is NOT routed through that opt-in - it stays blocked.
+  const restrictedBashOn = evaluateToolCall({
+    ...evalInput({ toolName: "pi_harness_bash", phase: "execute", autonomy: "restricted", projectRoot: root, cwd: root, toolInput: { command: "wc -l x" } }),
+    policy: { ...policy, allowBash: true },
+  });
+  assert.equal(restrictedBashOn.action, "block", "harness shell never enters the allowBash confirm path");
+});
+
+test("harness meta-tools: named 'harness-tool' risk, confirm in attended, block in Restricted", () => {
+  const root = fs.realpathSync(makeTempRoot());
+  const attended = evaluateToolCall(
+    evalInput({ toolName: "harness_delegate", phase: "execute", autonomy: "attended", projectRoot: root, cwd: root, toolInput: { kind: "advisor", objective: "x" } }),
+  );
+  assert.equal(attended.action, "confirm");
+  assert.equal(attended.riskCategory, "harness-tool");
+  assert.equal(attended.rule, "attended:harness");
+  assert.match(attended.reason, /harness_delegate/, "the confirm names the tool, not 'unknown'");
+
+  const restricted = evaluateToolCall(
+    evalInput({ toolName: "harness_delegate", phase: "execute", autonomy: "restricted", projectRoot: root, cwd: root, toolInput: { kind: "advisor", objective: "x" } }),
+  );
+  assert.equal(restricted.action, "block");
+  assert.equal(restricted.rule, "restricted:harness");
 });
 
 test("local_web_search is treated as a read tool: available in Discuss without Execute/autonomy elevation", () => {

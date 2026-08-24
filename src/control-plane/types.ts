@@ -159,6 +159,7 @@ export type RiskCategory =
   | "file-write"
   | "file-edit"
   | "shell"
+  | "harness-tool"
   | "unknown-tool";
 
 export interface ToolDecision {
