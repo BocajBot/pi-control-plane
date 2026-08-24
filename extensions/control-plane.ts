@@ -1466,7 +1466,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   const promptAttendedChoice = async (
     ctx: ExtensionContext,
     toolName: string,
-    canonical: string,
+    ruleLabel: string,
     detail: string,
   ): Promise<"once" | "always" | "no"> => {
     const header = [...detail.split("\n"), "", "↑↓ choose · enter select · esc = No"];
@@ -1475,7 +1475,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       { value: "no", label: "No — deny this call" },
       {
         value: "always",
-        label: `Always — allow ${toolName} on ${canonical}`,
+        label: `Always — allow ${ruleLabel}`,
         description: "saves a scope-bound rule; manage with /harness-rules",
       },
     ];
@@ -1497,6 +1497,50 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       };
     });
     return choice === "once" || choice === "always" ? choice : "no"; // null/escape/unknown -> No
+  };
+
+  /**
+   * For an attended confirm, the target a remembered rule (and the three-option
+   * dialog's "Always") would key on, so EVERY confirm path is rememberable and
+   * shows the rule - not just resolvable-path ones:
+   *   - a resolvable path (edit/write/outside-root read) -> the canonical path;
+   *   - a shell command (bare `bash` or the harness shell) -> the exact command
+   *     string (conservative: only the identical command is later suppressed);
+   *   - a harness meta-tool or a genuinely foreign tool -> "*" (a tool-level
+   *     rule: "always allow this tool" in this scope; "*" is a non-empty
+   *     sentinel so validateRule accepts it and it never collides with a
+   *     canonical path, which is always absolute).
+   * Returns null when the confirm must NOT be rememberable - a sensitive read,
+   * the one documented hard exception (remembering an exfil path is forbidden),
+   * which therefore keeps a plain yes/no.
+   */
+  const rememberTargetFor = (
+    event: ToolCallEvent,
+    decision: ToolDecision,
+    ctx: ExtensionContext,
+  ): { target: string; label: string } | null => {
+    const input = event.input as Record<string, unknown>;
+    const rawPath = typeof input.path === "string" ? input.path : null;
+    const command = typeof input.command === "string" ? input.command : null;
+    const canonical = rawPath !== null ? canonicalizePath(rawPath, ctx.cwd, pathOps) : null;
+    if (
+      decision.rule === "attended:read-outside-root" &&
+      canonical !== null &&
+      isSensitiveReadTarget(canonical, agentDir(), sensitiveReadExtra())
+    ) {
+      return null; // sensitive read: hard boundary, never rememberable
+    }
+    if (canonical !== null) {
+      return { target: canonical, label: `${event.toolName} on ${canonical}` };
+    }
+    if (decision.riskCategory === "shell" && command !== null) {
+      const shown = command.length > 60 ? command.slice(0, 60) + "…" : command;
+      return { target: command, label: `${event.toolName}: ${shown}` };
+    }
+    if (decision.riskCategory === "harness-tool" || decision.riskCategory === "unknown-tool") {
+      return { target: "*", label: `${event.toolName} (any call in this scope)` };
+    }
+    return null;
   };
 
   /**
@@ -1618,25 +1662,23 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       ]
         .filter((line): line is string => line !== null)
         .join("\n");
-      // A rememberable confirm (a resolvable path target that is not a
-      // sensitive read) gets the three-option dialog whose "Always" saves the
-      // exact rule /harness-rules allow would — one prompt, third choice, zero
-      // added prompts. Sensitive reads and path-less confirms (shell) keep the
-      // plain yes/no. Requires ctx.ui.custom; without it, plain yes/no.
-      const canonical = target !== null ? canonicalizePath(target, ctx.cwd, pathOps) : null;
-      const sensitiveRead =
-        decision.rule === "attended:read-outside-root" &&
-        canonical !== null &&
-        isSensitiveReadTarget(canonical, agentDir(), sensitiveReadExtra());
+      // EVERY confirm routes through the three-option dialog (Yes/No/Always) so
+      // no confirm is a bare, un-rememberable yes/no: a resolvable path keys the
+      // rule on the path, a shell command on the exact command, a harness/foreign
+      // tool at tool level. "Always" saves that rule and suppresses the prompt
+      // next time. The one exception is a sensitive read (rememberTargetFor ->
+      // null), the documented hard boundary, which keeps a plain yes/no. Without
+      // ctx.ui.custom, plain yes/no.
+      const remember = rememberTargetFor(event, decision, ctx);
       const hasCustom = typeof (ctx.ui as { custom?: unknown }).custom === "function";
       let approved: boolean;
-      if (hasCustom && canonical !== null && !sensitiveRead) {
-        const choice = await promptAttendedChoice(ctx, event.toolName, canonical, detail);
+      if (hasCustom && remember !== null) {
+        const choice = await promptAttendedChoice(ctx, event.toolName, remember.label, detail);
         if (choice === "always") {
           const scopeRoot = rootOf(ctx);
           const result = addRule(
             rememberedRules,
-            { tool: event.toolName, target: canonical, scopeRoot },
+            { tool: event.toolName, target: remember.target, scopeRoot },
             new Date().toISOString(),
           );
           if (result.rule !== null && !result.duplicate) {
@@ -1648,7 +1690,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
               provenance: "attended-dialog",
               ruleId: result.rule.id,
               toolName: event.toolName,
-              target: canonical,
+              target: remember.target,
               scopeRoot,
               at: new Date().toISOString(),
             });
@@ -1829,6 +1871,26 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       return; // within budget: silent allow (downgrade the attended confirm)
     }
 
+    // Read-only harness shell flows freely: pi_harness_bash is bwrap-sandboxed
+    // by the harness with the scope root mounted READ-ONLY unless the call
+    // passes mode:"write" (see PHASE4-RO-SHELL-DESIGN.md). A read-mode call
+    // cannot mutate, cannot reach out-of-scope/credential paths (the mount table
+    // is the classifier), and has no network - so in Execute+attended it is
+    // auto-allowed silently instead of prompting for every wc/grep/git-status.
+    // The harness still writes the shell_exec audit (runId + exit code), so the
+    // run is recorded. Gated on bwrap being available: without it the harness
+    // would refuse and there is no read-only guarantee to lean on, so it falls
+    // through to the confirm (never a silent allow). A write-mode call also falls
+    // through to the gate (the Part-2 three-option dialog, scope root shown).
+    if (
+      event.toolName === "pi_harness_bash" &&
+      decision.action === "confirm" &&
+      (event.input as Record<string, unknown>).mode !== "write" &&
+      isBwrapAvailable()
+    ) {
+      return; // read-only sandboxed shell: silent allow
+    }
+
     // Read-before-edit (hard rule): an edit/write targeting an EXISTING file
     // must have read that file this session (and it must not have changed on
     // disk since). This is a strict precondition on mutation — it preempts both
@@ -1862,28 +1924,22 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     // Remembered decisions: a soft-policy rule the user saved converts a
     // matching attended confirm into an allow, so the same prompt never recurs.
     // Placed AFTER read-before-edit (a rule cannot resurrect a blind edit) and
-    // it never matches a sensitive-read confirm, so it can only skip a prompt
-    // the user has already, explicitly, agreed to skip — never loosen a hard
-    // boundary. Gated on hasUI: a rule suppresses a PROMPT, and a no-UI session
-    // has none — it fails closed as today, never auto-allowed by a rule.
+    // it never matches a sensitive-read confirm (rememberTargetFor -> null), so
+    // it can only skip a prompt the user has already, explicitly, agreed to skip
+    // — never loosen a hard boundary. Keyed by the SAME rememberTargetFor as the
+    // dialog's "Always", so path-ful, shell (by command) and tool-level
+    // (harness/foreign) rules all match here. Gated on hasUI: a rule suppresses
+    // a PROMPT, and a no-UI session has none — it fails closed as today.
     if (decision.action === "confirm" && ctx.hasUI) {
-      const rawPath = typeof (event.input as Record<string, unknown>).path === "string"
-        ? ((event.input as Record<string, unknown>).path as string)
-        : null;
-      const canonical = rawPath !== null ? canonicalizePath(rawPath, ctx.cwd, pathOps) : null;
-      const sensitiveRead =
-        decision.rule === "attended:read-outside-root" &&
-        canonical !== null &&
-        isSensitiveReadTarget(canonical, agentDir(), sensitiveReadExtra());
+      const remember = rememberTargetFor(event, decision, ctx);
       if (
-        canonical !== null &&
-        !sensitiveRead &&
-        matchRule(rememberedRules, event.toolName, canonical, rootOf(ctx)) !== null
+        remember !== null &&
+        matchRule(rememberedRules, event.toolName, remember.target, rootOf(ctx)) !== null
       ) {
         pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
           kind: "remembered-rule-allow",
           toolName: event.toolName,
-          target: canonical,
+          target: remember.target,
           at: new Date().toISOString(),
         });
         recordReadCredit(event, ctx);
