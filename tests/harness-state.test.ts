@@ -351,9 +351,21 @@ test("section 9: with no bubblewrap the shell refuses instead of falling back", 
   assert.match(outcome.ok === false ? outcome.reason : "", /refuses to run rather than fall back/);
 });
 
-test("section 9: the scope root is the only read-write mount, and network is off by default", () => {
-  const outcome = plan("ls", scope, config, "/home/u/proj", available);
+test("section 9: read-only by default - the scope root is mounted read-only, nothing is writable", () => {
+  const outcome = plan("wc -l x", scope, config, "/home/u/proj", available);
   assert.ok(outcome.ok);
+  assert.equal(outcome.mounts.writable, false);
+  assert.equal(outcome.mounts.readWrite, "(none: read-only)");
+  assert.match(outcome.command, /'--ro-bind' '\/home\/u\/proj' '\/home\/u\/proj'/);
+  assert.ok(!outcome.command.includes("'--bind' '/home/u/proj'"), "the scope root is not read-write bound in read mode");
+  assert.equal(outcome.mounts.network, false);
+  assert.match(outcome.command, /--unshare-all/);
+});
+
+test("section 9: mode write makes the scope root the only read-write mount, network still off", () => {
+  const outcome = plan("touch f", scope, config, "/home/u/proj", available, { writable: true });
+  assert.ok(outcome.ok);
+  assert.equal(outcome.mounts.writable, true);
   assert.equal(outcome.mounts.readWrite, "/home/u/proj");
   assert.equal(outcome.mounts.network, false);
   assert.match(outcome.command, /--unshare-all/);

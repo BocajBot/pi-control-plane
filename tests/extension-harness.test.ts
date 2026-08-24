@@ -1375,3 +1375,103 @@ test("advisor budget: never loosens a hard block (Discuss phase)", async () => {
   assert.equal(blocked?.block, true, "a phase-blocked consult stays blocked");
   assert.equal(advisorConsultEntries(pi).length, 0, "the budget never counted or allowed a hard-blocked consult");
 });
+
+// ---- Dialog unification: every remaining confirm gets Yes/No/Always --------
+// No confirm path is a bare, un-rememberable yes/no. A shell command is
+// remembered by its exact command; a harness meta-tool / foreign tool at tool
+// level. Sensitive reads remain the one exception (covered above).
+
+test("dialog unification: a shell command confirm offers Always, keyed by the exact command", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "always" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx); // attended
+  const r1 = await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "bash", input: { command: "wc -l x" } }, ctx);
+  assert.equal(r1, undefined, "Always allows the shell command");
+  assert.equal(ctx.customCalls.length, 1, "the shell confirm used the three-option dialog, not a plain yes/no");
+  const added = findRuleAdded(pi);
+  assert.ok(added, "a rule was saved from the shell dialog");
+  assert.equal((added!.data as { target: string }).target, "wc -l x", "the rule is keyed by the exact command");
+
+  // The same command is suppressed next time; a different command is not.
+  const ctx2 = makeCtx({ cwd: root, withCustom: true, customChoice: "no" });
+  const r2 = await pi.emit("tool_call", { type: "tool_call", toolCallId: "2", toolName: "bash", input: { command: "wc -l x" } }, ctx2);
+  assert.equal(r2, undefined, "the saved command rule suppresses the identical call");
+  assert.deepEqual(ctx2.customCalls, [], "no dialog for the remembered command");
+  const ctx3 = makeCtx({ cwd: root, withCustom: true, customChoice: "no" });
+  const r3 = (await pi.emit("tool_call", { type: "tool_call", toolCallId: "3", toolName: "bash", input: { command: "rm -rf y" } }, ctx3)) as { block?: boolean };
+  assert.equal(r3?.block, true, "a different command still prompts (declined here)");
+  assert.equal(ctx3.customCalls.length, 1, "the different command showed the dialog");
+});
+
+test("dialog unification: a harness meta-tool confirm offers Always as a tool-level rule", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "always" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const r1 = await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "harness_note", input: { text: "hi" } }, ctx);
+  assert.equal(r1, undefined, "Always allows the harness tool");
+  const added = findRuleAdded(pi);
+  assert.ok(added, "a tool-level rule was saved");
+  assert.equal((added!.data as { target: string }).target, "*", "harness meta-tools save a tool-level (*) rule");
+
+  // Tool-level: a DIFFERENT harness_note call is also suppressed.
+  const ctx2 = makeCtx({ cwd: root, withCustom: true, customChoice: "no" });
+  const r2 = await pi.emit("tool_call", { type: "tool_call", toolCallId: "2", toolName: "harness_note", input: { text: "different text" } }, ctx2);
+  assert.equal(r2, undefined, "the tool-level rule suppresses any harness_note call");
+  assert.deepEqual(ctx2.customCalls, [], "no dialog once the tool-level rule exists");
+});
+
+test("dialog unification: a foreign unknown tool shows the dialog, never a plain yes/no", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "no" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const blocked = (await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "browser_navigate", input: {} }, ctx)) as { block?: boolean };
+  assert.equal(blocked?.block, true, "No declines the foreign tool");
+  assert.equal(ctx.customCalls.length, 1, "the foreign-tool confirm used the three-option dialog, not a plain yes/no");
+});
+
+// ---- Read-only-shell default: pi_harness_bash read mode flows freely -------
+// The harness runs pi_harness_bash under a bwrap sandbox with the scope root
+// read-only unless mode:"write". Read mode auto-allows silently (bwrap present);
+// write mode and no-bwrap fall through to the gate.
+
+test("ro-shell: a read-mode pi_harness_bash command auto-allows silently", { skip: !bwrapInstalled }, async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "no" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx); // attended
+  const r = await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "pi_harness_bash", input: { command: "wc -l x" } }, ctx);
+  assert.equal(r, undefined, "read-only sandboxed shell is allowed without a prompt");
+  assert.deepEqual(ctx.customCalls, [], "no dialog for a read-mode harness shell command");
+});
+
+test("ro-shell: without bwrap a read-mode command falls to the gate, never a silent allow", { skip: bwrapInstalled }, async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "no" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const blocked = (await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "pi_harness_bash", input: { command: "wc -l x" } }, ctx)) as { block?: boolean };
+  assert.equal(blocked?.block, true, "no bwrap -> the gate (declined here), not a silent allow");
+  assert.equal(ctx.customCalls.length, 1, "the confirm dialog was shown instead of auto-allowing");
+});
+
+test("ro-shell: a write-mode pi_harness_bash command still gates and is rememberable", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "always" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const r = await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "pi_harness_bash", input: { command: "touch f", mode: "write" } }, ctx);
+  assert.equal(r, undefined, "Always allows the write-mode command");
+  assert.equal(ctx.customCalls.length, 1, "write mode is gated by the three-option dialog, never auto-allowed");
+  const added = findRuleAdded(pi);
+  assert.ok(added, "the write-mode confirm is rememberable");
+  assert.equal((added!.data as { target: string }).target, "touch f", "keyed by the exact write command");
+});

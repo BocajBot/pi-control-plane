@@ -41,8 +41,37 @@ export interface SandboxProbe {
 }
 
 export type SandboxPlan =
-  | { ok: true; command: string; mounts: { readWrite: string; readOnly: string[]; network: boolean } }
+  | { ok: true; command: string; mounts: { readWrite: string; readOnly: string[]; network: boolean; writable: boolean } }
   | { ok: false; reason: string; rule: string };
+
+/** HOME-relative credential paths that are always shadowed inside the sandbox
+ * as defense-in-depth (dirs -> empty tmpfs, files -> /dev/null), reused across
+ * read and write mode. Out-of-scope secrets are already unreachable because
+ * only the scope root and the configured read-only paths are ever bound; this
+ * closes the residual case where a user adds a broad read-only mount (e.g. a
+ * ro-bound $HOME) that would otherwise expose them. Only shadowed when they
+ * fall UNDER a bound read-only path - shadowing a path whose parent is not in
+ * the namespace would make bwrap error and take the whole shell down. bwrap has
+ * no globbing, so this covers known credential paths, not arbitrary *.env files
+ * inside the (bound) scope root - see PHASE4-RO-SHELL-DESIGN.md. */
+const SENSITIVE_SHADOW_DIRS_REL: readonly string[] = [".ssh", ".aws", ".gnupg", ".config/gh"];
+const SENSITIVE_SHADOW_FILES_REL: readonly string[] = [".netrc", ".git-credentials", ".pgpass"];
+
+function underABoundPath(p: string, boundPaths: string[]): boolean {
+  return boundPaths.some((b) => p === b || p.startsWith(b + path.sep));
+}
+
+function sensitiveShadows(
+  rel: readonly string[],
+  homeDir: string | undefined,
+  boundPaths: string[],
+  probe: SandboxProbe,
+): string[] {
+  if (homeDir === undefined || homeDir.length === 0) return [];
+  return rel
+    .map((r) => path.join(homeDir, r))
+    .filter((p) => probe.exists(p) && underABoundPath(p, boundPaths));
+}
 
 /**
  * Build the sandboxed command for `rawCommand`, or refuse.
@@ -57,6 +86,7 @@ export function plan(
   config: HarnessConfig,
   cwd: string,
   probe: SandboxProbe,
+  opts: { writable?: boolean; homeDir?: string } = {},
 ): SandboxPlan {
   if (rawCommand.trim().length === 0) {
     return { ok: false, reason: "empty command", rule: "section 9" };
@@ -93,22 +123,32 @@ export function plan(
     };
   }
 
+  // Read-only by default: the scope root is bound read-only unless the caller
+  // explicitly asks for write mode (pi_harness_bash mode:"write", or the
+  // operator's scoped_exec whose purpose is execution in its scope). A write in
+  // read mode then fails with EROFS - mutation is impossible by construction,
+  // no command parsing involved.
+  const writable = opts.writable === true;
+  const shadowDirs = [...config.sandboxShadowDirs, ...sensitiveShadows(SENSITIVE_SHADOW_DIRS_REL, opts.homeDir, readOnly, probe)];
+  const shadowFiles = [...config.sandboxShadowFiles, ...sensitiveShadows(SENSITIVE_SHADOW_FILES_REL, opts.homeDir, readOnly, probe)];
+
   const command = buildSandboxedCommand(rawCommand, {
     projectRoot: root,
+    projectRootReadOnly: !writable,
     cwd,
     // Section 9: network is unshared unless scope policy explicitly grants
     // it. The config cannot turn this on - only the scope object can, and
     // only the user can set that field.
     network: scope.networkGrant,
     roBindPaths: readOnly,
-    shadowDirs: config.sandboxShadowDirs,
-    shadowFiles: config.sandboxShadowFiles,
+    shadowDirs,
+    shadowFiles,
   });
 
   return {
     ok: true,
     command,
-    mounts: { readWrite: root, readOnly, network: scope.networkGrant },
+    mounts: { readWrite: writable ? root : "(none: read-only)", readOnly, network: scope.networkGrant, writable },
   };
 }
 
@@ -139,7 +179,9 @@ export function withoutBuiltinBash(activeTools: string[]): string[] {
 export function describeSandboxPlan(plan: SandboxPlan): string {
   if (!plan.ok) return `refused: ${plan.reason}`;
   return [
-    `read-write: ${plan.mounts.readWrite}`,
+    plan.mounts.writable
+      ? `read-write: ${plan.mounts.readWrite}`
+      : `read-write: (none: scope root bound read-only)`,
     `read-only: ${plan.mounts.readOnly.join(", ")}`,
     `network: ${plan.mounts.network ? "shared" : "unshared"}`,
   ].join("\n");

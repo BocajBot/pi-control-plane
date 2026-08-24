@@ -1390,10 +1390,14 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
       name: "pi_harness_bash",
       label: "Sandboxed Shell",
       description:
-        "Run a shell command inside an OS-level sandbox (bubblewrap). The scope root is the only writable path, network is unshared unless the scope grants it, and the command is refused outright if the sandbox is unavailable.",
-      promptSnippet: "pi_harness_bash(command) - run a command in the sandboxed shell",
+        "Run a shell command inside an OS-level sandbox (bubblewrap). READ-ONLY by default: the scope root is mounted read-only, so read-only work (wc, grep, git status, build inspection) runs freely. To modify files, pass mode:\"write\" - that makes the scope root writable and requires confirmation. Network is unshared unless the scope grants it; the command is refused outright if the sandbox is unavailable.",
+      promptSnippet: "pi_harness_bash(command, mode?) - run a command in the sandboxed shell (read-only by default; mode:\"write\" to modify files)",
       parameters: T.Object({
         command: T.String({ description: "The shell command to run." }),
+        mode: T.Optional(T.String({
+          description:
+            "\"read\" (default) runs read-only (scope root mounted read-only; a write fails with EROFS). \"write\" makes the scope root writable and requires confirmation. Use \"read\" for anything that does not modify files.",
+        })),
         record: T.Optional(T.Boolean({
           description:
             "Record this run as a command-execution decision (for validation/build/test checks) so its real exit code can be evaluated. Records an already-authorized action; grants no new authority.",
@@ -1404,14 +1408,15 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
         })),
       }) as never,
       execute: async (_id, params, ctx) => {
-        const { command, record, expect_success } = params as { command: string; record?: boolean; expect_success?: boolean };
+        const { command, record, expect_success, mode } = params as { command: string; record?: boolean; expect_success?: boolean; mode?: string };
         if (session === null) {
           return { content: [{ type: "text", text: "Harness session is not initialized." }] } as never;
         }
+        const writable = mode === "write";
         const outcome = planSandbox(command, session.scope, config, session.scope.root, {
           bwrapAvailable,
           exists: (p) => fs.existsSync(p),
-        });
+        }, { writable, homeDir: os.homedir() });
         if (!outcome.ok) {
           audit(actingAs, null, "shell_exec", command, `refused: ${outcome.reason}`);
           return { content: [{ type: "text", text: `Refused: ${outcome.reason}` }] } as never;
@@ -1451,8 +1456,16 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
           exitCode: result.exitCode ?? 0,
           decisionId,
         });
-        const text = [result.stdout ?? "", result.stderr ?? ""].filter((s) => s.length > 0).join("\n");
-        return { content: [{ type: "text", text: text.length > 0 ? text : "(no output)" }] } as never;
+        const stderr = result.stderr ?? "";
+        const text = [result.stdout ?? "", stderr].filter((s) => s.length > 0).join("\n");
+        // Read-only mode surfaces a write attempt as EROFS; explain the retry.
+        // The OS reports the failure - nothing here parses the command to guess.
+        const roWriteBlocked =
+          !writable && (result.exitCode ?? 0) !== 0 && /EROFS|Read-only file system/i.test(stderr);
+        const hint = roWriteBlocked
+          ? "\n\n[harness] the shell ran read-only; to modify files re-run with mode:\"write\" (that call asks for confirmation)."
+          : "";
+        return { content: [{ type: "text", text: (text.length > 0 ? text : "(no output)") + hint }] } as never;
       },
     });
 
@@ -1836,6 +1849,11 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
                       config,
                       built.contract.scope.root,
                       { bwrapAvailable, exists: (pp: string) => fs.existsSync(pp) },
+                      // The operator's scoped_exec is a write-capable execution
+                      // surface (its scope root is writable, as before the
+                      // read-only default); it is separately gated by the
+                      // delegation contract.
+                      { writable: true, homeDir: os.homedir() },
                     );
                     if (!outcome.ok) {
                       audit("operator", currentModel(ctx), "shell_exec", command, `refused: ${outcome.reason}`);
