@@ -190,13 +190,32 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let matchesKey: ((data: string, keyId: string) => boolean) | null = null;
   let visibleWidth: ((text: string) => number) | null = null;
   let truncateToWidth: ((text: string, width: number, ellipsis?: string) => string) | null = null;
+  // For the three-option attended dialog (Yes once / No / Always). Same
+  // dynamic-import-with-fallback posture as the tui imports below: null under
+  // the unit-test harness (where these packages are not resolvable), in which
+  // case the attended gate falls back to a plain yes/no confirm.
+  type SelectListItem = { value: string; label: string; description?: string };
+  interface SelectListLike {
+    onSelect?: (item: SelectListItem) => void;
+    onCancel?: () => void;
+    render(width: number): string[];
+    handleInput(data: string): void;
+    invalidate(): void;
+  }
+  let SelectListCtor:
+    | (new (items: SelectListItem[], maxVisible: number, theme?: unknown) => SelectListLike)
+    | null = null;
+  let getSelectListThemeFn: (() => unknown) | null = null;
   try {
     const piPkg = (await import("@earendil-works/pi-coding-agent")) as unknown as {
       formatSkillsForPrompt: typeof formatSkillsForPrompt;
+      getSelectListTheme?: () => unknown;
     };
     formatSkillsForPrompt = piPkg.formatSkillsForPrompt;
+    getSelectListThemeFn = piPkg.getSelectListTheme ?? null;
   } catch {
     formatSkillsForPrompt = null;
+    getSelectListThemeFn = null;
   }
   try {
     const tui = (await import("@earendil-works/pi-tui")) as unknown as {
@@ -205,18 +224,21 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       matchesKey: (data: string, keyId: string) => boolean;
       visibleWidth: (text: string) => number;
       truncateToWidth: (text: string, width: number, ellipsis?: string) => string;
+      SelectList?: typeof SelectListCtor;
     };
     Box = tui.Box;
     Text = tui.Text;
     matchesKey = tui.matchesKey;
     visibleWidth = tui.visibleWidth;
     truncateToWidth = tui.truncateToWidth;
+    SelectListCtor = tui.SelectList ?? null;
   } catch {
     Box = null;
     Text = null;
     matchesKey = null;
     visibleWidth = null;
     truncateToWidth = null;
+    SelectListCtor = null;
   }
   // TypeBox backs pi.registerTool()'s parameter schema. Same
   // dynamic-import-with-fallback pattern as the two imports above: if it
@@ -1418,6 +1440,53 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   };
 
   /**
+   * The attended per-call gate for a rememberable confirm: a three-option
+   * dialog (Yes once / No / Always) rendered with pi-tui's SelectList via
+   * ctx.ui.custom. It is a SINGLE prompt — the same one shown today — with a
+   * third choice; "Always" is handled by the caller (it saves exactly the rule
+   * /harness-rules allow would, then allows). Escape / cancel = No. Falls back
+   * to a trivial No if SelectList is unavailable at runtime (should not happen
+   * in an interactive session; the caller only reaches here when ctx.ui.custom
+   * exists). The unit-test harness supplies its own ctx.ui.custom that resolves
+   * a scripted choice without invoking this factory.
+   */
+  const promptAttendedChoice = async (
+    ctx: ExtensionContext,
+    toolName: string,
+    canonical: string,
+    detail: string,
+  ): Promise<"once" | "always" | "no"> => {
+    const header = [...detail.split("\n"), "", "↑↓ choose · enter select · esc = No"];
+    const items: SelectListItem[] = [
+      { value: "once", label: `Yes — allow ${toolName} once` },
+      { value: "no", label: "No — deny this call" },
+      {
+        value: "always",
+        label: `Always — allow ${toolName} on ${canonical}`,
+        description: "saves a scope-bound rule; manage with /harness-rules",
+      },
+    ];
+    const ui = ctx.ui as unknown as {
+      custom: <T>(factory: (tui: unknown, theme: unknown, kb: unknown, done: (v: T) => void) => SelectListLike) => Promise<T>;
+    };
+    const choice = await ui.custom<string | null>((_tui, _theme, _kb, done) => {
+      if (SelectListCtor === null) {
+        done("no");
+        return { render: () => header, handleInput: () => {}, invalidate: () => {} };
+      }
+      const list = new SelectListCtor(items, items.length, getSelectListThemeFn ? getSelectListThemeFn() : undefined);
+      list.onSelect = (item) => done(item.value);
+      list.onCancel = () => done("no"); // Escape / ctrl+c = No
+      return {
+        render: (width: number) => [...header, ...list.render(width)],
+        handleInput: (data: string) => list.handleInput(data),
+        invalidate: () => list.invalidate(),
+      };
+    });
+    return choice === "once" || choice === "always" ? choice : "no"; // null/escape/unknown -> No
+  };
+
+  /**
    * Enact a policy decision: allow (with /verify bookkeeping + sandbox),
    * confirm (attended per-call dialog), or block. Factored out so the
    * phase-switch dialog below can re-dispatch a call through the SAME path
@@ -1490,7 +1559,46 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       ]
         .filter((line): line is string => line !== null)
         .join("\n");
-      const approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, detail);
+      // A rememberable confirm (a resolvable path target that is not a
+      // sensitive read) gets the three-option dialog whose "Always" saves the
+      // exact rule /harness-rules allow would — one prompt, third choice, zero
+      // added prompts. Sensitive reads and path-less confirms (shell) keep the
+      // plain yes/no. Requires ctx.ui.custom; without it, plain yes/no.
+      const canonical = target !== null ? canonicalizePath(target, ctx.cwd, pathOps) : null;
+      const sensitiveRead =
+        decision.rule === "attended:read-outside-root" &&
+        canonical !== null &&
+        isSensitiveReadTarget(canonical, agentDir(), sensitiveReadExtra());
+      const hasCustom = typeof (ctx.ui as { custom?: unknown }).custom === "function";
+      let approved: boolean;
+      if (hasCustom && canonical !== null && !sensitiveRead) {
+        const choice = await promptAttendedChoice(ctx, event.toolName, canonical, detail);
+        if (choice === "always") {
+          const scopeRoot = rootOf(ctx);
+          const result = addRule(
+            rememberedRules,
+            { tool: event.toolName, target: canonical, scopeRoot },
+            new Date().toISOString(),
+          );
+          if (result.rule !== null && !result.duplicate) {
+            rememberedRules = result.state;
+            persistRules();
+            pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+              kind: "remembered-rule-added",
+              actor: "user",
+              provenance: "attended-dialog",
+              ruleId: result.rule.id,
+              toolName: event.toolName,
+              target: canonical,
+              scopeRoot,
+              at: new Date().toISOString(),
+            });
+          }
+        }
+        approved = choice === "once" || choice === "always";
+      } else {
+        approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, detail);
+      }
       if (approved) {
         // A confirmed read (e.g. an outside-root read approved in Attended)
         // also earns read-before-edit credit for that file.

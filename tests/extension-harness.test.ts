@@ -84,29 +84,46 @@ interface FakeCtxOptions {
   branchEntries?: unknown[];
   contextFiles?: { path: string; content: string }[];
   systemPrompt?: string;
+  /** When true, ctx.ui.custom is provided (an interactive session with the
+   * custom-component primitive). It resolves `customChoice` (default null =
+   * escape) WITHOUT invoking the factory, so the real SelectList is never
+   * needed in tests. */
+  withCustom?: boolean;
+  customChoice?: string | null;
 }
 
 function makeCtx(options: FakeCtxOptions = {}) {
   const notifications: { message: string; type?: string }[] = [];
   const statuses: Record<string, string | undefined> = {};
   const widgets: Record<string, string[] | undefined> = {};
+  const customCalls: unknown[] = [];
+  const ui: Record<string, unknown> = {
+    notify: (message: string, type?: string) => notifications.push({ message, type }),
+    confirm: async () => options.confirmResult ?? false,
+    setStatus: (key: string, text: string | undefined) => {
+      statuses[key] = text;
+    },
+    setWidget: (key: string, content: string[] | undefined) => {
+      widgets[key] = content;
+    },
+  };
+  if (options.withCustom) {
+    // Resolve the scripted choice without invoking the factory (so the real
+    // SelectList never has to load under the test harness).
+    ui.custom = async (factory: unknown) => {
+      customCalls.push(factory);
+      return options.customChoice === undefined ? null : options.customChoice;
+    };
+  }
   const ctx = {
     notifications,
     statuses,
     widgets,
+    customCalls,
     hasUI: options.hasUI ?? true,
     cwd: options.cwd ?? process.cwd(),
     mode: "tui",
-    ui: {
-      notify: (message: string, type?: string) => notifications.push({ message, type }),
-      confirm: async () => options.confirmResult ?? false,
-      setStatus: (key: string, text: string | undefined) => {
-        statuses[key] = text;
-      },
-      setWidget: (key: string, content: string[] | undefined) => {
-        widgets[key] = content;
-      },
-    },
+    ui,
     sessionManager: {
       getBranch: () => options.branchEntries ?? [],
     },
@@ -676,6 +693,111 @@ test("Part 3: a remembered rule does not auto-allow without a UI (no-UI fails cl
   )) as { block?: boolean; reason?: string };
   assert.equal(blocked?.block, true);
   assert.match(blocked?.reason ?? "", /failing closed/i);
+});
+
+// ---- Part 3 dialog: the in-prompt third option (Yes once / No / Always) ----
+// The attended per-call gate for a rememberable confirm is a single three-option
+// dialog (ctx.ui.custom + SelectList). "Always" saves exactly the rule
+// /harness-rules allow would, then allows. Sensitive reads and hard-rule
+// denials never reach it.
+
+test("Part 3 dialog: Always saves the rule and allows; the next call is silent", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "always" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx); // attended
+  const r1 = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "out.txt", content: "x" } },
+    ctx,
+  );
+  assert.equal(r1, undefined, "Always allows the call");
+  const added = findRuleAdded(pi);
+  assert.ok(added, "a rule was saved from the dialog");
+  assert.equal((added!.data as { actor?: string; provenance?: string }).actor, "user");
+  assert.equal((added!.data as { provenance?: string }).provenance, "attended-dialog");
+
+  // Second identical call: the saved rule auto-allows it — the dialog is not
+  // shown even though this ctx would answer "no" if it were.
+  const ctx2 = makeCtx({ cwd: root, withCustom: true, customChoice: "no" });
+  const r2 = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "write", input: { path: "out.txt", content: "y" } },
+    ctx2,
+  );
+  assert.equal(r2, undefined, "the saved rule suppresses the dialog on the repeat call");
+  assert.deepEqual(ctx2.customCalls, [], "no dialog shown once a rule exists");
+});
+
+test("Part 3 dialog: Yes-once allows but saves no rule", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "once" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const r = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "out.txt", content: "x" } },
+    ctx,
+  );
+  assert.equal(r, undefined, "Yes-once allows the call");
+  assert.ok(!findRuleAdded(pi), "Yes-once saves no rule");
+});
+
+test("Part 3 dialog: No blocks, and Escape (null) is treated as No", async () => {
+  for (const choice of ["no", null] as const) {
+    const pi = await boot();
+    const root = tmpRoot();
+    const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: choice });
+    await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await pi.commands.get("mode")!.handler("execute", ctx);
+    const blocked = (await pi.emit(
+      "tool_call",
+      { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "out.txt", content: "x" } },
+      ctx,
+    )) as { block?: boolean };
+    assert.equal(blocked?.block, true, `choice ${String(choice)} blocks`);
+    assert.ok(!findRuleAdded(pi), "a blocked call saves no rule");
+  }
+});
+
+test("Part 3 dialog: a sensitive read never gets the Always option", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const outsideEnv = path.join(tmpRoot(), ".env");
+  fs.writeFileSync(outsideEnv, "SECRET=1\n");
+  // withCustom + "always": if the sensitive read wrongly used the dialog it
+  // would be allowed and remembered. It must use the plain confirm instead.
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "always", confirmResult: false });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: outsideEnv } },
+    ctx,
+  )) as { block?: boolean };
+  assert.equal(blocked?.block, true, "the sensitive read used the plain confirm and was declined");
+  assert.deepEqual(ctx.customCalls, [], "no three-option dialog for a sensitive read");
+  assert.ok(!findRuleAdded(pi), "a sensitive read is never remembered");
+});
+
+test("Part 3 dialog: a blind edit blocks before the dialog (hard rule wins)", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  fs.writeFileSync(path.join(root, "data.txt"), "orig\n"); // exists, unread this session
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "always" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "edit", input: { path: "data.txt", oldText: "orig", newText: "x" } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true);
+  assert.match(blocked?.reason ?? "", /read-before-edit/);
+  assert.deepEqual(ctx.customCalls, [], "read-before-edit blocks before the dialog is ever shown");
+  assert.ok(!findRuleAdded(pi));
 });
 
 /** These tests exercise the real `bwrap` availability check
