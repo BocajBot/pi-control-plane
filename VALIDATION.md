@@ -1001,3 +1001,132 @@ fix targets, and none is the gate failing:**
   recorded here as *not the effective lever* so no one mistakes it for one.
 
 Logs: `~/pi-harness-work/panel/rate3-<model>-<n>.log` (transient).
+
+---
+
+## §13 Isolation / packaging / install re-validation — v0.4.0 (2026-08-24)
+
+User request: "Verify the harness implementation for pi can be isolated,
+packaged, and installed to a new pi instance", extended mid-run to: "verify it
+is installable to pi via `pi install <packagename>`". Everything since v0.3.2
+(all of Phase 4 plus the 2026-08-23/24 control-plane work) postdates the last
+packaged artifact, so this is a re-validation, not a rerun.
+
+### Scope boundary found first (load-bearing for reading the rest)
+The isolated artifact is **harness-only** by construction: `bin/build-isolated.mjs`
+stages `src/harness/*` (to `src/core/`, plus top-level modules) and
+`extensions/pi-harness.ts` (to `src/index.ts`). It contains **no**
+`extensions/control-plane.ts` and no `src/control-plane/*` (verified:
+`tar tzf … | grep -i control-plane` is empty).
+
+Therefore, of the 2026-08-23/24 work:
+- **In the artifact (harness side):** read-only-shell default (`plan()` binds the
+  scope root `--ro-bind` unless `writable`), `pi_harness_bash mode:"read"|"write"`,
+  the EROFS retry hint, credential-path shadowing, and the advisor
+  when-to-consult guidance in the tool description.
+- **Not in the artifact (control-plane side):** tool classification, the
+  read-only-shell *auto-allow*, the Yes/No/Always dialog and the
+  `formatConfirmDetail`/`formatDiagnosticLine` formatters, read-before-edit,
+  `/harness-rules`, the advisor *budget*, the phase-switch dialog.
+Three of the four requested spot-checks name control-plane features; they are
+correctly absent from an isolated harness package and were verified in-repo
+instead (suite 745, 744 pass / 1 skip).
+
+### Artifact
+- Version bumped 0.3.2 → **0.4.0** (`bin/build-isolated.mjs`).
+- **Reproducible:** two independent builds of the final tree produced identical
+  SHA256 `ea5963c23c93c9e990d49f5f59699bdcdcc34d2b8cf90f3d13a380cbaf1a2a4a`.
+- 70 files, ~330 KB, `pi-harness-isolated-0.4.0.tar.gz`.
+
+### PACKAGING DEFECT FOUND AND FIXED (real, not cosmetic)
+First packaged run: **477 pass / 9 fail**. All nine were boundary self-audit
+gates ("the module does its own I/O nowhere", "no wall clock or randomness",
+"the evaluator does not import the proposal layer", …).
+
+Discriminating evidence, obtained before any edit:
+`ENOENT: no such file or directory, open '…/pi-harness/src/harness/decision-evaluation.ts'`
+while the same file's *import* on line 21 had been correctly rewritten to
+`../src/core/decision-evaluation.ts`.
+
+Cause: `rewriteImports()` rewrote `from "…"` specifiers only. These gates locate
+the module they audit with `new URL("../src/harness/x.ts", import.meta.url)` —
+a plain string, not an import specifier — and one reads
+`"../extensions/pi-harness.ts"`. In the packaged layout those paths do not
+exist, so the reads threw and **the gates silently did not run in the artifact
+at all**. Not a harness runtime defect; a build-script defect that removed
+coverage from every isolated package that shipped these Phase-4 tests.
+
+Fix (`bin/build-isolated.mjs`): for test files, rewrite the harness-module path
+inside *any* string literal, and map `"../extensions/pi-harness.ts"` to
+`"../src/index.ts"`. This **restores** coverage — no assertion was relaxed.
+Result: **486 / 486 pass, 0 fail** in the packaged artifact.
+
+### Install into a fresh instance — via `pi install`
+pi 0.84.2. `pi install <source>` supports `./local/path`, the new-user path.
+
+    $ PI_CODING_AGENT_DIR=<fresh>/agentdir pi install ./src/pi-harness
+    Installing ./src/pi-harness...
+    Installed ./src/pi-harness
+
+It wrote `<fresh>/agentdir/settings.json` → `{"packages":["../src/pi-harness"]}`,
+and `pi list` resolves it to the extracted artifact path. Dependencies install
+from the packaged `package.json` (typebox). Clean harness home and agent dir;
+nothing wired to the repo working tree.
+
+### Load provenance — proved by ablation
+A discriminating probe was needed: a trivial prompt returned "ok" in both arms
+(the model simply did not need a tool), so it proved nothing. Forcing the
+harness tool discriminates:
+
+- **Package present** — `pi --print --tools pi_harness_bash "Use the
+  pi_harness_bash tool to run exactly: echo HARNESS_ALIVE"` →
+  *"blocked by the harness's approval policy: it required approval for shell
+  execution (policy section 21), and no confirmation UI is available, so it
+  failed closed"*. The packaged harness loaded **and enforced**.
+- **Package moved aside**, same command → `pi_harness_bash` does not exist; the
+  model lists only builtin tools and offers plain `bash`.
+
+So enforcement comes from the installed artifact, not the repo tree. (The B arm
+also shows the converse: without the harness, unrestricted builtin `bash` is
+available — precisely what the harness removes when present.)
+
+### Packaged acceptance
+- Packaged unit suite, run from inside the extracted artifact: **486/486**.
+- Standalone coordinator enforcement smoke against the `pi install`ed instance:
+  **14/14 PASS** — extension loads with no stderr load error; `/harness status`
+  reports the inferred project root; guided autonomy + mutation approval by
+  default; authority states the append-oriented audit rule; capability reports
+  the live catalog; harness tools classified active; **builtin bash absent from
+  the live tool list** with the sandboxed shell in its place; live audit log
+  verifies as a hash chain; harness home in the documented per-project layout;
+  session start audited to append-only `audit.jsonl`; session close wrote
+  `.pi/WORKSTATE.md` stating it is not authoritative.
+- Read-only-shell default is active in the packaged artifact: packaged tests
+  `section 9: read-only by default — the scope root is mounted read-only,
+  nothing is writable` and `section 9: mode write makes the scope root the only
+  read-write mount, network still off` both pass, and `mode:` /
+  `projectRootReadOnly` / the EROFS hint are present in the packaged
+  `src/index.ts` and `src/core/sandbox.ts`.
+
+### Finding: a fresh instance needs its own provider catalog
+The first smoke run failed with `Model "llama-swap/qwen3-8-27b" not found`. The
+fresh agent dir contained `auth.json`, `models-store.json`, `settings.json`,
+`sessions` — but **no `models.json`**, the local catalog that defines the
+`llama-swap` provider (the established agent dir has one). Discriminating
+evidence: a second model (`hermes-4-3-36b`) failed identically, so it was never
+model-specific; after copying `models.json` into the fresh agent dir,
+`pi --list-models` showed 29 llama-swap entries including `qwen3-8-27b`, and the
+smoke passed 14/14. `pi install` plus the harness package are sufficient to load
+and enforce, but a new instance still needs its own provider/model
+configuration before any live model-driven check can run. The package correctly
+ships no provider catalog.
+
+Correction recorded for honesty: an intermediate claim that the model was "gone
+from the catalog (env drift)" was **false and self-inflicted** — the probe piped
+an alphabetically sorted model list through `head -12`, truncating before `q`.
+Re-run without truncation: 43 models, `qwen3-8-27b` present. The environment was
+unchanged; the instrument was wrong.
+
+Artifacts (durable): `~/pi-harness-work/validate-0.4.0/` — `final/` (shipped
+tarball), `instance3/` (extracted + tested), `piinstall/` (the `pi install`ed
+instance), `packaged-test-final.log`, `coordinator-smoke3.log`.

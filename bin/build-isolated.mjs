@@ -42,7 +42,7 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PKG_NAME = "pi-harness";
 // 0.3.0: an explicitly constructed, attested, read-only delegated child,
 // durable read-scope escalation, crash orphaning, and live acceptance.
-const VERSION = "0.3.2";
+const VERSION = "0.4.0";
 
 /* ------------------------------------------------------------------ *
  * Layout mapping
@@ -65,6 +65,22 @@ function rewriteImports(source, destRelative) {
   const inCore = destRelative.startsWith("src/core/");
   const isEntry = destRelative === "src/index.ts";
   const isTest = destRelative.startsWith("tests/");
+
+  // Boundary self-audit tests read a module's SOURCE to assert what it does not
+  // import (no fs/store/authority, no clock/randomness). They locate it with
+  // `new URL("../src/harness/x.ts", import.meta.url)` - a plain string, not an
+  // import specifier, so the `from "..."` pass below never saw it. In the
+  // packaged layout src/harness/ does not exist, so those reads used to ENOENT
+  // and the gates silently did not run in the artifact at all. Rewrite the path
+  // in ANY string literal for tests, so the same gates run against the packaged
+  // module. This restores coverage; it does not relax any assertion.
+  if (isTest) {
+    source = source.replace(/"\.\.\/src\/harness\/([^"]+\.ts)"/g, (_m, file) =>
+      `"../src/${TOP_LEVEL.has(file) ? file : `core/${file}`}"`,
+    );
+    // Same for the extension entry, which is packaged as src/index.ts.
+    source = source.split('"../extensions/pi-harness.ts"').join('"../src/index.ts"');
+  }
 
   return source.replace(/from "([^"]+)"/g, (match, spec) => {
     // The extension entry: ../src/harness/x.ts -> ./core/x.ts (or ./x.ts).
