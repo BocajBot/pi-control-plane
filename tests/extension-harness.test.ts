@@ -1761,20 +1761,24 @@ test("P1: read-effect harness tools flow free; write/escalate ones still gate", 
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
   await pi.commands.get("mode")!.handler("execute", ctx); // attended
 
-  for (const toolName of ["harness_find_capability", "harness_memory_search", "harness_request_scope"]) {
+  for (const toolName of ["harness_find_capability", "harness_memory_search"]) {
     const r = await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName, input: {} }, ctx);
     assert.equal(r, undefined, `${toolName} is allowed`);
   }
   assert.deepEqual(ctx.customCalls, [], "read-effect harness tools show no dialog at all");
 
   // The ones that change something keep their gate (declined here -> blocked).
-  for (const toolName of ["harness_note", "harness_set_posture", "harness_delegate"]) {
+  // harness_request_scope is in this list on purpose: its auto-granted path
+  // widens the scope itself (scope.ts:270 returns a new root, which pi-harness
+  // then persists), so it is authority-expanding, not a mere request. It was
+  // briefly downgraded in 5a8d194 and that was a real loosening.
+  for (const toolName of ["harness_note", "harness_set_posture", "harness_delegate", "harness_request_scope"]) {
     const r = (await pi.emit("tool_call", { type: "tool_call", toolCallId: "2", toolName, input: {} }, ctx)) as {
       block?: boolean;
     };
     assert.equal(r?.block, true, `${toolName} still gates`);
   }
-  assert.equal(ctx.customCalls.length, 3, "one dialog each for the write/escalate tools");
+  assert.equal(ctx.customCalls.length, 4, "one dialog each for the write/escalate tools");
 });
 
 test("P2: an approved call is stamped for the harness, keyed to that exact call", async () => {
