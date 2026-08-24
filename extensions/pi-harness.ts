@@ -1623,10 +1623,10 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
         name: "harness_delegate",
         label: "Delegate",
         description:
-          "Consult a read-only advisor, run a bounded read-only subagent, or run a bounded operator that may execute commands inside an OS-level sandbox scoped to its own root - all under an explicit delegation contract. The result is evidence and recommendations; nothing is applied.",
-        promptSnippet: "harness_delegate(kind, objective) - consult an advisor, or run a bounded subagent/operator",
+          "Consult a read-only advisor, run a bounded read-only subagent, or run a bounded operator that may execute commands inside an OS-level sandbox scoped to its own root - all under an explicit delegation contract. The result is evidence and recommendations; nothing is applied. Consult an advisor ONLY when (a) you are blocked on a design or architecture decision after your own analysis, (b) you are about to take a consequential, irreversible step and are unsure, or (c) the user asks. Do NOT consult an advisor for routine implementation, orientation, or anything you can verify yourself - an advisor is a cloud model and each consult costs quota and latency.",
+        promptSnippet: "harness_delegate(kind, objective) - consult an advisor (ONLY when blocked on a design decision after your own analysis, about to take a consequential irreversible step and unsure, or the user asks - never for routine work), or run a bounded subagent/operator",
         parameters: T.Object({
-          kind: T.String({ description: 'One of "advisor", "subagent", or "operator" (operator may run sandboxed, scope-bounded commands).' }),
+          kind: T.String({ description: 'One of "advisor", "subagent", or "operator" (operator may run sandboxed, scope-bounded commands). Use "advisor" ONLY when blocked on a design/architecture decision after your own analysis, about to take a consequential irreversible step and unsure, or the user asks - never for routine implementation or orientation.' }),
           objective: T.String({ description: "What the delegate should determine." }),
           scopePath: T.Optional(T.String({ description: "Subdirectory of the current scope." })),
           context: T.Optional(T.String({ description: "Minimum context the delegate needs." })),

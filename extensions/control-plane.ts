@@ -304,6 +304,19 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // control-plane activation: a separate session (e.g. an isolated delegate)
   // starts empty and inherits no read credit from any other session.
   const readSet = new Map<string, number>();
+  // Advisor-consult budget (soft policy, memory-only). A read-only advisor
+  // (harness_delegate kind:"advisor") is a cloud model - each consult costs
+  // quota and latency, and a tool-eager coordinator consults freely during
+  // routine work. This caps consults per accepted task (or per session when no
+  // task is accepted): the first ADVISOR_CONSULTS_PER_TASK are silent, further
+  // consults hit the attended Yes/No/Always gate. "Always" lifts the cap for
+  // the rest of the session. A restart resets it (the safe direction). It only
+  // ever downgrades the attended per-call path for advisor consults and never
+  // loosens a hard block (phase/restricted/unattended/guard).
+  const ADVISOR_CONSULTS_PER_TASK = 1;
+  let advisorConsultsThisTask = 0;
+  let advisorBudgetTaskKey: string | null = null;
+  let advisorBudgetLifted = false;
   // Exact token counting (memory only; raw payloads are never persisted).
   let lastProviderRequest: { payload: unknown; model: string; baseUrl: string } | null = null;
   let lastTokenCount: TokenCountResult | null = null;
@@ -1487,6 +1500,52 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   };
 
   /**
+   * The over-budget advisor-consult gate: Yes (this once) / No / Always (lift
+   * the cap for the session). Same three-option ctx.ui.custom dialog as the
+   * attended per-call gate, but "Always" lifts a session budget rather than
+   * saving a path rule, so it is a distinct helper. Falls back to a plain
+   * yes/no confirm when ctx.ui.custom is unavailable (no "Always" then).
+   */
+  const promptAdvisorBudget = async (
+    ctx: ExtensionContext,
+    detail: string,
+  ): Promise<"once" | "always" | "no"> => {
+    const hasCustom = typeof (ctx.ui as { custom?: unknown }).custom === "function";
+    if (!hasCustom) {
+      const ok = await ctx.ui.confirm("Consult the advisor again?", detail);
+      return ok ? "once" : "no";
+    }
+    const header = [...detail.split("\n"), "", "↑↓ choose · enter select · esc = No"];
+    const items: SelectListItem[] = [
+      { value: "once", label: "Yes — consult the advisor this once" },
+      { value: "no", label: "No — skip this consult" },
+      {
+        value: "always",
+        label: "Always — stop asking for advisor consults this session",
+        description: "lifts the per-task advisor budget until the session ends",
+      },
+    ];
+    const ui = ctx.ui as unknown as {
+      custom: <T>(factory: (tui: unknown, theme: unknown, kb: unknown, done: (v: T) => void) => SelectListLike) => Promise<T>;
+    };
+    const choice = await ui.custom<string | null>((_tui, _theme, _kb, done) => {
+      if (SelectListCtor === null) {
+        done("no");
+        return { render: () => header, handleInput: () => {}, invalidate: () => {} };
+      }
+      const list = new SelectListCtor(items, items.length, getSelectListThemeFn ? getSelectListThemeFn() : undefined);
+      list.onSelect = (item) => done(item.value);
+      list.onCancel = () => done("no"); // Escape / ctrl+c = No
+      return {
+        render: (width: number) => [...header, ...list.render(width)],
+        handleInput: (data: string) => list.handleInput(data),
+        invalidate: () => list.invalidate(),
+      };
+    });
+    return choice === "once" || choice === "always" ? choice : "no"; // null/escape/unknown -> No
+  };
+
+  /**
    * Enact a policy decision: allow (with /verify bookkeeping + sandbox),
    * confirm (attended per-call dialog), or block. Factored out so the
    * phase-switch dialog below can re-dispatch a call through the SAME path
@@ -1673,6 +1732,101 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         return; // allow silently
       }
       // Sensitive (or unresolvable): fall through to the confirm below.
+    }
+
+    // Advisor-consult budget (soft policy): a read-only advisor consult
+    // (harness_delegate kind:"advisor") is a cloud model - each call costs quota
+    // and latency. The first ADVISOR_CONSULTS_PER_TASK consults per accepted
+    // task (or per session when none) are silent; further consults hit the
+    // attended Yes/No/Always gate, where "Always" lifts the cap for the session.
+    // This only downgrades/gates the ATTENDED path - a consult a hard rule
+    // already blocks (phase/restricted/unattended/read-only/guard) has
+    // decision.action === "block" and is left untouched, so the budget never
+    // expands capability. A no-UI session fails closed over budget. Allowed
+    // consults are already recorded in the harness tamper-evident chain (AU1);
+    // the control plane cannot write that chain, so budget blocks and lifts are
+    // recorded here as control-plane diagnostics instead.
+    const advisorConsult =
+      event.toolName === "harness_delegate" &&
+      (event.input as Record<string, unknown>).kind === "advisor";
+    if (advisorConsult && decision.action !== "block") {
+      // Per-task identity = the full accepted brief (not just updatedAt, so two
+      // briefs set in the same millisecond still count as different tasks); no
+      // accepted task = one shared per-session budget.
+      const taskKey = state.acceptedTask === null ? "__session__" : JSON.stringify(state.acceptedTask);
+      if (taskKey !== advisorBudgetTaskKey) {
+        advisorBudgetTaskKey = taskKey;
+        advisorConsultsThisTask = 0;
+      }
+      const withinBudget =
+        advisorBudgetLifted || advisorConsultsThisTask < ADVISOR_CONSULTS_PER_TASK;
+      if (!withinBudget) {
+        if (!ctx.hasUI) {
+          pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+            kind: "advisor-budget-blocked",
+            reason: "no-ui",
+            count: advisorConsultsThisTask,
+            limit: ADVISOR_CONSULTS_PER_TASK,
+            taskKey,
+            at: new Date().toISOString(),
+          });
+          return {
+            block: true,
+            reason:
+              `[control plane] Advisor consult budget reached (${ADVISOR_CONSULTS_PER_TASK} per task) ` +
+              "and no confirmation UI is available; failing closed. Raise the budget or re-run in an " +
+              "attended session to approve further consults.",
+          };
+        }
+        const detail = [
+          `Advisor consult budget reached: ${advisorConsultsThisTask} of ${ADVISOR_CONSULTS_PER_TASK} used for this task.`,
+          "An advisor is a cloud model; each consult costs quota and latency.",
+          "",
+          "Approve this extra consult, skip it, or stop asking for the rest of the session.",
+        ].join("\n");
+        const choice = await promptAdvisorBudget(ctx, detail);
+        if (choice === "no") {
+          pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+            kind: "advisor-budget-blocked",
+            count: advisorConsultsThisTask,
+            limit: ADVISOR_CONSULTS_PER_TASK,
+            taskKey,
+            at: new Date().toISOString(),
+          });
+          return {
+            block: true,
+            reason: `[control plane] Advisor consult declined (over the per-task budget of ${ADVISOR_CONSULTS_PER_TASK}).`,
+          };
+        }
+        if (choice === "always") {
+          advisorBudgetLifted = true;
+          pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+            kind: "advisor-budget-lifted",
+            actor: "user",
+            provenance: "attended-dialog",
+            taskKey,
+            at: new Date().toISOString(),
+          });
+        }
+        advisorConsultsThisTask += 1;
+        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+          kind: "advisor-consult",
+          count: advisorConsultsThisTask,
+          overBudgetApproved: true,
+          taskKey,
+          at: new Date().toISOString(),
+        });
+        return; // approved over-budget consult: allow (downgrade any confirm)
+      }
+      advisorConsultsThisTask += 1;
+      pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+        kind: "advisor-consult",
+        count: advisorConsultsThisTask,
+        overBudgetApproved: false,
+        taskKey,
+        at: new Date().toISOString(),
+      });
+      return; // within budget: silent allow (downgrade the attended confirm)
     }
 
     // Read-before-edit (hard rule): an edit/write targeting an EXISTING file

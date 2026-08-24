@@ -1265,3 +1265,113 @@ test("Unattended: tool_call is blocked without an accepted task, and logs every 
   await pi.emit("tool_call", { type: "tool_call", toolName: "read", input: { path: path.join(root, "f.txt") } }, ctx);
   assert.equal(pi.entries.length, entriesBeforeRead, "reads must not add an audit entry");
 });
+
+// ---- Advisor-consult budget (soft policy) --------------------------------
+// harness_delegate kind:"advisor" is the cloud advisor. The first consult per
+// accepted task (or per session when none) is silent; further consults hit the
+// attended Yes/No/Always gate; "Always" lifts the cap for the session. It only
+// downgrades/gates the attended path and never loosens a hard block.
+const advisorConsultEntries = (pi: FakePi) =>
+  pi.entries.filter(
+    (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "advisor-consult",
+  );
+const advisorDiag = (pi: FakePi, kind: string) =>
+  pi.entries.filter(
+    (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === kind,
+  );
+const consult = (id: string) => ({
+  type: "tool_call",
+  toolCallId: id,
+  toolName: "harness_delegate",
+  input: { kind: "advisor", objective: "x" },
+});
+
+test("advisor budget: the first consult per task is silent (no dialog)", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot(), withCustom: true, customChoice: "no" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx); // attended
+  const r = await pi.emit("tool_call", consult("1"), ctx);
+  assert.equal(r, undefined, "the first advisor consult is allowed without a prompt");
+  assert.deepEqual(ctx.customCalls, [], "no budget dialog for the first consult");
+  const entries = advisorConsultEntries(pi);
+  assert.equal(entries.length, 1, "the consult is audited");
+  assert.equal((entries[0].data as { count: number }).count, 1);
+  assert.equal((entries[0].data as { overBudgetApproved: boolean }).overBudgetApproved, false);
+});
+
+test("advisor budget: a second consult gates, and Yes-once allows it", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot(), withCustom: true, customChoice: "once" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.emit("tool_call", consult("1"), ctx); // free
+  const r2 = await pi.emit("tool_call", consult("2"), ctx);
+  assert.equal(r2, undefined, "Yes-once allows the over-budget consult");
+  assert.equal(ctx.customCalls.length, 1, "the second consult showed the gate");
+  const entries = advisorConsultEntries(pi);
+  assert.equal(entries.length, 2);
+  assert.equal((entries[1].data as { overBudgetApproved: boolean }).overBudgetApproved, true);
+});
+
+test("advisor budget: Always lifts the cap for the session", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot(), withCustom: true, customChoice: "always" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.emit("tool_call", consult("1"), ctx); // free
+  const r2 = await pi.emit("tool_call", consult("2"), ctx); // gate -> Always
+  assert.equal(r2, undefined, "Always allows this consult");
+  assert.equal(advisorDiag(pi, "advisor-budget-lifted").length, 1, "the lift is audited");
+  const callsAfterLift = ctx.customCalls.length;
+  const r3 = await pi.emit("tool_call", consult("3"), ctx);
+  assert.equal(r3, undefined, "further consults are silent once lifted");
+  assert.equal(ctx.customCalls.length, callsAfterLift, "no dialog is shown after Always");
+});
+
+test("advisor budget: No (and Escape) block the over-budget consult", async () => {
+  for (const choice of ["no", null] as const) {
+    const pi = await boot();
+    const ctx = makeCtx({ cwd: tmpRoot(), withCustom: true, customChoice: choice });
+    await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    await pi.commands.get("mode")!.handler("execute", ctx);
+    await pi.emit("tool_call", consult("1"), ctx); // free
+    const blocked = (await pi.emit("tool_call", consult("2"), ctx)) as { block?: boolean };
+    assert.equal(blocked?.block, true, `choice ${String(choice)} blocks the extra consult`);
+    assert.equal(advisorDiag(pi, "advisor-budget-blocked").length, 1, "the block is audited");
+  }
+});
+
+test("advisor budget: a new task resets the per-task budget", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot(), withCustom: true, customChoice: "no" });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.commands.get("task")!.handler("set brief A", ctx);
+  await pi.emit("tool_call", consult("1"), ctx); // free under task A
+  await pi.commands.get("task")!.handler("set brief B", ctx);
+  const r = await pi.emit("tool_call", consult("2"), ctx); // first under task B
+  assert.equal(r, undefined, "the first consult under a new task is free again");
+  assert.deepEqual(ctx.customCalls, [], "no gate on the first consult of the new task");
+});
+
+test("advisor budget: over budget with no UI fails closed", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot(), hasUI: false });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const r1 = await pi.emit("tool_call", consult("1"), ctx); // free
+  assert.equal(r1, undefined, "the first consult is free even with no UI");
+  const blocked = (await pi.emit("tool_call", consult("2"), ctx)) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true, "no UI to approve the extra consult -> fail closed");
+  assert.match(blocked?.reason ?? "", /no confirmation UI/i);
+});
+
+test("advisor budget: never loosens a hard block (Discuss phase)", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot() }); // Discuss default; the phase-switch dialog is declined (confirm=false)
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  const blocked = (await pi.emit("tool_call", consult("1"), ctx)) as { block?: boolean };
+  assert.equal(blocked?.block, true, "a phase-blocked consult stays blocked");
+  assert.equal(advisorConsultEntries(pi).length, 0, "the budget never counted or allowed a hard-blocked consult");
+});
