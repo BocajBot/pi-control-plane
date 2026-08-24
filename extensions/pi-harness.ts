@@ -228,7 +228,13 @@ const READ_TOOLS = new Set([
   "transcribe_audio",
   "harness_memory_search",
   "harness_find_capability",
-  "harness_note",
+  // harness_note is deliberately NOT here: it WRITES a provisional assumption
+  // into durable state (it reaches WORKSTATE), so its effect is a mutation and
+  // it is gated like one. It sat in this read allowlist and was therefore
+  // ungated - an anomaly surfaced by the gate-fatigue pass
+  // (GATE-FATIGUE-REDESIGN.md) and closed by the user's decision to gate it.
+  // Gate on effect: a tool that changes state asks, a tool that answers a
+  // question does not.
   "harness_request_scope",
 ]);
 const SHELL_TOOLS = new Set(["bash", "pi_harness_bash"]);

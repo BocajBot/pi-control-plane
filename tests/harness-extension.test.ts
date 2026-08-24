@@ -1116,3 +1116,48 @@ test("P1: read-mode harness shell is a read effect; mode:write keeps the shell g
   assert.equal(write?.block, true, "mode:write keeps the shell gate (declined here)");
   assert.equal(ctx.prompts.length, 1, "exactly one question, for the write-mode call");
 });
+
+test("harness_note writes state, so it is gated like a mutation (not a read)", async () => {
+  const { root, harnessHome } = tmpProject();
+  process.env.PI_HARNESS_HOME = harnessHome;
+  const pi = new FakePi();
+  await piHarnessExtension(pi as never);
+  const ctx = countingCtx(root, false); // decline
+  await pi.emit("session_start", { type: "session_start" }, ctx);
+
+  // harness_note records a provisional assumption that reaches durable state
+  // (WORKSTATE). It used to sit in READ_TOOLS and so passed the authorization
+  // seam ungated - the anomaly the gate-fatigue pass surfaced. Gate on effect:
+  // a tool that changes state asks. (The existing WORKSTATE test drives
+  // execute() directly and so never exercised this seam.)
+  const declined = (await pi.emit(
+    "tool_call",
+    { toolName: "harness_note", toolCallId: "n1", input: { kind: "assumption", text: "x" } },
+    ctx,
+  )) as { block?: boolean } | undefined;
+  assert.equal(declined?.block, true, "a declined harness_note is blocked");
+  assert.equal(ctx.prompts.length, 1, "it asks, exactly once");
+
+  // Approved, it proceeds - gating it must not make it unusable.
+  const ctx2 = countingCtx(root, true);
+  const pi2 = new FakePi();
+  await piHarnessExtension(pi2 as never);
+  await pi2.emit("session_start", { type: "session_start" }, ctx2);
+  const approved = (await pi2.emit(
+    "tool_call",
+    { toolName: "harness_note", toolCallId: "n2", input: { kind: "assumption", text: "x" } },
+    ctx2,
+  )) as { block?: boolean } | undefined;
+  assert.equal(approved?.block, undefined, "approved, it runs");
+
+  // And the read-effect harness tools are unaffected by this tightening.
+  const ctx3 = countingCtx(root, false);
+  const pi3 = new FakePi();
+  await piHarnessExtension(pi3 as never);
+  await pi3.emit("session_start", { type: "session_start" }, ctx3);
+  for (const toolName of ["harness_memory_search", "harness_find_capability", "harness_request_scope"]) {
+    const r = (await pi3.emit("tool_call", { toolName, toolCallId: "r", input: {} }, ctx3)) as { block?: boolean } | undefined;
+    assert.equal(r?.block, undefined, `${toolName} still flows free`);
+  }
+  assert.deepEqual(ctx3.prompts, [], "no new prompts for read-effect tools");
+});
