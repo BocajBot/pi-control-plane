@@ -90,7 +90,7 @@ mirroring the control-plane categories added in c7c573e.
 
 ```
 HARNESS_READ_TOOLS   = harness_find_capability, harness_memory_search,
-                       harness_request_scope        (a request; Core decides)
+                       harness_request_scope        (WRONG - see CORRECTION 2)
 HARNESS_WRITE_TOOLS  = harness_note, harness_set_posture
 HARNESS_ESCALATE     = harness_delegate             (spawns an actor)
 pi_harness_bash      = shell (already)
@@ -262,3 +262,24 @@ Five prompts → one or two, with no invariant relaxed.
    `[]`-means-refuse and only improve the message? Shipping defaults makes the
    sandbox work out of the box; keeping `[]` keeps "no implicit filesystem
    exposure" literal.
+
+
+---
+
+## CORRECTION 2 (self-review, 2026-08-24): harness_request_scope is NOT inert
+
+P1 above listed `harness_request_scope` as read-effect on the grounds that it
+only records a request and Core decides separately. **That is false.**
+`requestExpansion` (src/harness/scope.ts:270) can return `auto-granted` carrying
+a **new root**, and `extensions/pi-harness.ts` then assigns `session.scope` and
+calls `persistSession()`. The only limit is a one-automatic-expansion-per-scope
+budget - no human is asked. The tool can widen authority by itself.
+
+Impact: commit 5a8d194 put it in the control plane's READ_EFFECT_HARNESS_TOOLS,
+silently downgrading its attended confirm - a real loosening on a scope-widening
+tool, introduced by this work and caught in self-review. Removed.
+
+Still open for the user (PRE-EXISTING, not introduced here): the same tool also
+sits in the harness's own READ_TOOLS (extensions/pi-harness.ts:222), so section
+21 does not gate it either. Identical anomaly class to `harness_note`, which the
+user chose to gate. The same decision is needed here.

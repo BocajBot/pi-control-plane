@@ -1712,7 +1712,13 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   const READ_EFFECT_HARNESS_TOOLS: ReadonlySet<string> = new Set([
     "harness_find_capability",
     "harness_memory_search",
-    "harness_request_scope",
+    // harness_request_scope is deliberately NOT here. The design note claimed it
+    // only RECORDS a request and that Core decides separately - that is wrong.
+    // Its auto-granted path widens the scope itself (src/harness/scope.ts:270
+    // returns a new root; extensions/pi-harness.ts then assigns session.scope and
+    // persists it), bounded only by a one-expansion-per-scope budget, with no
+    // human in the loop. A tool that can widen authority must not be downgraded
+    // to a silent allow - same anomaly class as harness_note.
   ]);
 
   /**
@@ -2534,6 +2540,37 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     },
   });
 
+  const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+  type EffortLevel = Parameters<typeof pi.setThinkingLevel>[0];
+  pi.registerCommand("effort", {
+    description: "Show or set the thinking level (off/minimal/low/medium/high/xhigh/max)",
+    getArgumentCompletions: (prefix) => {
+      const matches = EFFORT_LEVELS.filter((s) => s.startsWith(prefix.toLowerCase()));
+      return matches.length > 0 ? matches.map((s) => ({ value: s, label: s })) : null;
+    },
+    handler: async (args, ctx) => {
+      const requested = (args ?? "").trim().toLowerCase();
+      if (requested === "") {
+        emit("effort", [
+          `Thinking level: ${pi.getThinkingLevel()}`,
+          `Usage: /effort ${EFFORT_LEVELS.join("|")}`,
+        ]);
+        return;
+      }
+      if (!(EFFORT_LEVELS as readonly string[]).includes(requested)) {
+        emit("effort", [
+          `Unknown thinking level "${requested}".`,
+          `Usage: /effort ${EFFORT_LEVELS.join("|")}`,
+        ]);
+        return;
+      }
+      pi.setThinkingLevel(requested as EffortLevel);
+      emit("effort", [
+        `Thinking level set to ${pi.getThinkingLevel()} (requested ${requested}; clamped to model capabilities).`,
+      ]);
+    },
+  });
+
   pi.registerCommand("interpret", {
     description: "Run a no-tools interpretation of a task request (then /task accept|reject)",
     handler: async (args, ctx) => {
@@ -3251,12 +3288,22 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     },
   });
 
+  const cycleModeHandler = (ctx: ExtensionContext) => {
+    // Legacy combos (restored old sessions) enter the cycle at discuss.
+    const current = modeOf(state.phase, state.autonomy) ?? "discuss";
+    setMode(ctx, cycleMode(current), false);
+  };
+
   pi.registerShortcut("alt+p", {
     description: "Control plane: cycle mode",
-    handler: (ctx) => {
-      // Legacy combos (restored old sessions) enter the cycle at discuss.
-      const current = modeOf(state.phase, state.autonomy) ?? "discuss";
-      setMode(ctx, cycleMode(current), false);
-    },
+    handler: cycleModeHandler,
+  });
+
+  // shift+tab is pi's default "cycle thinking level" binding; that keybinding
+  // is unbound in ~/.pi/agent/keybindings.json ("app.thinking.cycle": []) so
+  // this shortcut can claim the key. Thinking level moves to /effort.
+  pi.registerShortcut("shift+tab", {
+    description: "Control plane: cycle mode",
+    handler: cycleModeHandler,
   });
 }
