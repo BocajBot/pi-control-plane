@@ -179,6 +179,66 @@ interface OutputEntryData {
   lines: string[];
 }
 
+/**
+ * One-line render for a control-plane diagnostic entry. Kind-aware: the
+ * interpretation-guard block keeps its dedicated phrasing, and every OTHER kind
+ * renders as its actual kind plus whatever subject it carries (a toolName, or a
+ * target). The previous single template rendered EVERY diagnostic as
+ * `blocked tool "?" during interpretation` - so any kind without a toolName
+ * field (e.g. a read-out-of-scope-denied keyed by `target`, or an
+ * advisor-consult) showed the bare "?" the user directed out of existence, and
+ * mislabelled unrelated diagnostics as interpretation blocks.
+ */
+export function formatDiagnosticLine(data: Record<string, unknown> | undefined): string {
+  const kind = typeof data?.kind === "string" ? data.kind : "diagnostic";
+  const at = typeof data?.at === "string" ? data.at : "";
+  const subject =
+    typeof data?.toolName === "string" && data.toolName.length > 0
+      ? ` "${data.toolName}"`
+      : typeof data?.target === "string" && data.target.length > 0
+        ? ` ${data.target}`
+        : "";
+  const body =
+    kind === "blocked-tool-during-interpret"
+      ? `blocked tool${subject} during interpretation`
+      : `${kind}${subject}`;
+  return `[control plane] diagnostic: ${body}${at ? ` (${at})` : ""}`;
+}
+
+/**
+ * The body shown in an attended confirm dialog. Only prints fields that are
+ * actually meaningful: the "Inside project root" line appears solely when a
+ * target resolved to a boolean (a tool with no file target omits it rather than
+ * printing "Unavailable"); a tool with neither a path nor a command says
+ * "no file target" plainly. The permanently-unavailable "Model's stated reason"
+ * line is gone - a field that is never available is noise in every confirm.
+ */
+export function formatConfirmDetail(args: {
+  toolName: string;
+  riskCategory: string;
+  path: string | null;
+  command: string | null;
+  insideRoot: boolean | null;
+  reason: string;
+}): string {
+  const { toolName, riskCategory, path, command, insideRoot, reason } = args;
+  return [
+    `Tool: ${toolName}`,
+    `Risk: ${riskCategory}`,
+    path !== null
+      ? `Target: ${path}`
+      : command === null
+        ? "Target: no file target"
+        : null,
+    command !== null ? `Command: ${command.length > 200 ? command.slice(0, 200) + "…" : command}` : null,
+    insideRoot !== null ? `Inside project root: ${insideRoot ? "yes" : "no"}` : null,
+    "",
+    reason,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+}
+
 export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // Pi-provided modules are imported dynamically so the entry can also be
   // loaded by the unit-test harness outside of Pi. Inside Pi both imports
@@ -1135,19 +1195,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     return box as never;
   });
 
-  pi.registerEntryRenderer<{ kind: string; toolName: string; at: string }>(
+  pi.registerEntryRenderer<Record<string, unknown>>(
     DIAGNOSTIC_ENTRY_TYPE,
     (entry, _options, theme) => {
       if (Text === null) return undefined;
-      const data = entry.data;
-      return new Text(
-        theme.fg(
-          "dim",
-          `[control plane] diagnostic: blocked tool "${data?.toolName ?? "?"}" during interpretation (${data?.at ?? ""})`,
-        ),
-        0,
-        0,
-      ) as never;
+      return new Text(theme.fg("dim", formatDiagnosticLine(entry.data)), 0, 0) as never;
     },
   );
 
@@ -1650,18 +1702,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       const input = event.input as Record<string, unknown>;
       const command = typeof input.command === "string" ? input.command : null;
       const target = typeof input.path === "string" ? input.path : null;
-      const detail = [
-        `Tool: ${event.toolName}`,
-        `Risk: ${decision.riskCategory}`,
-        target !== null ? `Target: ${target}` : null,
-        command !== null ? `Command: ${command.length > 200 ? command.slice(0, 200) + "…" : command}` : null,
-        `Inside project root: ${decision.insideRoot === null ? "Unavailable" : decision.insideRoot ? "yes" : "no"}`,
-        "Model's stated reason: Unavailable (Pi does not expose tool-call rationale)",
-        "",
-        decision.reason,
-      ]
-        .filter((line): line is string => line !== null)
-        .join("\n");
+      const detail = formatConfirmDetail({
+        toolName: event.toolName,
+        riskCategory: decision.riskCategory,
+        path: target,
+        command,
+        insideRoot: decision.insideRoot,
+        reason: decision.reason,
+      });
       // EVERY confirm routes through the three-option dialog (Yes/No/Always) so
       // no confirm is a bare, un-rememberable yes/no: a resolvable path keys the
       // rule on the path, a shell command on the exact command, a harness/foreign

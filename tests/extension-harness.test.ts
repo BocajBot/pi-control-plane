@@ -11,7 +11,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import controlPlaneExtension from "../extensions/control-plane.ts";
+import controlPlaneExtension, {
+  formatConfirmDetail,
+  formatDiagnosticLine,
+} from "../extensions/control-plane.ts";
 import { REQUIRED_SECTIONS } from "../src/control-plane/interpretation.ts";
 import { STATE_ENTRY_TYPE, DIAGNOSTIC_ENTRY_TYPE } from "../src/control-plane/types.ts";
 
@@ -1460,6 +1463,60 @@ test("ro-shell: without bwrap a read-mode command falls to the gate, never a sil
   const blocked = (await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "pi_harness_bash", input: { command: "wc -l x" } }, ctx)) as { block?: boolean };
   assert.equal(blocked?.block, true, "no bwrap -> the gate (declined here), not a silent allow");
   assert.equal(ctx.customCalls.length, 1, "the confirm dialog was shown instead of auto-allowing");
+});
+
+// ---- Diagnostic + confirm text: no bare "?" or permanent "Unavailable" -----
+
+test("diagnostic line: interpretation block keeps the real tool name; other kinds render their kind, never a bare ?", () => {
+  const interpret = formatDiagnosticLine({ kind: "blocked-tool-during-interpret", toolName: "write", at: "T" });
+  assert.match(interpret, /blocked tool "write" during interpretation \(T\)/);
+
+  // The bug: a diagnostic with no toolName used to render as `blocked tool "?"
+  // during interpretation`. It must now render its real kind + subject, and
+  // never claim "during interpretation" for an unrelated kind.
+  const denied = formatDiagnosticLine({ kind: "read-out-of-scope-denied", target: "/etc/hostname", at: "T" });
+  assert.ok(!denied.includes('"?"'), "no bare ? placeholder");
+  assert.ok(!denied.includes("during interpretation"), "an unrelated kind is not mislabelled");
+  assert.match(denied, /read-out-of-scope-denied \/etc\/hostname \(T\)/);
+
+  const consult = formatDiagnosticLine({ kind: "advisor-consult", at: "T" });
+  assert.ok(!consult.includes('"?"'));
+  assert.match(consult, /advisor-consult \(T\)/);
+
+  // An interpret block that genuinely has no name shows no "?" either.
+  assert.ok(!formatDiagnosticLine({ kind: "blocked-tool-during-interpret", at: "T" }).includes('"?"'));
+});
+
+test("confirm detail: no permanent 'Unavailable' lines; pathless tools say so plainly", () => {
+  // A harness tool with no file target: no "Inside project root: Unavailable",
+  // no "Model's stated reason", a plain "no file target".
+  const harness = formatConfirmDetail({
+    toolName: "harness_memory_search", riskCategory: "harness-tool",
+    path: null, command: null, insideRoot: null, reason: "why",
+  });
+  assert.ok(!harness.includes("Unavailable"), "no Unavailable framing");
+  assert.ok(!harness.includes("Model's stated reason"), "the permanently-absent rationale line is gone");
+  assert.ok(!/Inside project root/.test(harness), "inside-root omitted when meaningless");
+  assert.match(harness, /Target: no file target/);
+
+  // A path tool: inside-root shows a real yes/no.
+  const pathTool = formatConfirmDetail({
+    toolName: "write", riskCategory: "file-write",
+    path: "/p/f.txt", command: null, insideRoot: true, reason: "why",
+  });
+  assert.match(pathTool, /Target: \/p\/f\.txt/);
+  assert.match(pathTool, /Inside project root: yes/);
+  assert.ok(!pathTool.includes("Unavailable"));
+
+  // A shell command: shows the command, no spurious "no file target", no
+  // inside-root line (none resolved).
+  const shell = formatConfirmDetail({
+    toolName: "pi_harness_bash", riskCategory: "shell",
+    path: null, command: "touch f", insideRoot: true, reason: "why",
+  });
+  assert.match(shell, /Command: touch f/);
+  assert.ok(!shell.includes("no file target"), "a command is not 'no file target'");
+  assert.match(shell, /Inside project root: yes/);
 });
 
 test("ro-shell: a write-mode pi_harness_bash command still gates and is rememberable", async () => {
