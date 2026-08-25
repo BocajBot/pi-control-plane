@@ -537,6 +537,7 @@ export function renderHotkeyCheatsheet(): string[] {
     "  alt+t  tool-profile picker (enter: apply this session · space: set as default)",
     "  alt+p / shift+tab  cycle mode: Discuss > Plan > Execute (attended)",
     "         > Execute (restricted) > Execute (unattended) > Verify",
+    "  alt+d  delegate sub-session picker (view subagent transcripts)",
     "  alt+h  this cheat sheet",
     "",
     "Pi essentials:",

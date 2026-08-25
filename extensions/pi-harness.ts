@@ -76,6 +76,7 @@ import { formatAuditEvent, makeAuditEvent, type AuditContext } from "../src/harn
 import { matchingUserGrants, searchCapabilities } from "../src/harness/capability-search.ts";
 import { describeAvailable, resolveDelegateModel } from "../src/harness/delegate-model.ts";
 import { transcriptLinesFor, transcriptTail } from "../src/harness/delegate-transcript.ts";
+import { parseTranscriptHeader, renderTranscriptPicker, type TranscriptEntry } from "../src/harness/transcript-picker.ts";
 import {
   attestCalls,
   attestChild,
@@ -392,6 +393,37 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
     realpath: (p) => fs.realpathSync(p),
     exists: (p) => fs.existsSync(p),
   };
+
+  // TUI widgets for the output renderer. Same dynamic-import-with-fallback
+  // posture as the control plane: null under the unit-test harness, where the
+  // entries are still appended and asserted on, just not drawn.
+  let Box: (new (px?: number, py?: number) => { addChild(c: unknown): void }) | null = null;
+  let Text: (new (text: string, px?: number, py?: number) => unknown) | null = null;
+  try {
+    const tui = (await import("@earendil-works/pi-tui")) as unknown as {
+      Box: NonNullable<typeof Box>;
+      Text: NonNullable<typeof Text>;
+    };
+    Box = tui.Box;
+    Text = tui.Text;
+  } catch {
+    Box = null;
+    Text = null;
+  }
+
+  // Without a registered renderer pi draws NOTHING for a custom entry type -
+  // every emit() below (status, scope, audit, transcripts) was invisible in
+  // the TUI, which read as "the harness has no output" rather than an error.
+  pi.registerEntryRenderer<{ title: string; lines: string[] }>(OUTPUT_ENTRY_TYPE, (entry, _options, theme) => {
+    if (Box === null || Text === null) return undefined;
+    const data = entry.data ?? { title: "harness", lines: [] };
+    const box = new Box(1, 0);
+    box.addChild(new Text(theme.fg("accent", `[harness] ${data.title}`), 0, 0));
+    for (const line of data.lines) {
+      box.addChild(new Text(line.length > 0 ? line : " ", 0, 0));
+    }
+    return box as never;
+  });
 
   const emit = (title: string, lines: string[]) => {
     pi.appendEntry(OUTPUT_ENTRY_TYPE, { title, lines });
@@ -2288,6 +2320,100 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
     }
   }
 
+  /** Transcript files, newest first, with parsed headers for the picker. */
+  const listDelegateTranscripts = (): TranscriptEntry[] => {
+    if (paths === null) return [];
+    let files: string[] = [];
+    try {
+      files = fs
+        .readdirSync(paths.delegationTranscriptsDir)
+        .filter((f) => f.endsWith(".log"))
+        .sort()
+        .reverse();
+    } catch {
+      return [];
+    }
+    return files.map((file) => {
+      let content = "";
+      try {
+        content = fs.readFileSync(path.join(paths!.delegationTranscriptsDir, file), "utf8");
+      } catch {
+        /* keep the placeholder entry */
+      }
+      return parseTranscriptHeader(file.replace(/\.log$/, ""), content);
+    });
+  };
+
+  const emitTranscript = (id: string): void => {
+    if (paths === null) return;
+    try {
+      const content = fs.readFileSync(path.join(paths.delegationTranscriptsDir, `${id}.log`), "utf8");
+      emit(`Delegate transcript ${id}`, content.split("\n"));
+    } catch (error) {
+      emit("Harness transcript", [`Could not read ${id}: ${String(error)}`]);
+    }
+  };
+
+  /**
+   * The selector the TUI shows for delegate sub-sessions (alt+d, and
+   * /harness transcript with no argument). Mirrors the control plane's
+   * profile picker: overlay list, enter replays the transcript into chat.
+   */
+  let transcriptModalOpen = false;
+  const openTranscriptPicker = async (ctx: ExtensionContext): Promise<void> => {
+    const uiAny = ctx.ui as { custom?: <T>(factory: unknown, options?: unknown) => Promise<T> };
+    if (ctx.mode !== "tui" || typeof uiAny.custom !== "function") {
+      const entries = listDelegateTranscripts();
+      emit("Harness transcripts", entries.length > 0
+        ? [...entries.slice(0, 20).map((e) => `- ${e.id}  ${e.kind}  ${e.model}  ${e.objective}`),
+           "", "/harness transcript <contract-id> to view one."]
+        : ["No delegate transcripts recorded yet."]);
+      return;
+    }
+    if (transcriptModalOpen) return;
+    const entries = listDelegateTranscripts();
+    transcriptModalOpen = true;
+    try {
+      const chosen = await uiAny.custom<string | null>(
+        (
+          tui: { requestRender(force?: boolean): void },
+          _theme: unknown,
+          _kb: unknown,
+          done: (r: string | null) => void,
+        ) => {
+          let selectedIndex = 0;
+          return {
+            render: (width: number) => renderTranscriptPicker(entries, selectedIndex, Math.min(width, 120)),
+            handleInput: (data: string) => {
+              if (entries.length > 0 && (data === "\x1b[A" || data === "k")) {
+                selectedIndex = (selectedIndex + entries.length - 1) % entries.length;
+                tui.requestRender();
+              } else if (entries.length > 0 && (data === "\x1b[B" || data === "j" || data === "\t")) {
+                selectedIndex = (selectedIndex + 1) % entries.length;
+                tui.requestRender();
+              } else if (entries.length > 0 && (data === "\r" || data === "\n")) {
+                done(entries[selectedIndex].id);
+              } else if (data === "\x1b" || data === "\x03" || data === "q") {
+                done(null);
+              }
+            },
+          };
+        },
+        { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%" } },
+      );
+      if (chosen !== null) emitTranscript(chosen);
+    } finally {
+      transcriptModalOpen = false;
+    }
+  };
+
+  pi.registerShortcut("alt+d", {
+    description: "Harness: delegate sub-session picker (transcripts)",
+    handler: async (ctx) => {
+      await openTranscriptPicker(ctx);
+    },
+  });
+
   /* ---------------------------------------------------------------- *
    * Commands
    * ---------------------------------------------------------------- */
@@ -2431,21 +2557,16 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
             return;
           }
           const wanted = rest[0];
+          if (wanted === undefined) {
+            // No argument: the same picker alt+d opens (list fallback off-TUI).
+            await openTranscriptPicker(ctx as ExtensionContext);
+            return;
+          }
           let files: string[] = [];
           try {
             files = fs.readdirSync(paths.delegationTranscriptsDir).filter((f) => f.endsWith(".log")).sort();
           } catch {
             files = [];
-          }
-          if (wanted === undefined) {
-            emit("Harness transcripts", files.length > 0
-              ? [
-                  ...files.slice(-20).map((f) => `- ${f.replace(/\.log$/, "")}`),
-                  "",
-                  "/harness transcript <contract-id> to view one.",
-                ]
-              : ["No delegate transcripts recorded yet."]);
-            return;
           }
           // Exact id or unambiguous prefix; refuse ambiguity rather than guess.
           const matches = files.filter((f) => f === `${wanted}.log` || f.startsWith(wanted));
