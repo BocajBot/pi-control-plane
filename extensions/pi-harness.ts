@@ -75,6 +75,7 @@ import {
 import { formatAuditEvent, makeAuditEvent, type AuditContext } from "../src/harness/audit.ts";
 import { matchingUserGrants, searchCapabilities } from "../src/harness/capability-search.ts";
 import { describeAvailable, resolveDelegateModel } from "../src/harness/delegate-model.ts";
+import { transcriptLinesFor, transcriptTail } from "../src/harness/delegate-transcript.ts";
 import {
   attestCalls,
   attestChild,
@@ -409,7 +410,11 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
    * Output is collected by subscribing before prompting, with a read of the
    * session branch as a fallback in case the event shape differs.
    */
-  const runNestedPrompt = async (agentSession: unknown, promptText: string): Promise<string> => {
+  const runNestedPrompt = async (
+    agentSession: unknown,
+    promptText: string,
+    onEvent?: (event: unknown) => void,
+  ): Promise<string> => {
     const sess = agentSession as {
       prompt(text: string): Promise<void>;
       subscribe?: (listener: (event: unknown) => void) => () => void;
@@ -429,6 +434,13 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
     try {
       unsubscribe =
         sess.subscribe?.((event) => {
+          // The observer sees every event (it feeds the live transcript);
+          // collection below stays message_end-only.
+          try {
+            onEvent?.(event);
+          } catch {
+            /* a transcript failure must not kill the run */
+          }
           const e = event as { type?: string; message?: unknown };
           if (e?.type !== "message_end") return;
           // Assistant messages only. `message_end` fires for the prompt too,
@@ -2099,7 +2111,42 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
             ].join("\n") }] } as never;
           }
 
-          const replyText = await runNestedPrompt(agent, renderContractPrompt(built.contract));
+          // Sub-session visibility: every child event becomes a transcript
+          // line, streamed live into this tool call's output panel (the
+          // Claude Code subagent view) and appended to a durable per-contract
+          // file for /harness transcript afterwards. Append-per-line so a
+          // crashed delegate still leaves everything it did on disk.
+          const transcriptLines: string[] = [];
+          let transcriptFile: string | null = null;
+          if (paths !== null) {
+            try {
+              fs.mkdirSync(paths.delegationTranscriptsDir, { recursive: true });
+              transcriptFile = path.join(paths.delegationTranscriptsDir, `${built.contract.id}.log`);
+              fs.writeFileSync(transcriptFile, [
+                `# delegate transcript ${built.contract.id}`,
+                `# kind: ${p.kind}  model: ${p.model ?? "(inherited)"}  started: ${new Date().toISOString()}`,
+                `# objective: ${p.objective}`,
+                "",
+              ].join("\n"));
+            } catch {
+              transcriptFile = null;
+            }
+          }
+          const observeChildEvent = (event: unknown): void => {
+            const lines = transcriptLinesFor(event);
+            if (lines.length === 0) return;
+            transcriptLines.push(...lines);
+            if (transcriptFile !== null) {
+              try {
+                fs.appendFileSync(transcriptFile, lines.map((line) => `${line}\n`).join(""));
+              } catch {
+                transcriptFile = null;
+              }
+            }
+            _onUpdate?.({ content: [{ type: "text", text: transcriptTail(transcriptLines) }] } as never);
+          };
+
+          const replyText = await runNestedPrompt(agent, renderContractPrompt(built.contract), observeChildEvent);
 
           // Re-attest after the run. A clean start is not evidence about the
           // end: Pi exposes `setActiveToolsByName` on the session object, so
@@ -2228,6 +2275,9 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
                        "Nothing was widened. Each is recorded as a pending decision."]
                     : []),
                   "",
+                  transcriptFile !== null
+                    ? `Transcript: /harness transcript ${built.contract.id}`
+                    : "Transcript: (unavailable - harness paths not initialized)",
                   "This is evidence and recommendation. Nothing has been applied.",
                 ].join("\n"),
               },
@@ -2373,6 +2423,52 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
           return;
         }
 
+        case "transcript": {
+          // The sub-session view: what the delegate actually did, replayed
+          // from the per-contract transcript file the run wrote live.
+          if (paths === null) {
+            emit("Harness transcript", ["Harness paths are not initialized."]);
+            return;
+          }
+          const wanted = rest[0];
+          let files: string[] = [];
+          try {
+            files = fs.readdirSync(paths.delegationTranscriptsDir).filter((f) => f.endsWith(".log")).sort();
+          } catch {
+            files = [];
+          }
+          if (wanted === undefined) {
+            emit("Harness transcripts", files.length > 0
+              ? [
+                  ...files.slice(-20).map((f) => `- ${f.replace(/\.log$/, "")}`),
+                  "",
+                  "/harness transcript <contract-id> to view one.",
+                ]
+              : ["No delegate transcripts recorded yet."]);
+            return;
+          }
+          // Exact id or unambiguous prefix; refuse ambiguity rather than guess.
+          const matches = files.filter((f) => f === `${wanted}.log` || f.startsWith(wanted));
+          if (matches.length === 0) {
+            emit("Harness transcript", [`No transcript matches "${wanted}".`]);
+            return;
+          }
+          if (matches.length > 1) {
+            emit("Harness transcript", [
+              `"${wanted}" matches ${matches.length} transcripts:`,
+              ...matches.map((f) => `- ${f.replace(/\.log$/, "")}`),
+            ]);
+            return;
+          }
+          try {
+            const content = fs.readFileSync(path.join(paths.delegationTranscriptsDir, matches[0]), "utf8");
+            emit(`Delegate transcript ${matches[0].replace(/\.log$/, "")}`, content.split("\n"));
+          } catch (error) {
+            emit("Harness transcript", [`Could not read it: ${String(error)}`]);
+          }
+          return;
+        }
+
         case "audit": {
           const events = store.readRecentAudit(AUDIT_TAIL);
           emit("Harness audit (most recent)", events.length > 0 ? events.map(formatAuditEvent) : ["(empty)"]);
@@ -2436,7 +2532,7 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
 
         default:
           emit("Harness", [
-            "/harness status | scope | authority <actor> | audit | recover | checkpoint <verified state> | workstate",
+            "/harness status | scope | authority <actor> | audit | transcript [contract-id] | recover | checkpoint <verified state> | workstate",
           ]);
       }
     },

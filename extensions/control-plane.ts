@@ -2840,7 +2840,20 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           ctx.ui.notify("Usage: /harness-rules allow <tool> <path>", "warning");
           return;
         }
-        const canonical = canonicalizePath(rawTarget, ctx.cwd, pathOps);
+        // "*" is the tool-level target the dialog's "Always" saves for
+        // harness/unknown tools (rememberTargetFor). Accept the same spelling
+        // here - but only for tools where the dialog itself would produce it,
+        // so the command cannot mint a blanket rule for path or shell tools
+        // that the dialog would always scope to a concrete target.
+        const toolLevelTarget = rawTarget === "*";
+        if (toolLevelTarget && classifyTool(tool) !== "harness" && classifyTool(tool) !== "unknown") {
+          ctx.ui.notify(
+            `Refused: "*" is only valid for harness/unknown tools; "${tool}" rules need a concrete path or command.`,
+            "warning",
+          );
+          return;
+        }
+        const canonical = toolLevelTarget ? "*" : canonicalizePath(rawTarget, ctx.cwd, pathOps);
         if (canonical === null) {
           ctx.ui.notify(`Could not resolve path "${rawTarget}".`, "warning");
           return;

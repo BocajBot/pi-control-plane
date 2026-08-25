@@ -987,6 +987,29 @@ test("a remembered-rule allow stamps the event for the harness, like the dialog 
   assert.equal(stamp?.callId, "r1");
 });
 
+test("/harness-rules allow accepts \"*\" for a harness tool, matching the dialog's Always rule", async () => {
+  // The dialog's Always saves target "*" for harness tools; typing the same
+  // rule by hand canonicalized "*" as a path and never matched. Parity fix.
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, hasUI: false });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.commands.get("harness-rules")!.handler("allow harness_delegate *", ctx);
+  await pi.commands.get("harness-rules")!.handler("headless on", ctx);
+
+  const event = { type: "tool_call", toolCallId: "d1", toolName: "harness_delegate", input: { kind: "subagent", objective: "x" } };
+  const result = await pi.emit("tool_call", event, ctx);
+  assert.equal(result, undefined, "the tool-level rule allows the harness tool with no UI");
+  const stamp = (event as { __cpUserApproved?: { callId: string | null } }).__cpUserApproved;
+  assert.equal(stamp?.callId, "d1");
+
+  // "*" for a path tool is refused - the dialog would never save that.
+  await pi.commands.get("harness-rules")!.handler("allow write *", ctx);
+  const refused = ctx.notifications.at(-1);
+  assert.match(refused?.message ?? "", /only valid for harness\/unknown tools/);
+});
+
 // ---- Part 3 dialog: the in-prompt third option (Yes once / No / Always) ----
 // The attended per-call gate for a rememberable confirm is a single three-option
 // dialog (ctx.ui.custom + SelectList). "Always" saves exactly the rule
