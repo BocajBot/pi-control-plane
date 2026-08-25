@@ -42,6 +42,8 @@ function displayAutonomy(autonomy: Autonomy): string {
       return "Read-only";
     case "attended":
       return "Attended";
+    case "auto":
+      return "Auto";
     case "restricted":
       return "Restricted";
     case "unattended":
@@ -58,6 +60,7 @@ export function displayMode(
 ): string {
   if (phase === "execute") {
     if (autonomy === "attended") return "Execute (attended)";
+    if (autonomy === "auto") return "Execute (auto)";
     if (autonomy === "restricted") {
       return policyValid
         ? "Execute (restricted)"
@@ -397,9 +400,11 @@ export function buildInjectionBlock(state: ControlPlaneState, policyValid: boole
           ? hasAcceptedTask
             ? "Mutating tools are policy-enforced (same rules as restricted) with no human reviewing in real time. Stay strictly within the accepted task's scope."
             : "Mutating tools are blocked: unattended mode requires an accepted task brief first."
-          : state.autonomy === "attended"
-            ? "Risky tool calls (writes, shell, out-of-root reads) require user confirmation."
-            : "Mutating tools are blocked in this mode."
+          : state.autonomy === "auto"
+            ? "File writes and edits inside the project root apply without asking. Shell, deletion, writes outside the root, protected paths and harness tools still require user confirmation."
+            : state.autonomy === "attended"
+              ? "Risky tool calls (writes, shell, out-of-root reads) require user confirmation."
+              : "Mutating tools are blocked in this mode."
       : "Mutating tools are blocked in this mode.",
   );
   const taskStatus =
@@ -530,13 +535,13 @@ export function renderHotkeyCheatsheet(): string[] {
     "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",
     "  alt+s  send preview: everything the next message will send, editable, incl. your draft",
     "  alt+t  tool-profile picker (enter: apply this session · space: set as default)",
-    "  alt+p  cycle mode: Discuss > Plan > Execute (attended) > Execute (restricted)",
-    "         > Execute (unattended) > Verify",
+    "  alt+p / shift+tab  cycle mode: Discuss > Plan > Execute (attended)",
+    "         > Execute (restricted) > Execute (unattended) > Verify",
     "  alt+h  this cheat sheet",
     "",
     "Pi essentials:",
     "  ctrl+g     edit prompt in external editor",
-    "  shift+tab  cycle thinking level",
+    "  /effort    set thinking level (off|minimal|low|medium|high|xhigh|max)",
     "  ctrl+t     collapse/expand thinking blocks",
     "  ctrl+o     collapse/expand tool output",
     "  ctrl+l     model selector    ctrl+p  cycle model",
@@ -570,10 +575,13 @@ export const USAGE = {
     "  /task clear       — clear accepted and pending task state (asks to confirm)",
   ],
   mode: [
-    "Usage: /mode [discuss|plan|execute|execute-restricted|execute-unattended|verify]",
+    "Usage: /mode [discuss|plan|execute|auto|execute-restricted|execute-unattended|verify]",
     "  discuss             — talk only; every mutating tool blocked, reads allowed",
     "  plan                — same permissions as discuss, framed for planning",
     "  execute             — changes allowed; risky operations ask for confirmation",
+    "  auto                — edits inside the project root apply without asking;",
+    "                        shell, deletion, writes outside the root, protected",
+    "                        paths and harness tools still confirm (accept-edits)",
     "  execute-restricted  — changes allowed inside the project root under",
     "                        policy/default-policy.json; no confirmations, shell blocked",
     "  execute-unattended  — same policy enforcement as execute-restricted, but requires",

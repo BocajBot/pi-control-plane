@@ -345,7 +345,10 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
       }
       return allow("restricted:read", risk, insideRoot);
     }
-    if (autonomy === "attended" && insideRoot === false) {
+    // Auto inherits attended's read posture: a read outside the project root
+    // is still a confirmation, because leaving the root is the thing being
+    // checked and auto only relaxes editing inside it.
+    if ((autonomy === "attended" || autonomy === "auto") && insideRoot === false) {
       return confirm(
         "attended:read-outside-root",
         `Read target "${canonical}" is outside the project root.`,
@@ -378,7 +381,31 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
     return block("autonomy:read-only", `Read-only mode blocks this call. ${detail}`, risk, insideRoot, HINT_AUTONOMY);
   }
 
-  if (autonomy === "attended") {
+  // Auto: the level that stops asking about ordinary editing and keeps asking
+  // about everything else. Deliberately narrow - a file write or edit, with a
+  // resolved path, inside the project root, and not a protected path. Anything
+  // failing one of those conditions falls through to the attended branch below
+  // and is confirmed exactly as before, so the set of calls that reach the user
+  // shrinks but never silently grows.
+  if (autonomy === "auto" && (risk === "file-write" || risk === "file-edit") && insideRoot === true) {
+    // The deny patterns still apply. Auto is about not re-asking for routine
+    // edits, not about reaching paths a confirmation existed to protect - a
+    // credential file inside the root is exactly such a path.
+    if (canonical !== null && policy !== null) {
+      const denied = matchesDenyPatterns(canonical, policy);
+      if (denied !== null) {
+        return confirm(
+          "auto:credential-path",
+          `"${canonical}" matches a protected path pattern (${denied}), so Auto mode still asks.`,
+          risk,
+          insideRoot,
+        );
+      }
+    }
+    return allow("auto:in-root-edit", risk, insideRoot);
+  }
+
+  if (autonomy === "attended" || autonomy === "auto") {
     const target =
       category === "shell" || category === "harness-shell"
         ? "a shell command"
@@ -387,9 +414,10 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
           : canonical !== null
             ? `"${canonical}"`
             : "an unspecified target";
+    const levelLabel = autonomy === "auto" ? "Auto" : "Attended";
     return confirm(
-      `attended:${category}`,
-      `Attended mode requires explicit confirmation before ${riskLabel(risk)} affecting ${target}.`,
+      `${autonomy}:${category}`,
+      `${levelLabel} mode requires explicit confirmation before ${riskLabel(risk)} affecting ${target}.`,
       risk,
       insideRoot,
     );
