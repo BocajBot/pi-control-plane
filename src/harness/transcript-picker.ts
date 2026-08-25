@@ -51,20 +51,38 @@ function clip(text: string, width: number): string {
   return text.length > width ? `${text.slice(0, Math.max(0, width - 1))}…` : text;
 }
 
-/** Overlay body: one row per transcript, cursor on `selected`. */
+/**
+ * Overlay body: one row per transcript, cursor on `selected`.
+ *
+ * Bordered and padded to full width like the profile picker: pi overlays
+ * composite over the chat, so any cell a row does not paint shows the text
+ * underneath - an unpadded picker reads as a rendering glitch.
+ */
 export function renderTranscriptPicker(
   entries: readonly TranscriptEntry[],
   selected: number,
   width: number,
 ): string[] {
-  if (entries.length === 0) {
-    return ["Delegate transcripts", "", "  (none recorded yet)", "", "  esc close"];
+  const inner = Math.max(40, width - 2);
+  const body: string[] =
+    entries.length === 0
+      ? ["", "  (none recorded yet)"]
+      : [
+          "",
+          ...entries.map((entry, index) => {
+            const cursor = index === selected ? "→ " : "  ";
+            const when = entry.startedAt.replace(/T/, " ").replace(/\.\d+Z$/, "");
+            return clip(`${cursor}${when}  ${entry.kind}  ${entry.model}  ${entry.objective}`, inner);
+          }),
+        ];
+  const title = " Delegate transcripts — enter open sub-session · t transcript text · esc close";
+  const lines: string[] = [];
+  lines.push("╭" + "─".repeat(inner) + "╮");
+  lines.push("│" + clip(title, inner).padEnd(inner) + "│");
+  lines.push("├" + "─".repeat(inner) + "┤");
+  for (const row of body) {
+    lines.push("│" + clip(row, inner).padEnd(inner) + "│");
   }
-  const lines = [clip("Delegate transcripts — enter open sub-session, t transcript text, esc close", width), ""];
-  entries.forEach((entry, index) => {
-    const cursor = index === selected ? "→ " : "  ";
-    const when = entry.startedAt.replace(/T/, " ").replace(/\.\d+Z$/, "");
-    lines.push(clip(`${cursor}${when}  ${entry.kind}  ${entry.model}  ${entry.objective}`, width));
-  });
+  lines.push("╰" + "─".repeat(inner) + "╯");
   return lines;
 }
