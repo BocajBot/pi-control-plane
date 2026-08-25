@@ -341,7 +341,7 @@ test("M1: the memory command promotes on user direction and records the epistemi
 test("the scope tool refuses an expansion beyond one boundary and tells the model what to ask for", async () => {
   const { pi, root, ctx } = await boot();
   const tool = pi.tools.get("harness_request_scope")!;
-  const result = (await tool.execute("id", { path: "/etc" }, ctx)) as { content: { text: string }[] };
+  const result = (await tool.execute("id", { path: "/etc" }, undefined, undefined, ctx)) as { content: { text: string }[] };
   assert.match(result.content[0].text, /Not granted/);
   assert.match(result.content[0].text, /\/harness scope approve/);
   assert.ok(root.length > 0);
@@ -464,11 +464,29 @@ test("SA3: a delegate instance adopts the contract scope instead of minting a fu
   );
 });
 
+test("a tool that reads ctx takes it as the fifth argument, matching Pi's real call", async () => {
+  // Pi calls execute(toolCallId, params, signal, onUpdate, ctx) - see
+  // dist/core/tools/tool-definition-wrapper.js. A three-argument lambda
+  // therefore binds `ctx` to the AbortSignal, which is how ctx.cwd was
+  // silently undefined in four harness tools and how a later ctx.modelRegistry
+  // read crashed outright. Arity is the cheapest thing that pins the contract.
+  const { pi } = await boot();
+  for (const name of ["harness_request_scope", "harness_set_posture", "harness_delegate"]) {
+    const tool = pi.tools.get(name);
+    if (tool === undefined) continue;
+    assert.equal(
+      tool.execute.length,
+      5,
+      `${name} must accept Pi's full execute signature, or ctx is really the signal`,
+    );
+  }
+});
+
 test("TO1: capability search finds an unloaded tool and says finding it is not authorization", async () => {
   const { pi, ctx } = await boot();
   // The builtin shell was removed from the active set at session start, so
   // it is exactly the "exists but is not loaded" case TO1 describes.
-  const result = (await pi.tools.get("harness_find_capability")!.execute("id", { need: "shell" }, ctx)) as {
+  const result = (await pi.tools.get("harness_find_capability")!.execute("id", { need: "shell" }, undefined, undefined, ctx)) as {
     content: { text: string }[];
   };
   const text = result.content[0].text;
@@ -481,6 +499,8 @@ test("TO3: with no matching capability, the model is told to propose a tool rath
   const result = (await pi.tools.get("harness_find_capability")!.execute(
     "id",
     { need: "zzz-nonexistent-capability" },
+    undefined,
+    undefined,
     ctx,
   )) as { content: { text: string }[] };
   assert.match(result.content[0].text, /Propose a new tool/);
@@ -617,7 +637,7 @@ test("section 13: /harness-goal check surfaces tension without blocking anything
 
 test("harness_note records a provisional assumption that reaches WORKSTATE as provisional", async () => {
   const { pi, root, ctx } = await boot();
-  await pi.tools.get("harness_note")!.execute("id", { kind: "assumption", text: "the caller retries" }, ctx);
+  await pi.tools.get("harness_note")!.execute("id", { kind: "assumption", text: "the caller retries" }, undefined, undefined, ctx);
   await pi.commands.get("harness")!.handler("workstate", ctx);
 
   const workstate = fs.readFileSync(path.join(root, ".pi", "WORKSTATE.md"), "utf8");
@@ -765,12 +785,12 @@ test("section 32: the coordinator may tighten posture through its tool but not l
   await pi.emit("session_start", { type: "session_start" }, ctx);
 
   const tool = pi.tools.get("harness_set_posture")!;
-  const tighten = (await tool.execute("1", { field: "autonomy", value: "interactive" }, ctx)) as {
+  const tighten = (await tool.execute("1", { field: "autonomy", value: "interactive" }, undefined, undefined, ctx)) as {
     content: { text: string }[];
   };
   assert.match(tighten.content[0].text, /autonomy set to interactive \(tighten\)/);
 
-  const loosen = (await tool.execute("2", { field: "autonomy", value: "autonomous" }, ctx)) as {
+  const loosen = (await tool.execute("2", { field: "autonomy", value: "autonomous" }, undefined, undefined, ctx)) as {
     content: { text: string }[];
   };
   assert.match(loosen.content[0].text, /authority expansion|failing closed/);

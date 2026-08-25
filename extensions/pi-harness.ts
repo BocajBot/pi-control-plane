@@ -73,6 +73,8 @@ import {
   HARNESS_TOOLS,
 } from "../src/harness/capability.ts";
 import { formatAuditEvent, makeAuditEvent, type AuditContext } from "../src/harness/audit.ts";
+import { matchingUserGrants, searchCapabilities } from "../src/harness/capability-search.ts";
+import { describeAvailable, resolveDelegateModel } from "../src/harness/delegate-model.ts";
 import {
   attestCalls,
   attestChild,
@@ -204,6 +206,9 @@ const DIAGNOSTIC_ENTRY_TYPE = "pi-harness-diagnostic";
 /** How many audit lines the recovery file and `/harness audit` show. The
  * full log stays on disk; this is a display bound, not a retention one. */
 const AUDIT_TAIL = 20;
+
+/** Capability hits shown per search: enough to choose from, not a catalog dump. */
+const CAPABILITY_SEARCH_LIMIT = 8;
 
 /**
  * Tool classification.
@@ -1505,7 +1510,7 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
             "When recording, the outcome you are asserting: true = you expect this command to succeed (default). The real exit code is compared against this claim.",
         })),
       }) as never,
-      execute: async (_id, params, ctx) => {
+      execute: async (_id, params, _signal, _onUpdate, ctx) => {
         const { command, record, expect_success, mode } = params as { command: string; record?: boolean; expect_success?: boolean; mode?: string };
         if (session === null) {
           return { content: [{ type: "text", text: "Harness session is not initialized." }] } as never;
@@ -1578,7 +1583,7 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
         path: T.String({ description: "Absolute path to bring into scope." }),
         reason: T.Optional(T.String({ description: "Why the wider scope is needed." })),
       }) as never,
-      execute: async (_id, params, ctx) => {
+      execute: async (_id, params, _signal, _onUpdate, ctx) => {
         const { path: target, reason } = params as { path: string; reason?: string };
         if (session === null) {
           return { content: [{ type: "text", text: "Harness session is not initialized." }] } as never;
@@ -1676,7 +1681,7 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
         field: T.String({ description: "One of: reasoning, autonomy, approval." }),
         value: T.String({ description: "The new value for that field." }),
       }) as never,
-      execute: async (_id, params, ctx) => {
+      execute: async (_id, params, _signal, _onUpdate, ctx) => {
         const { field, value } = params as { field: string; value: string };
         const outcome = await applyPosture(actingAs, field, value, ctx as ExtensionContext, currentModel(ctx));
         return { content: [{ type: "text", text: outcome.message }] } as never;
@@ -1693,7 +1698,6 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
       }) as never,
       execute: async (_id, params) => {
         const { need } = params as { need: string };
-        const needle = need.toLowerCase().trim();
         let catalog: { name: string; description?: string }[] = [];
         try {
           catalog = pi.getAllTools() as unknown as { name: string; description?: string }[];
@@ -1701,11 +1705,21 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
           catalog = [];
         }
         const active = new Set(pi.getActiveTools());
-        const hits = catalog.filter(
-          (tool) =>
-            tool.name.toLowerCase().includes(needle) ||
-            (tool.description ?? "").toLowerCase().includes(needle),
-        );
+        const hits = searchCapabilities(need, catalog).slice(0, CAPABILITY_SEARCH_LIMIT);
+        // Postures the user can grant are reported alongside the tool hits,
+        // not only when there are none: the tool a model found may still be
+        // refused at runtime for the posture it lacks (a sandboxed shell it
+        // can call, with networking unshared, is the case that produced this).
+        const grants = matchingUserGrants(need);
+        const grantLines =
+          grants.length > 0
+            ? [
+                "",
+                "Not a tool, but the user can grant:",
+                ...grants.map((grant) => `- ${grant.ability}\n  User runs: ${grant.command}`),
+                "Ask the user; you cannot perform these yourself.",
+              ]
+            : [];
         return {
           content: [
             {
@@ -1719,8 +1733,17 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
                       ),
                       "",
                       "Finding a capability is not authorization to use it. An unloaded tool must be enabled by the user.",
+                      ...grantLines,
                     ].join("\n")
-                  : `No capability matches "${need}". Propose a new tool rather than working around the gap; tool creation is a separate authority transition and is not automatic.`,
+                  : [
+                      `No capability matches "${need}".`,
+                      ...grantLines,
+                      ...(grants.length > 0
+                        ? []
+                        : [
+                            "Propose a new tool rather than working around the gap; tool creation is a separate authority transition and is not automatic.",
+                          ]),
+                    ].join("\n"),
             },
           ],
         } as never;
@@ -1744,8 +1767,9 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
           resumesContract: T.Optional(T.String({ description: "Blocked contract this is an approved restart of." })),
           approvedReadRoot: T.Optional(T.String({ description: "Exact additional read root approved by the user." })),
           approvalDecisionId: T.Optional(T.String({ description: "User decision authorizing that exact root." })),
+          model: T.Optional(T.String({ description: 'Model the delegate runs on, as "provider/id" (a bare id is accepted when only one provider offers it). Defaults to the coordinator\'s own model. Use this to put a question to a specific model - e.g. a local one - in its own isolated context.' })),
         }) as never,
-        execute: async (_id, params, ctx) => {
+        execute: async (_id, params, _signal, _onUpdate, ctx) => {
           const p = params as {
             kind: string;
             objective: string;
@@ -1754,12 +1778,29 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
             resumesContract?: string;
             approvedReadRoot?: string;
             approvalDecisionId?: string;
+            model?: string;
           };
           if (session === null) {
             return { content: [{ type: "text", text: "Harness session is not initialized." }] } as never;
           }
           if (p.kind !== "advisor" && p.kind !== "subagent" && p.kind !== "operator") {
             return { content: [{ type: "text", text: 'kind must be "advisor", "subagent", or "operator".' }] } as never;
+          }
+          // Resolved before the contract is built, so an unknown model is a
+          // refusal with no delegation job recorded rather than a job that
+          // dies during construction.
+          let delegateModel: unknown;
+          if (p.model !== undefined) {
+            const availableModels = ctx.modelRegistry.getAvailable() as unknown as { provider: string; id: string }[];
+            const resolved = resolveDelegateModel(p.model, availableModels);
+            if (!resolved.ok) {
+              return { content: [{ type: "text", text: `Refused: ${resolved.reason}` }] } as never;
+            }
+            delegateModel = ctx.modelRegistry.find(resolved.model.provider, resolved.model.id);
+            if (delegateModel === undefined) {
+              return { content: [{ type: "text", text:
+                `Refused: "${resolved.model.provider}/${resolved.model.id}" resolved but could not be loaded. ${describeAvailable(availableModels)}` }] } as never;
+            }
           }
           const parent: ParentAuthority = {
             session: session.id,
@@ -2009,6 +2050,9 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
                 attest: continuouslyAttest,
               }, execRuntime),
               resourceLoader: isolatedResourceLoader(),
+              // Undefined inherits the coordinator's model, which is the
+              // pre-existing behaviour and stays the default.
+              ...(delegateModel === undefined ? {} : { model: delegateModel as never }),
             });
             agent = created.session;
             child.session = agent;
