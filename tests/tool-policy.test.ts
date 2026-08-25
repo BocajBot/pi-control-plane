@@ -431,3 +431,60 @@ test("allowPathPrefixes: an entry that does not exist on disk is skipped, never 
   assert.equal(decision.action, "block");
   assert.equal(decision.rule, "restricted:outside-root");
 });
+
+test("auto mode: an in-root edit applies without asking, where attended would confirm", () => {
+  const root = fs.realpathSync(makeTempRoot());
+  const target = path.join(root, "src.ts");
+  const attended = evaluateToolCall(
+    evalInput({ toolName: "edit", phase: "execute", autonomy: "attended", projectRoot: root, cwd: root, toolInput: { path: target } }),
+  );
+  const auto = evaluateToolCall(
+    evalInput({ toolName: "edit", phase: "execute", autonomy: "auto", projectRoot: root, cwd: root, toolInput: { path: target } }),
+  );
+  assert.equal(attended.action, "confirm", "precondition: attended asks about this edit");
+  assert.equal(auto.action, "allow");
+  assert.equal(auto.rule, "auto:in-root-edit");
+});
+
+test("auto mode still confirms shell, out-of-root writes and harness tools", () => {
+  const root = fs.realpathSync(makeTempRoot());
+  const outside = fs.realpathSync(makeTempRoot());
+  const cases: [string, Record<string, unknown>][] = [
+    ["bash", { command: "rm -rf /" }],
+    ["write", { path: path.join(outside, "x.txt") }],
+    ["harness_delegate", { kind: "advisor", objective: "x" }],
+  ];
+  for (const [toolName, toolInput] of cases) {
+    const decision = evaluateToolCall(
+      evalInput({ toolName, phase: "execute", autonomy: "auto", projectRoot: root, cwd: root, toolInput }),
+    );
+    assert.notEqual(decision.action, "allow", `${toolName} must not be auto-approved`);
+  }
+});
+
+test("auto mode does not reach protected paths that a confirmation was guarding", () => {
+  const root = fs.realpathSync(makeTempRoot());
+  const decision = evaluateToolCall(
+    evalInput({
+      toolName: "write",
+      phase: "execute",
+      autonomy: "auto",
+      projectRoot: root,
+      cwd: root,
+      toolInput: { path: path.join(root, ".env") },
+    }),
+  );
+  // Pin the mechanism, not just the outcome: without this the test would pass
+  // even if .env were rejected for some unrelated reason.
+  assert.equal(decision.action, "confirm");
+  assert.equal(decision.rule, "auto:credential-path");
+});
+
+test("auto mode cannot mutate outside the Execute phase", () => {
+  const root = fs.realpathSync(makeTempRoot());
+  const decision = evaluateToolCall(
+    evalInput({ toolName: "edit", phase: "discuss", autonomy: "auto", projectRoot: root, cwd: root, toolInput: { path: path.join(root, "a.ts") } }),
+  );
+  assert.equal(decision.action, "block");
+  assert.match(decision.rule, /^phase:/);
+});

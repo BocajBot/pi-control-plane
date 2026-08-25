@@ -1811,6 +1811,17 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           at: new Date().toISOString(),
         });
       }
+      // Auto mode, P2 extension: an allow under the auto:in-root-edit rule
+      // rests on the same human decision a dialog would have collected — the
+      // user chose /mode auto, a standing "yes" for exactly this class of call
+      // (in-root, non-protected file writes/edits; nothing else earns the
+      // rule). Stamp it so the harness layer consumes that answer instead of
+      // asking its own section-21 question, in the TUI and headless alike.
+      // Same per-callId, single-use stamp as a dialog approval; the harness
+      // still evaluates and still enforces its scope and hard rules.
+      if (decision.rule === "auto:in-root-edit") {
+        markConfirmedForHarness(event);
+      }
       // Backup-before-edit (hard rule): snapshot the pre-mutation state of an
       // existing file before it changes. Runs on the allow path (attended or
       // unattended) and fails closed — a mutation never proceeds without a
@@ -1826,9 +1837,15 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       if (!ctx.hasUI) {
         return {
           block: true,
+          // Actionable, because a refusal that only says "failing closed" leaves
+          // a non-interactive session with no move at all: name both ways the
+          // user can pre-authorize this without a dialog.
           reason:
             formatDenial(decision, event.toolName) +
-            " No confirmation UI is available in this mode; failing closed.",
+            " No confirmation UI is available in this mode; failing closed." +
+            " To pre-authorize without a dialog: /mode auto (applies in-root file edits without asking)," +
+            " or /harness-rules allow <tool> <path> plus /harness-rules headless on, which applies" +
+            " the rules you saved in sessions with no UI.",
         };
       }
       const input = event.input as Record<string, unknown>;
@@ -2139,9 +2156,15 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     // it can only skip a prompt the user has already, explicitly, agreed to skip
     // — never loosen a hard boundary. Keyed by the SAME rememberTargetFor as the
     // dialog's "Always", so path-ful, shell (by command) and tool-level
-    // (harness/foreign) rules all match here. Gated on hasUI: a rule suppresses
-    // a PROMPT, and a no-UI session has none — it fails closed as today.
-    if (decision.action === "confirm" && ctx.hasUI) {
+    // (harness/foreign) rules all match here.
+    //
+    // Gated on hasUI by DEFAULT, unchanged: a rule suppresses a PROMPT, and a
+    // no-UI session has none, so it fails closed. The opt-in
+    // (/harness-rules headless on, persisted as applyWithoutUi) is the one way
+    // that default moves, and only a human can set it. It widens WHEN the
+    // user's existing approvals apply, never WHAT they cover — the rule set,
+    // its scope binding, and the hard boundaries above are untouched.
+    if (decision.action === "confirm" && (ctx.hasUI || rememberedRules.applyWithoutUi === true)) {
       const remember = rememberTargetFor(event, decision, ctx);
       if (
         remember !== null &&
@@ -2767,7 +2790,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   pi.registerCommand("harness-rules", {
     description: "Save, list, or revoke remembered soft-policy rules (Always-allow decisions)",
     getArgumentCompletions: (prefix) => {
-      const subs = ["list", "allow ", "revoke ", "clear"];
+      const subs = ["list", "allow ", "revoke ", "clear", "headless "];
       const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
       return matches.length > 0 ? matches.map((s) => ({ value: s, label: s.trim() })) : null;
     },
@@ -2779,6 +2802,26 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           ...renderRulesList(rememberedRules),
           "",
           "Save: /harness-rules allow <tool> <path>   Revoke: /harness-rules revoke <id>   Clear: /harness-rules clear",
+          `Apply without a confirmation UI: ${rememberedRules.applyWithoutUi === true ? "on" : "off"} (/harness-rules headless on|off)`,
+        ]);
+        return;
+      }
+      // The only switch that lets a confirm gate be satisfied with no UI. It
+      // does not create approvals - it decides whether the ones the user
+      // already saved apply when nobody can answer a dialog, which is what a
+      // non-interactive or piped session needs.
+      if (sub === "headless") {
+        const target = (parts[1] ?? "").toLowerCase();
+        if (target !== "on" && target !== "off") {
+          ctx.ui.notify("Usage: /harness-rules headless on|off", "warning");
+          return;
+        }
+        rememberedRules = { ...rememberedRules, applyWithoutUi: target === "on" };
+        persistRules();
+        emit("harness-rules", [
+          target === "on"
+            ? "Remembered rules now apply in sessions with no confirmation UI. Only calls matching a rule you already saved are allowed; everything else still fails closed."
+            : "Remembered rules no longer apply without a confirmation UI (default). A no-UI session fails closed on every confirm.",
         ]);
         return;
       }

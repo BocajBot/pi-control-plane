@@ -56,7 +56,15 @@ export function validateRules(value: unknown): RememberedRulesState | null {
     if (rule === null) return null;
     rules.push(rule);
   }
-  return { schemaVersion: RULES_SCHEMA_VERSION, rules, updatedAt: value.updatedAt };
+  if (value.applyWithoutUi !== undefined && typeof value.applyWithoutUi !== "boolean") return null;
+  return {
+    schemaVersion: RULES_SCHEMA_VERSION,
+    rules,
+    updatedAt: value.updatedAt,
+    // Absent stays absent rather than becoming an explicit false: an older
+    // entry carries no opinion, and the read side treats both as off.
+    ...(value.applyWithoutUi === undefined ? {} : { applyWithoutUi: value.applyWithoutUi }),
+  };
 }
 
 export interface RulesEntryLike {

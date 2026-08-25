@@ -13,8 +13,16 @@ export type Phase = (typeof PHASES)[number];
  * it any mutation unless an accepted task brief exists, and every allowed
  * call under it is logged as a diagnostic entry (audit trail for when nobody
  * is watching in real time) - see extension entry, tool_call handler.
+ *
+ * "auto" sits between attended and restricted: ordinary edits inside the
+ * project root stop asking, while everything a confirmation actually protects
+ * against - shell, deletion, writes outside the root, credential paths,
+ * harness tools - still asks. It is the level that makes a no-UI session
+ * usable, because the calls it allows never needed a dialog in the first
+ * place. It deliberately does NOT auto-approve what attended would have
+ * asked about for a reason.
  */
-export const AUTONOMY_LEVELS = ["read-only", "attended", "restricted", "unattended"] as const;
+export const AUTONOMY_LEVELS = ["read-only", "attended", "auto", "restricted", "unattended"] as const;
 export type Autonomy = (typeof AUTONOMY_LEVELS)[number];
 
 export const STATE_SCHEMA_VERSION = 1;
@@ -235,6 +243,18 @@ export interface RememberedRulesState {
   schemaVersion: typeof RULES_SCHEMA_VERSION;
   rules: RememberedRule[];
   updatedAt: string;
+  /**
+   * Honor remembered rules in a session with no confirmation UI.
+   *
+   * Default (absent or false) keeps the original invariant: a no-UI session
+   * fails closed even where a rule matches, because a rule suppresses a
+   * PROMPT and there is none to suppress. Turning it on is a deliberate user
+   * decision - "apply the approvals I already gave, unattended" - and it is
+   * the only way a non-interactive run can satisfy a confirm gate. Rules are
+   * still user-created and scope-bound, so this widens WHEN existing
+   * authority applies, never WHAT it covers.
+   */
+  applyWithoutUi?: boolean;
 }
 
 /**

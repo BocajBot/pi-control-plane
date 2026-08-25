@@ -915,6 +915,60 @@ test("Part 3: a remembered rule does not auto-allow without a UI (no-UI fails cl
   assert.match(blocked?.reason ?? "", /failing closed/i);
 });
 
+test("a remembered rule applies without a UI once the user opts in, and only for the rule's own target", async () => {
+  // The default above (fails closed with no UI) is unchanged. This is the
+  // explicit escape hatch for non-interactive sessions: it changes WHEN the
+  // approvals the user already saved apply, not WHAT they cover.
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.commands.get("harness-rules")!.handler("allow write out.txt", ctx);
+  await pi.commands.get("harness-rules")!.handler("headless on", ctx);
+
+  const noUi = makeCtx({ cwd: root, hasUI: false });
+  const allowed = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "out.txt", content: "y" } },
+    noUi,
+  );
+  assert.equal(allowed, undefined, "the rule the user saved now applies with no UI");
+
+  // A different target has no rule, so it still fails closed.
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "write", input: { path: "other.txt", content: "y" } },
+    noUi,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true, "the opt-in does not blanket-approve");
+  assert.match(blocked?.reason ?? "", /failing closed/i);
+});
+
+test("auto mode stamps its allow for the harness, exactly like a dialog approval", async () => {
+  // /mode auto is the user's standing answer for in-root edits; the stamp is
+  // how the harness layer consumes that answer instead of asking its own
+  // section-21 question (or failing closed with no UI).
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, hasUI: false });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("auto", ctx);
+
+  const event = { type: "tool_call", toolCallId: "c1", toolName: "write", input: { path: "in-root.txt", content: "x" } };
+  const result = await pi.emit("tool_call", event, ctx);
+  assert.equal(result, undefined, "auto mode allows the in-root write with no UI");
+  const stamp = (event as { __cpUserApproved?: { callId: string | null } }).__cpUserApproved;
+  assert.equal(stamp?.callId, "c1", "the allow is stamped per-callId for the harness");
+
+  // A call auto does NOT cover gets no stamp: it confirms (and with no UI,
+  // blocks) — the stamp never outruns the rule that earns it.
+  const shellEvent = { type: "tool_call", toolCallId: "c2", toolName: "bash", input: { command: "echo hi" } };
+  const blocked = (await pi.emit("tool_call", shellEvent, ctx)) as { block?: boolean };
+  assert.equal(blocked?.block, true);
+  assert.equal((shellEvent as { __cpUserApproved?: unknown }).__cpUserApproved, undefined);
+});
+
 // ---- Part 3 dialog: the in-prompt third option (Yes once / No / Always) ----
 // The attended per-call gate for a rememberable confirm is a single three-option
 // dialog (ctx.ui.custom + SelectList). "Always" saves exactly the rule
@@ -1337,7 +1391,7 @@ test("applied profile persists and is restored in a new session", async () => {
   assert.deepEqual([...pi2.activeTools].sort(), ["find", "grep", "ls", "read"], "profile toggles reapplied on restore");
 });
 
-test("mode cycle hotkey advances through all six modes", async () => {
+test("mode cycle hotkey advances through all seven modes", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
@@ -1345,6 +1399,8 @@ test("mode cycle hotkey advances through all six modes", async () => {
   assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Plan/);
   await pi.shortcuts.get("alt+p")!(ctx);
   assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(attended\)/);
+  await pi.shortcuts.get("alt+p")!(ctx);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(auto\)/);
   await pi.shortcuts.get("alt+p")!(ctx);
   assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(restricted\)/);
   await pi.shortcuts.get("alt+p")!(ctx);
