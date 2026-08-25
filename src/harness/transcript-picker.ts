@@ -16,6 +16,9 @@ export interface TranscriptEntry {
   model: string;
   objective: string;
   startedAt: string;
+  /** The child's own saved pi session file, when the run recorded one.
+   * This is what lets the picker swap the TUI into the sub-session. */
+  sessionFile: string | null;
 }
 
 /**
@@ -24,8 +27,13 @@ export interface TranscriptEntry {
  * the file - a transcript that exists must stay selectable.
  */
 export function parseTranscriptHeader(id: string, content: string): TranscriptEntry {
-  const entry: TranscriptEntry = { id, kind: "?", model: "?", objective: "(unknown objective)", startedAt: "" };
+  const entry: TranscriptEntry = { id, kind: "?", model: "?", objective: "(unknown objective)", startedAt: "", sessionFile: null };
   for (const line of content.split("\n", 8)) {
+    const sessionMatch = /^# session: (.+)$/.exec(line);
+    if (sessionMatch && sessionMatch[1].trim().length > 0) {
+      entry.sessionFile = sessionMatch[1].trim();
+      continue;
+    }
     const kindMatch = /^# kind: (\S+)\s+model: (.+?)\s+started: (\S+)$/.exec(line);
     if (kindMatch) {
       entry.kind = kindMatch[1];
@@ -52,7 +60,7 @@ export function renderTranscriptPicker(
   if (entries.length === 0) {
     return ["Delegate transcripts", "", "  (none recorded yet)", "", "  esc close"];
   }
-  const lines = [clip("Delegate transcripts — enter view, esc close", width), ""];
+  const lines = [clip("Delegate transcripts — enter open sub-session, t transcript text, esc close", width), ""];
   entries.forEach((entry, index) => {
     const cursor = index === selected ? "→ " : "  ";
     const when = entry.startedAt.replace(/T/, " ").replace(/\.\d+Z$/, "");

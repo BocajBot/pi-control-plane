@@ -2154,10 +2154,18 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
             try {
               fs.mkdirSync(paths.delegationTranscriptsDir, { recursive: true });
               transcriptFile = path.join(paths.delegationTranscriptsDir, `${built.contract.id}.log`);
+              // The child is a real, saved pi session; its file path is what
+              // lets the picker swap the TUI into it (Claude Code's
+              // sub-session view). Recorded in the header so the transcript
+              // alone is enough to find it later.
+              const childSessionFile =
+                (agent as { sessionManager?: { getSessionFile?: () => string | undefined } })
+                  .sessionManager?.getSessionFile?.() ?? "";
               fs.writeFileSync(transcriptFile, [
                 `# delegate transcript ${built.contract.id}`,
                 `# kind: ${p.kind}  model: ${p.model ?? "(inherited)"}  started: ${new Date().toISOString()}`,
                 `# objective: ${p.objective}`,
+                `# session: ${childSessionFile}`,
                 "",
               ].join("\n"));
             } catch {
@@ -2355,6 +2363,63 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
   };
 
   /**
+   * Swap the TUI into a delegate's own saved session - Claude Code's
+   * sub-session view: the child's full context, none of the parent's
+   * scrollback. The parent's session file is remembered so /harness back
+   * returns. switchSession lives on the COMMAND context; a shortcut-opened
+   * picker falls back to transcript text when it is absent.
+   */
+  // On disk, not in a module variable: switchSession re-activates extensions,
+  // so memory here does not survive the very swap this exists to undo.
+  const delegateReturnFile = path.join(os.homedir(), ".pi", "agent", "pi-harness", "delegate-return.json");
+  const readDelegateReturn = (): string | null => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(delegateReturnFile, "utf8")) as { returnTo?: unknown };
+      return typeof parsed.returnTo === "string" && parsed.returnTo.length > 0 ? parsed.returnTo : null;
+    } catch {
+      return null;
+    }
+  };
+  const writeDelegateReturn = (returnTo: string | null): void => {
+    try {
+      if (returnTo === null) fs.rmSync(delegateReturnFile, { force: true });
+      else fs.writeFileSync(delegateReturnFile, JSON.stringify({ returnTo, at: new Date().toISOString() }));
+    } catch {
+      /* back simply won't work; the picker and ctrl+r still do */
+    }
+  };
+  const openDelegateSubSession = async (ctx: ExtensionContext, entry: TranscriptEntry): Promise<void> => {
+    const commandCtx = ctx as Partial<ExtensionCommandContext> & ExtensionContext;
+    if (typeof commandCtx.switchSession !== "function") {
+      ctx.ui.notify(
+        "Swapping needs the command context: run /harness transcript (no argument) and choose the run there.",
+        "warning",
+      );
+      emitTranscript(entry.id);
+      return;
+    }
+    if (entry.sessionFile === null || !fs.existsSync(entry.sessionFile)) {
+      ctx.ui.notify("That run's session file is gone; showing the transcript text instead.", "warning");
+      emitTranscript(entry.id);
+      return;
+    }
+    const current = (ctx.sessionManager as { getSessionFile?: () => string | undefined }).getSessionFile?.();
+    // Return-path state is set BEFORE the await: after switchSession resolves
+    // this ctx is stale (pi throws on any use), so nothing after the await may
+    // touch it. The way-in notification uses the fresh sub-session ctx that
+    // withSession hands us - the one context that is valid there. No custom
+    // message is injected into the child (its content contract is message
+    // parts, learned via a live crash that persisted into the session file
+    // and poisoned every later replay of it).
+    if (typeof current === "string") writeDelegateReturn(current);
+    await commandCtx.switchSession(entry.sessionFile, {
+      withSession: async (sub) => {
+        sub.ui.notify(`Delegate sub-session ${entry.id}. Return with /harness back.`, "info");
+      },
+    });
+  };
+
+  /**
    * The selector the TUI shows for delegate sub-sessions (alt+d, and
    * /harness transcript with no argument). Mirrors the control plane's
    * profile picker: overlay list, enter replays the transcript into chat.
@@ -2374,12 +2439,13 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
     const entries = listDelegateTranscripts();
     transcriptModalOpen = true;
     try {
-      const chosen = await uiAny.custom<string | null>(
+      type PickerAction = { kind: "open" | "text"; entry: TranscriptEntry } | null;
+      const chosen = await uiAny.custom<PickerAction>(
         (
           tui: { requestRender(force?: boolean): void },
           _theme: unknown,
           _kb: unknown,
-          done: (r: string | null) => void,
+          done: (r: PickerAction) => void,
         ) => {
           let selectedIndex = 0;
           return {
@@ -2392,7 +2458,9 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
                 selectedIndex = (selectedIndex + 1) % entries.length;
                 tui.requestRender();
               } else if (entries.length > 0 && (data === "\r" || data === "\n")) {
-                done(entries[selectedIndex].id);
+                done({ kind: "open", entry: entries[selectedIndex] });
+              } else if (entries.length > 0 && data === "t") {
+                done({ kind: "text", entry: entries[selectedIndex] });
               } else if (data === "\x1b" || data === "\x03" || data === "q") {
                 done(null);
               }
@@ -2401,7 +2469,16 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
         },
         { overlay: true, overlayOptions: { width: "80%", maxHeight: "80%" } },
       );
-      if (chosen !== null) emitTranscript(chosen);
+      if (chosen !== null) {
+        if (chosen.kind === "text" || chosen.entry.sessionFile === null) {
+          if (chosen.kind === "open") {
+            ctx.ui.notify("This run predates sub-session recording; showing the transcript text instead.", "info");
+          }
+          emitTranscript(chosen.entry.id);
+        } else {
+          await openDelegateSubSession(ctx, chosen.entry);
+        }
+      }
     } finally {
       transcriptModalOpen = false;
     }
@@ -2549,6 +2626,20 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
           return;
         }
 
+        case "back": {
+          // Return from a delegate sub-session opened via the picker.
+          const target = readDelegateReturn();
+          if (target === null) {
+            emit("Harness", ["No main session recorded to return to. Use pi's session selector (ctrl+r) instead."]);
+            return;
+          }
+          writeDelegateReturn(null);
+          // Nothing after this await may touch ctx: it is stale once the
+          // session is replaced.
+          await (ctx as ExtensionCommandContext).switchSession(target);
+          return;
+        }
+
         case "transcript": {
           // The sub-session view: what the delegate actually did, replayed
           // from the per-contract transcript file the run wrote live.
@@ -2653,7 +2744,7 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
 
         default:
           emit("Harness", [
-            "/harness status | scope | authority <actor> | audit | transcript [contract-id] | recover | checkpoint <verified state> | workstate",
+            "/harness status | scope | authority <actor> | audit | transcript [contract-id] | back | recover | checkpoint <verified state> | workstate",
           ]);
       }
     },

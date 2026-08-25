@@ -7,6 +7,7 @@ const HEADER = [
   "# delegate transcript dlg_abc",
   "# kind: subagent  model: llama-swap/qwen3-8-27b  started: 2026-08-25T01:58:12.859Z",
   "# objective: Summarize the template",
+  "# session: /home/u/.pi/agent/sessions/x/child.jsonl",
   "",
   "[delegate turn started]",
 ].join("\n");
@@ -17,6 +18,12 @@ test("header parses into a picker entry", () => {
   assert.equal(entry.model, "llama-swap/qwen3-8-27b");
   assert.equal(entry.objective, "Summarize the template");
   assert.equal(entry.startedAt, "2026-08-25T01:58:12.859Z");
+  assert.equal(entry.sessionFile, "/home/u/.pi/agent/sessions/x/child.jsonl");
+});
+
+test("a pre-sub-session transcript (no session line) parses with sessionFile null", () => {
+  const entry = parseTranscriptHeader("dlg_old", "# delegate transcript dlg_old\n# objective: O\n");
+  assert.equal(entry.sessionFile, null);
 });
 
 test("a truncated or foreign file stays selectable with placeholders", () => {
