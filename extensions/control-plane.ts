@@ -2177,6 +2177,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           at: new Date().toISOString(),
         });
         recordReadCredit(event, ctx);
+        // P2: a remembered rule IS a human approval - the "Always" answer the
+        // user gave, replayed. Stamp it like the live dialog answer it stands
+        // in for, or the harness asks its own section-21 question about a call
+        // the user already approved (observed live: rule allowed
+        // harness_delegate, harness dialog still popped).
+        markConfirmedForHarness(event);
+        const backupResult = takeBackup(event, ctx);
+        if (backupResult !== undefined) return backupResult;
         const sandboxResult = applySandboxIfEnabled(event, ctx);
         if (!sandboxResult.ok) return { block: true, reason: sandboxResult.reason };
         return; // allowed by a remembered rule, no prompt

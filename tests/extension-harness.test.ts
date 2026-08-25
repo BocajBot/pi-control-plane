@@ -969,6 +969,24 @@ test("auto mode stamps its allow for the harness, exactly like a dialog approval
   assert.equal((shellEvent as { __cpUserApproved?: unknown }).__cpUserApproved, undefined);
 });
 
+test("a remembered-rule allow stamps the event for the harness, like the dialog answer it replays", async () => {
+  // Observed live: a rule allowed harness_delegate at this layer, then the
+  // harness asked its own section-21 question about the same call. The rule
+  // IS the user's "Always" answer, so it must carry the same P2 stamp.
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.commands.get("harness-rules")!.handler("allow write out.txt", ctx);
+
+  const event = { type: "tool_call", toolCallId: "r1", toolName: "write", input: { path: "out.txt", content: "x" } };
+  const result = await pi.emit("tool_call", event, ctx);
+  assert.equal(result, undefined, "the rule allows without a prompt");
+  const stamp = (event as { __cpUserApproved?: { callId: string | null } }).__cpUserApproved;
+  assert.equal(stamp?.callId, "r1");
+});
+
 // ---- Part 3 dialog: the in-prompt third option (Yes once / No / Always) ----
 // The attended per-call gate for a rememberable confirm is a single three-option
 // dialog (ctx.ui.custom + SelectList). "Always" saves exactly the rule
