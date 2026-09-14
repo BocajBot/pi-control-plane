@@ -40,7 +40,7 @@ import {
   type ScopeState,
 } from "./types.ts";
 import { describeScope } from "./scope.ts";
-import { makeId, nowIso, sha256, type Clock, type RandomSource } from "./util.ts";
+import { isRecord, makeId, nowIso, sha256, type Clock, type RandomSource } from "./util.ts";
 
 export interface AuditContext {
   session: string;
@@ -113,10 +113,6 @@ export function makeCorrectionEvent(
     clock,
     random,
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

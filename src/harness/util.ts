@@ -103,3 +103,7 @@ export function projectKey(projectRoot: string): string {
 export function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

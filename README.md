@@ -248,6 +248,7 @@ changes nothing about scope, approval posture, or the current task.
 
 | Command | What it does |
 |---|---|
+| `/harness help` | Command guide, available even before a harness session starts; tab completion includes transcript navigation |
 | `/harness status` | Session, project, scope, coordinator, autonomy, approval posture, sandbox availability |
 | `/harness scope [approve <path>\|network on\|off]` | Show scope; grant a wider one; grant or revoke sandbox networking |
 | `/harness authority <actor>` | What that actor may ever do, plus the constitutional rules no model can change |
@@ -257,12 +258,18 @@ changes nothing about scope, approval posture, or the current task.
 | `/harness checkpoint <verified state>` | Record a verified resume point and flush `WORKSTATE.md` |
 | `/harness-mode reasoning\|autonomy\|approval <value>` | Reasoning style and autonomy are independent controls |
 | `/harness-task list\|new\|status` | The explicit task queue — nothing becomes a task by being mentioned |
+| `/harness-delegate [list]` | Show each delegate's latest status and pending read root, with approve/deny commands |
 | `/harness-decide`, `/harness-incident` | First-class decision and incident records |
 | `/harness-memory list [all]\|search\|add [global\|project]` | Durable memory, typed as fact / assumption / opinion, and scoped global or per project |
 | `/harness-review list\|run [id]` | The retrospective review queue, and running a reviewer over an archived session |
 | `/harness-policy show\|set <level> <field> <value>` | Durable soft policy: global, device and project layers, resolved broadest-first |
 | `/harness-identity show\|add\|remove` | Who Pi is across sessions and models. User-writable only; injected into every turn |
 | `/harness-goal list\|new\|status\|link\|check` | Goals above tasks and relationships between projects. Advisory, never permissions |
+
+Task commands complete project task IDs and only valid next statuses. Delegate
+approve/deny commands complete blocked contract IDs; approval still requires the
+exact requested root inside parent scope. Listing or completing commands grants
+no authority.
 
 Tools it registers: `pi_harness_bash` (the only permitted shell path),
 `harness_request_scope`, `harness_memory_search`, `harness_note`,

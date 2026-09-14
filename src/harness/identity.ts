@@ -21,7 +21,7 @@
  */
 
 import { HARNESS_SCHEMA_VERSION, type Actor, type IdentityState } from "./types.ts";
-import { nowIso, type Clock } from "./util.ts";
+import { isRecord, nowIso, type Clock } from "./util.ts";
 
 export type IdentityField = "principle" | "preference" | "behavior";
 
@@ -34,10 +34,6 @@ export function emptyIdentity(clock: Clock = () => new Date()): IdentityState {
     updatedAt: nowIso(clock),
     updatedBy: "user",
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function stringArray(value: unknown): string[] | null {

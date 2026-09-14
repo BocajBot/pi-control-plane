@@ -25,7 +25,7 @@ import {
   type ModelConfiguration,
   type ReasoningMode,
 } from "./types.ts";
-import { nowIso, projectKey, type Clock } from "./util.ts";
+import { isRecord, nowIso, projectKey, type Clock } from "./util.ts";
 
 /** Override for tests and for running two harness instances side by side.
  * Read once at construction, never at each access, so a mid-session env
@@ -260,10 +260,6 @@ export function defaultConfig(clock: Clock = () => new Date()): HarnessConfig {
     sandboxShadowFiles: [],
     updatedAt: nowIso(clock),
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function stringArray(value: unknown): string[] | null {

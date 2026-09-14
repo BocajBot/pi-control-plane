@@ -186,6 +186,7 @@ import {
   HARNESS_SCHEMA_VERSION,
   POSTURE_FIELDS,
   REASONING_MODES,
+  TASK_STATUSES,
   type ApprovalPolicy,
   type AuditEventType,
   type AutonomyMode,
@@ -2500,24 +2501,45 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
     return session;
   };
 
+  const harnessCommands = [
+    { value: "help", usage: "help", description: "Show this command guide" },
+    { value: "status", usage: "status", description: "Show session, task queue, scope, and approval posture" },
+    { value: "scope ", usage: "scope", description: "Inspect allowed roots and network access" },
+    { value: "authority ", usage: "authority <actor>", description: "Inspect an actor's permissions" },
+    { value: "audit", usage: "audit", description: "Read recent audit events" },
+    { value: "capability ", usage: "capability", description: "Inspect available tools and exceptions" },
+    { value: "transcript ", usage: "transcript [contract-id]", description: "Open a delegate transcript" },
+    { value: "back", usage: "back", description: "Return from a delegate session" },
+    { value: "recover", usage: "recover", description: "Reconcile state and report interrupted work" },
+    { value: "checkpoint ", usage: "checkpoint <verified state>", description: "Save a verified resume point" },
+    { value: "workstate", usage: "workstate", description: "Write the current WORKSTATE summary" },
+  ];
+  const showHarnessHelp = (unknown?: string) => emit("Harness help", [
+    ...(unknown ? [`Unknown subcommand: ${unknown}`, ""] : []),
+    ...harnessCommands.map(({ usage, description }) => `/harness ${usage} — ${description}`),
+    "",
+    "/harness-task list | new <objective> — Manage the task queue",
+    "/harness-mode — Show reasoning, autonomy, and approval controls",
+    "/harness-delegate list — Inspect delegates and pending read requests",
+    "/harness-review list — Inspect the retrospective review queue",
+  ]);
+
   pi.registerCommand("harness", {
-    description: "Harness status, scope, authority, audit, recovery, and checkpoints",
+    description: "Harness help, status, scope, authority, audit, recovery, and checkpoints",
     getArgumentCompletions: (prefix) => {
-      const subs = [
-        "status",
-        "scope ",
-        "authority ",
-        "audit",
-        "capability ",
-        "recover",
-        "checkpoint ",
-        "workstate",
-      ];
-      const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
-      return matches.length > 0 ? matches.map((s) => ({ value: s, label: s.trim() })) : null;
+      const matches = harnessCommands.filter(({ value }) => value.startsWith(prefix.toLowerCase()));
+      return matches.length > 0 ? matches.map(({ value }) => ({ value, label: value.trim() })) : null;
     },
     handler: async (args, ctx) => {
       const [sub = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      if (sub === "help") {
+        showHarnessHelp();
+        return;
+      }
+      if (!harnessCommands.some(({ value }) => value.trim() === sub)) {
+        showHarnessHelp(sub);
+        return;
+      }
       const state = requireSession();
       if (state === null || store === null) return;
 
@@ -2742,10 +2764,6 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
           return;
         }
 
-        default:
-          emit("Harness", [
-            "/harness status | scope | authority <actor> | audit | transcript [contract-id] | back | recover | checkpoint <verified state> | workstate",
-          ]);
       }
     },
   });
@@ -2776,6 +2794,24 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
 
   pi.registerCommand("harness-task", {
     description: "Create, list, or advance an explicit harness task",
+    getArgumentCompletions: (prefix) => {
+      const tasks = session && store
+        ? store.readTasks().filter((task) => task.project === session!.projectRoot)
+        : [];
+      const statusPrefix = prefix.match(/^status\s+(\S+)\s+(.*)$/);
+      let values: string[];
+      if (statusPrefix) {
+        const task = tasks.find((candidate) => candidate.id === statusPrefix[1]);
+        values = task ? TASK_STATUSES.filter((status) => status !== task.status && transition(task, status).ok)
+          .map((status) => `status ${task.id} ${status}`) : [];
+      } else if (prefix.startsWith("status ")) {
+        values = tasks.map((task) => `status ${task.id} `);
+      } else {
+        values = ["list", "new ", "status "];
+      }
+      const matches = values.filter((value) => value.startsWith(prefix));
+      return matches.length > 0 ? matches.map((value) => ({ value, label: value.trim() })) : null;
+    },
     handler: async (args) => {
       const state = requireSession();
       if (state === null || store === null) return;
@@ -2831,15 +2867,37 @@ export default async function piHarnessExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("harness-delegate", {
-    description: "Resolve a blocked delegate read request: /harness-delegate approve|deny <contract-id> [exact-root]",
+    description: "List delegates or resolve a blocked read request: list|approve|deny",
+    getArgumentCompletions: (prefix) => {
+      const action = prefix.match(/^(approve|deny) /)?.[1];
+      const values = action && session && store
+        ? latestDelegationJobs(store.readDelegations().records)
+          .filter((job) => job.status === "blocked")
+          .map((job) => `${action} ${job.contractId}${action === "approve" ? " " : ""}`)
+        : ["list", "approve ", "deny "];
+      const matches = values.filter((value) => value.startsWith(prefix));
+      return matches.length > 0 ? matches.map((value) => ({ value, label: value.trim() })) : null;
+    },
     handler: async (args, ctx) => {
       const state = requireSession();
       if (state === null || store === null) return;
       const [action, contractId, suppliedRoot] = args.trim().split(/\s+/).filter(Boolean);
-      const job = latestDelegationJobs(store.readDelegations().records)
-        .find((candidate) => candidate.contractId === contractId);
+      const jobs = latestDelegationJobs(store.readDelegations().records);
+      if (!action || action === "list") {
+        emit("Harness delegation", jobs.length > 0 ? jobs.flatMap((job) => [
+          `${job.contractId} [${job.status}] ${job.objective}`,
+          ...(job.status === "blocked" ? [
+            `Requested read root: ${job.pendingReadRoot ?? "(not recorded)"}`,
+            `/harness-delegate approve ${job.contractId} <exact-read-root>`,
+            `/harness-delegate deny ${job.contractId}`,
+          ] : []),
+        ]) : ["No delegation jobs recorded for this project."]);
+        return;
+      }
+      const job = jobs.find((candidate) => candidate.contractId === contractId);
       if ((action !== "approve" && action !== "deny") || !contractId || job?.status !== "blocked") {
         emit("Harness delegation", [
+          "/harness-delegate list",
           "/harness-delegate approve <blocked-contract-id> <exact-read-root>",
           "/harness-delegate deny <blocked-contract-id>",
         ]);

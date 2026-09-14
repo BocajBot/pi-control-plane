@@ -36,7 +36,7 @@ import {
   validateAuditTip,
   verifyAuditChain,
 } from "./audit.ts";
-import { idKind } from "./util.ts";
+import { idKind, isRecord as isRecordObject } from "./util.ts";
 import { emptyIdentity, validateIdentity } from "./identity.ts";
 import { validateDelegationJob } from "./delegation-jobs.ts";
 import { validateImprovementProposal, type ImprovementProposal } from "./decision-proposal.ts";
@@ -266,10 +266,6 @@ export function appendJsonl(file: string, record: unknown): void {
 /* ------------------------------------------------------------------ *
  * Store
  * ------------------------------------------------------------------ */
-
-function isRecordObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** Permissive validator for the versioned record kinds whose full shape is
  * asserted at construction time. Rejects anything that is not an object with

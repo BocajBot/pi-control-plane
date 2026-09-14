@@ -17,12 +17,17 @@ import { after, test } from "node:test";
 
 import piHarnessExtension from "../extensions/pi-harness.ts";
 import { defaultConfig } from "../src/harness/config.ts";
+import { HARNESS_SCHEMA_VERSION, type DelegationJobRecord } from "../src/harness/types.ts";
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
+type Command = {
+  handler: (args: string, ctx: unknown) => Promise<void>;
+  getArgumentCompletions?: (prefix: string) => { value: string; label: string }[] | null;
+};
 
 class FakePi {
   handlers = new Map<string, Handler[]>();
-  commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
+  commands = new Map<string, Command>();
   tools = new Map<string, { name: string; execute: (...args: unknown[]) => unknown }>();
   entries: { customType: string; data: unknown }[] = [];
   activeTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -32,7 +37,7 @@ class FakePi {
     list.push(handler);
     this.handlers.set(event, list);
   }
-  registerCommand(name: string, options: { handler: (args: string, ctx: unknown) => Promise<void> }) {
+  registerCommand(name: string, options: Command) {
     this.commands.set(name, options);
   }
   registerShortcut() {}
@@ -312,6 +317,37 @@ test("MO3: a model switch is audited and leaves scope and approval untouched", a
   assert.match(audit, /authority unchanged/);
 });
 
+test("harness help and unknown-command guidance work before session startup", async () => {
+  const pi = new FakePi();
+  await piHarnessExtension(pi as never);
+  const command = pi.commands.get("harness")!;
+  await command.handler("help", makeCtx(process.cwd()));
+  assert.match(pi.output(), /\/harness transcript \[contract-id\]/);
+  assert.match(pi.output(), /\/harness-task list/);
+  assert.doesNotMatch(pi.output(), /No harness session is active/);
+  await command.handler("statuz", makeCtx(process.cwd()));
+  assert.match(pi.output(), /Unknown subcommand: statuz/);
+  assert.match(pi.output(), /\/harness status/);
+});
+
+test("harness completion includes help and transcript navigation", async () => {
+  const pi = new FakePi();
+  await piHarnessExtension(pi as never);
+  const complete = pi.commands.get("harness")!.getArgumentCompletions!;
+  const values = complete("")!.map(({ value }) => value.trim());
+  for (const name of ["help", "transcript", "back"]) assert.ok(values.includes(name));
+  assert.deepEqual(complete("TR"), [{ value: "transcript ", label: "transcript" }]);
+  assert.equal(complete("unknown"), null);
+});
+
+test("harness help leaves persisted audit state unchanged", async () => {
+  const { pi, harnessHome, ctx } = await boot();
+  const auditFile = path.join(projectDir(harnessHome), "audit.jsonl");
+  const before = fs.readFileSync(auditFile, "utf8");
+  await pi.commands.get("harness")!.handler("help", ctx);
+  assert.equal(fs.readFileSync(auditFile, "utf8"), before);
+});
+
 test("the status command reports scope, authority posture, and sandbox availability", async () => {
   const { pi, root, ctx } = await boot();
   await pi.commands.get("harness")!.handler("status", ctx);
@@ -320,6 +356,65 @@ test("the status command reports scope, authority posture, and sandbox availabil
   assert.match(output, /Autonomy:\s+guided/);
   assert.match(output, /Approval:\s+mutations/);
   assert.match(output, /Sandbox:/);
+});
+
+test("task completion suggests project tasks and permitted transitions without changing tasks", async () => {
+  const { pi, harnessHome, ctx } = await boot();
+  const command = pi.commands.get("harness-task")!;
+  await command.handler("new inspect workflow", ctx);
+  const tasksFile = path.join(harnessHome, "tasks.json");
+  const savedTasks = JSON.parse(fs.readFileSync(tasksFile, "utf8"));
+  fs.writeFileSync(tasksFile, JSON.stringify([
+    ...savedTasks,
+    { ...savedTasks[0], id: "tsk_44444444-4444-4444-8444-444444444444", project: path.join(harnessHome, "other-project") },
+  ]));
+  const before = fs.readFileSync(tasksFile, "utf8");
+  const [task] = JSON.parse(before);
+  const complete = command.getArgumentCompletions!;
+  assert.deepEqual(complete("status "), [{ value: `status ${task.id} `, label: `status ${task.id}` }]);
+  const statuses = complete(`status ${task.id} `)!.map(({ value }) => value.split(" ").at(-1)).sort();
+  assert.deepEqual(statuses, ["abandoned", "active", "blocked"]);
+  assert.equal(complete(`status ${task.id} done`), null);
+  assert.equal(complete("status missing "), null);
+  assert.equal(fs.readFileSync(tasksFile, "utf8"), before);
+});
+
+test("delegate listing and completion use latest job states without granting authority", async () => {
+  const { pi, root, harnessHome, ctx } = await boot();
+  const command = pi.commands.get("harness-delegate")!;
+  await command.handler("list", ctx);
+  assert.match(pi.output(), /No delegation jobs recorded/);
+  const blocked: DelegationJobRecord = {
+    schemaVersion: HARNESS_SCHEMA_VERSION,
+    id: "dlg_11111111-1111-4111-8111-111111111111",
+    contractId: "dlg_11111111-1111-4111-8111-111111111111",
+    resumesContract: null, approvalDecisionId: null,
+    parentSession: "ses_22222222-2222-4222-8222-222222222222",
+    parentActor: "coordinator", kind: "subagent", objective: "inspect workflow",
+    readRoots: [root], autonomy: "guided", approvalPolicy: "mutations",
+    capabilities: ["scoped_read"], status: "blocked", pendingReadRoot: path.join(root, "src"),
+    detail: "needs source", ownerPid: process.pid, at: new Date().toISOString(), repoAnchor: null,
+  };
+  const completed = { ...blocked, status: "completed" };
+  const pending = {
+    ...blocked, id: "dlg_33333333-3333-4333-8333-333333333333",
+    contractId: "dlg_33333333-3333-4333-8333-333333333333",
+  };
+  const directory = projectDir(harnessHome);
+  const jobsFile = path.join(directory, "delegations.jsonl");
+  const auditFile = path.join(directory, "audit.jsonl");
+  const records = [blocked, completed, pending].map((job) => JSON.stringify(job)).join("\n") + "\n";
+  fs.writeFileSync(jobsFile, records);
+  const auditBefore = fs.readFileSync(auditFile, "utf8");
+  await command.handler("", ctx);
+  assert.ok(pi.output().includes(`${blocked.id} [completed]`));
+  assert.ok(!pi.output().includes(`${blocked.id} [blocked]`));
+  assert.ok(pi.output().includes(`Requested read root: ${pending.pendingReadRoot}`));
+  const complete = command.getArgumentCompletions!;
+  assert.deepEqual(complete("deny "), [{ value: `deny ${pending.id}`, label: `deny ${pending.id}` }]);
+  assert.deepEqual(complete("approve "), [{ value: `approve ${pending.id} `, label: `approve ${pending.id}` }]);
+  assert.equal(fs.readFileSync(jobsFile, "utf8"), records);
+  assert.equal(fs.readFileSync(auditFile, "utf8"), auditBefore);
 });
 
 test("the authority command lists the constitutional rules a model cannot change", async () => {
