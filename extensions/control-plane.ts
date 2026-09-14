@@ -131,12 +131,26 @@ import {
   type VerifyAuditEntry,
 } from "../src/control-plane/verify.ts";
 import {
+  DEFAULT_TRANSCRIPTION_BASE_URL,
+  DEFAULT_TRANSCRIPTION_LANGUAGE,
+  DEFAULT_TRANSCRIPTION_MODEL,
+  formatTranscript,
+  type PostAudio,
+  transcribeAudio,
+} from "../src/control-plane/transcription.ts";
+import {
   DEFAULT_SEARXNG_BASE_URL,
   formatSearchResults,
   type GetFetch,
   MAX_RESULTS as MAX_SEARCH_RESULTS,
   searchSearxng,
 } from "../src/control-plane/websearch.ts";
+
+/** Transcription measures 0.03-0.04x realtime on real 8kHz voicemails now
+ * that it runs on the GPU, so this is a very generous ceiling: it exists to
+ * cover a llama-swap cold start that may first evict a 23 GiB chat model,
+ * not a typical HTTP round trip. */
+const TRANSCRIPTION_TIMEOUT_MS = 900_000;
 
 const STATUS_KEY = "control-plane";
 const WIDGET_KEY = "control-plane-context";
@@ -1911,6 +1925,93 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         const baseUrl = process.env.PI_CONTROL_PLANE_SEARXNG_URL ?? DEFAULT_SEARXNG_BASE_URL;
         const outcome = await searchSearxng(baseUrl, query, fetchGet, MAX_SEARCH_RESULTS);
         return { output: formatSearchResults(outcome) } as never;
+      },
+    });
+
+    // ---- audio transcription tool (whisper-voicemail, see transcription.ts) ----
+    // Backed by the `whisper-voicemail` llama-swap model. Read-only in the
+    // same sense as local_web_search: it uploads a file the user pointed at
+    // and returns text, mutating nothing.
+    pi.registerTool({
+      name: "transcribe_audio",
+      label: "Transcribe Audio",
+      // Pi executes sibling tool calls in parallel unless any tool in the
+      // batch opts into sequential execution. whisper-server owns one mutable
+      // model context: two simultaneous uploads both returned HTTP 200 in a
+      // live directory test, but their text drifted from the deterministic
+      // single-file baselines. Serialize the whole sibling batch whenever it
+      // contains transcription so each result has an isolated inference.
+      executionMode: "sequential",
+      description:
+        "Transcribe a voicemail, call recording or other audio/video file to plain text using the local whisper large-v3-turbo model. Accepts any ffmpeg-readable container (wav, mp3, mp4, m4a, ogg, opus, ...). Phone numbers come back as digits (555-1234), never spelled out as words. Read-only: uploads the file to a loopback service and returns text.",
+      promptSnippet:
+        "transcribe_audio(path) — transcribe a local audio/video file to text via the local whisper model",
+      parameters: T.Object({
+        path: T.String({
+          description: "Path to the audio or video file to transcribe.",
+        }),
+        language: T.Optional(
+          T.String({
+            description:
+              'Spoken-language hint such as "en", or "auto" to let the model detect it. Defaults to "en".',
+          }),
+        ),
+      }) as never,
+      execute: async (_toolCallId, params) => {
+        const { path: audioPath, language } = params as { path: string; language?: string };
+        const resolved = path.resolve(audioPath.replace(/^~(?=$|\/)/, os.homedir()));
+
+        let bytes: Buffer;
+        try {
+          const stat = fs.statSync(resolved);
+          if (!stat.isFile()) {
+            return {
+              content: [{ type: "text", text: `Transcription failed: not a file: ${resolved}` }],
+            } as never;
+          }
+          bytes = fs.readFileSync(resolved);
+        } catch {
+          return {
+            content: [
+              { type: "text", text: `Transcription failed: audio file not found: ${resolved}` },
+            ],
+          } as never;
+        }
+
+        // See TRANSCRIPTION_TIMEOUT_MS: a generous ceiling covering a
+        // llama-swap cold start, not a typical HTTP call.
+        const postAudio: PostAudio = async (url, request) => {
+          const form = new FormData();
+          form.append("file", new Blob([request.bytes]), request.filename);
+          form.append("model", request.model);
+          form.append("response_format", "json");
+          form.append("temperature", "0");
+          // Always sent, including the literal "auto": whisper-server runs
+          // with `-l en`, so omitting it would mean English, not detection.
+          form.append("language", request.language);
+          const res = await fetch(url, {
+            method: "POST",
+            body: form,
+            signal: AbortSignal.timeout(TRANSCRIPTION_TIMEOUT_MS),
+          });
+          return { ok: res.ok, status: res.status, json: () => res.json() as Promise<unknown> };
+        };
+
+        const baseUrl =
+          process.env.PI_CONTROL_PLANE_TRANSCRIBE_URL ?? DEFAULT_TRANSCRIPTION_BASE_URL;
+        const outcome = await transcribeAudio(
+          baseUrl,
+          {
+            filename: path.basename(resolved),
+            bytes,
+            language: language ?? DEFAULT_TRANSCRIPTION_LANGUAGE,
+            model: process.env.PI_CONTROL_PLANE_TRANSCRIBE_MODEL ?? DEFAULT_TRANSCRIPTION_MODEL,
+          },
+          postAudio,
+        );
+        return {
+          content: [{ type: "text", text: formatTranscript(outcome) }],
+        } as never;
       },
     });
   }

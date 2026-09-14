@@ -620,6 +620,34 @@ test("local_web_search tool: registered read-only and reachable even outside Exe
   assert.ok(result.output.length > 0);
 });
 
+test("transcribe_audio tool: registered sequentially and returns Pi-native content", async () => {
+  const pi = await boot();
+  const tool = pi.tools.get("transcribe_audio");
+  assert.ok(tool, "transcribe_audio must be registered");
+  assert.equal(
+    tool!.executionMode,
+    "sequential",
+    "multiple voicemail calls must not race through whisper-server's one model context",
+  );
+  // A path that cannot exist proves the wiring end to end without needing
+  // llama-swap running: the tool must return a structured failure string
+  // rather than throwing.
+  const result = (await tool!.execute(
+    "call-1",
+    { path: path.join(os.tmpdir(), "pi-control-plane-no-such-audio.wav") },
+    undefined,
+    undefined,
+    {},
+  )) as { content: { type: string; text: string }[]; output?: unknown };
+  assert.equal(result.output, undefined, "legacy { output } results crash Pi's interactive renderer");
+  assert.deepEqual(
+    result.content.map(({ type }) => type),
+    ["text"],
+    "the TUI expects AgentToolResult.content to be an array of content blocks",
+  );
+  assert.match(result.content[0]?.text ?? "", /Transcription failed: audio file not found/);
+});
+
 test("Unattended: tool_call is blocked without an accepted task, and logs every allowed call once a task exists", async () => {
   const pi = await boot();
   const root = tmpRoot();
