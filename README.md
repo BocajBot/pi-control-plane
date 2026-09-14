@@ -235,3 +235,18 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 npm test        # 77 tests, no dependencies, uses Node's built-in test runner
 /reload         # inside pi, after editing extension code
 ```
+
+## Additions restored 2026-09-14 (control plane only, no harness)
+
+Cherry-picked from branch `harness-refactor-2026-09-14` without `pi-harness`:
+
+- `transcribe_audio` tool (local whisper; `bin/transcribe-voicemail.ts`; "voicemail" profile)
+- read-before-edit hard rule, backup-before-edit (pre-mutation snapshot, fails closed)
+- reads free by default with a sensitive-path denylist; declined out-of-scope reads recorded
+- read-only shell default; Yes / No / Always on every confirm; "Always (remember)" rules that suppress repeat prompts
+- attended phase-switch dialog on phase-blocked mutating tools
+- auto mode (accept-edits), headless rules opt-in, shift+tab mode cycle, `/effort`
+- denial hints name `/mode`
+
+Code paths that key on harness tool names (`harness_delegate`, `harness_request_scope`, `pi_harness_bash`) are
+still present as string matches; without the harness extension they never fire.
