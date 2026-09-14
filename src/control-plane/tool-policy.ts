@@ -34,45 +34,16 @@ import {
  * tool registry is a flat last-registered-wins map (no picker/disambiguation
  * the way colliding command names get), so a same-named tool from another
  * installed extension would silently and completely shadow this one. */
-/** "transcribe_audio" (see transcription.ts) reads one file the user named
- * and returns text; it writes nothing, so it is a read tool by the same
- * reasoning as local_web_search above. */
-export const READ_TOOLS: ReadonlySet<string> = new Set([
-  "read",
-  "grep",
-  "find",
-  "ls",
-  "local_web_search",
-  "transcribe_audio",
-]);
+export const READ_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls", "local_web_search"]);
 export const MUTATING_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
 export const SHELL_TOOLS: ReadonlySet<string> = new Set(["bash"]);
-/** The harness's own sandboxed shell. Classified distinctly from a bare `bash`
- * so it is labelled "shell" (not "unknown-tool") and its target resolves to the
- * scope root it runs in - but it is NEVER routed through Restricted's allowBash
- * opt-in (that would turn today's unknown-tool block into a confirm). It stays
- * blocked wherever an unknown tool is blocked; classification is non-loosening. */
-export const HARNESS_SHELL_TOOLS: ReadonlySet<string> = new Set(["pi_harness_bash"]);
-/** The harness's own meta/control tools. Named so the confirm shows the tool
- * instead of "unknown-tool / rationale Unavailable"; decision behaviour is
- * identical to the unknown path (confirm attended, block otherwise). */
-export const HARNESS_META_TOOLS: ReadonlySet<string> = new Set([
-  "harness_delegate",
-  "harness_request_scope",
-  "harness_memory_search",
-  "harness_note",
-  "harness_set_posture",
-  "harness_find_capability",
-]);
 
-export type ToolCategory = "read" | "mutate" | "shell" | "harness-shell" | "harness" | "unknown";
+export type ToolCategory = "read" | "mutate" | "shell" | "unknown";
 
 export function classifyTool(toolName: string): ToolCategory {
   if (READ_TOOLS.has(toolName)) return "read";
   if (MUTATING_TOOLS.has(toolName)) return "mutate";
   if (SHELL_TOOLS.has(toolName)) return "shell";
-  if (HARNESS_SHELL_TOOLS.has(toolName)) return "harness-shell";
-  if (HARNESS_META_TOOLS.has(toolName)) return "harness";
   return "unknown";
 }
 
@@ -81,10 +52,7 @@ export function riskCategoryFor(toolName: string): RiskCategory {
     case "read":
       return "read";
     case "shell":
-    case "harness-shell":
       return "shell";
-    case "harness":
-      return "harness-tool";
     case "mutate":
       return toolName === "write" ? "file-write" : "file-edit";
     default:
@@ -279,10 +247,9 @@ function confirm(
   return { action: "confirm", rule, reason, riskCategory, insideRoot };
 }
 
-const HINT_PHASE =
-  "Mutation is only possible in an Execute mode: /mode execute (or /mode execute-restricted / execute-unattended).";
+const HINT_PHASE = "Mutation is only possible in the Execute phase: /phase execute (autonomy must also permit it).";
 const HINT_AUTONOMY =
-  "Switch to an Execute mode for this to run: /mode execute (confirm each risky action) or /mode execute-restricted (project-bound policy).";
+  "Raise autonomy for this to run: /autonomy attended (confirm each risky action) or /autonomy restricted (project-bound policy).";
 
 export function evaluateToolCall(input: EvaluateInput): ToolDecision {
   const { toolName, guardActive, phase, autonomy, projectRoot, cwd, policy, ops } = input;
@@ -317,11 +284,6 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
     insideRoot = isInsideRoot(canonical, projectRoot);
   }
 
-  // The harness's own sandboxed shell runs with its cwd at the scope root and
-  // the scope root as its only writable mount, so it operates inside the project
-  // root by construction - report that instead of "Unavailable".
-  if (category === "harness-shell") insideRoot = true;
-
   // Read-oriented tools: allowed in every phase, subject to autonomy checks.
   if (category === "read") {
     // Unattended reuses Restricted's read policy unchanged: observation is
@@ -345,10 +307,7 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
       }
       return allow("restricted:read", risk, insideRoot);
     }
-    // Auto inherits attended's read posture: a read outside the project root
-    // is still a confirmation, because leaving the root is the thing being
-    // checked and auto only relaxes editing inside it.
-    if ((autonomy === "attended" || autonomy === "auto") && insideRoot === false) {
+    if (autonomy === "attended" && insideRoot === false) {
       return confirm(
         "attended:read-outside-root",
         `Read target "${canonical}" is outside the project root.`,
@@ -373,51 +332,24 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
   // Execute phase: autonomy decides.
   if (autonomy === "read-only") {
     const detail =
-      category === "shell" || category === "harness-shell"
+      category === "shell"
         ? "Shell execution is entirely blocked in Read-only mode; commands are never pattern-parsed to decide safety."
-        : category === "unknown" || category === "harness"
-          ? `Tool "${toolName}" is not classified as read-only and is treated as unsafe here.`
+        : category === "unknown"
+          ? `Tool "${toolName}" is not classified as read-only. Unknown tools are treated as unsafe.`
           : `Tool "${toolName}" can modify state.`;
     return block("autonomy:read-only", `Read-only mode blocks this call. ${detail}`, risk, insideRoot, HINT_AUTONOMY);
   }
 
-  // Auto: the level that stops asking about ordinary editing and keeps asking
-  // about everything else. Deliberately narrow - a file write or edit, with a
-  // resolved path, inside the project root, and not a protected path. Anything
-  // failing one of those conditions falls through to the attended branch below
-  // and is confirmed exactly as before, so the set of calls that reach the user
-  // shrinks but never silently grows.
-  if (autonomy === "auto" && (risk === "file-write" || risk === "file-edit") && insideRoot === true) {
-    // The deny patterns still apply. Auto is about not re-asking for routine
-    // edits, not about reaching paths a confirmation existed to protect - a
-    // credential file inside the root is exactly such a path.
-    if (canonical !== null && policy !== null) {
-      const denied = matchesDenyPatterns(canonical, policy);
-      if (denied !== null) {
-        return confirm(
-          "auto:credential-path",
-          `"${canonical}" matches a protected path pattern (${denied}), so Auto mode still asks.`,
-          risk,
-          insideRoot,
-        );
-      }
-    }
-    return allow("auto:in-root-edit", risk, insideRoot);
-  }
-
-  if (autonomy === "attended" || autonomy === "auto") {
+  if (autonomy === "attended") {
     const target =
-      category === "shell" || category === "harness-shell"
+      category === "shell"
         ? "a shell command"
-        : category === "harness"
-          ? `the harness tool "${toolName}"`
-          : canonical !== null
-            ? `"${canonical}"`
-            : "an unspecified target";
-    const levelLabel = autonomy === "auto" ? "Auto" : "Attended";
+        : canonical !== null
+          ? `"${canonical}"`
+          : "an unspecified target";
     return confirm(
-      `${autonomy}:${category}`,
-      `${levelLabel} mode requires explicit confirmation before ${riskLabel(risk)} affecting ${target}.`,
+      `attended:${category}`,
+      `Attended mode requires explicit confirmation before ${riskLabel(risk)} affecting ${target}.`,
       risk,
       insideRoot,
     );
@@ -456,7 +388,7 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
         "Shell execution is blocked by the Restricted policy (allowBash: false). Commands are never pattern-parsed to decide safety.",
         risk,
         insideRoot,
-        "Use /mode execute to approve individual shell commands interactively.",
+        "Use /autonomy attended to approve individual shell commands interactively.",
       );
     }
     return confirm(
@@ -466,22 +398,13 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
       insideRoot,
     );
   }
-  if (category === "unknown" || category === "harness" || category === "harness-shell") {
-    // Non-loosening: the harness shell and harness meta-tools stay blocked in
-    // Restricted exactly as the unknown path did - reclassification changed
-    // their label and confirm surface, never turned a block into a confirm.
-    const what =
-      category === "harness-shell"
-        ? `The harness shell "${toolName}" is`
-        : category === "harness"
-          ? `The harness tool "${toolName}" is`
-          : `Tool "${toolName}" is unknown to the control plane and is`;
+  if (category === "unknown") {
     return block(
-      category === "unknown" ? "restricted:unknown-tool" : `restricted:${category}`,
-      `${what} categorically denied in Restricted mode (no per-command classification).`,
+      "restricted:unknown-tool",
+      `Tool "${toolName}" is unknown to the control plane. Unknown tools are categorically denied in Restricted mode.`,
       risk,
       insideRoot,
-      "Use /mode execute to approve interactively.",
+      "Use /autonomy attended to approve unknown tools interactively.",
     );
   }
   // Mutating tool under Restricted: destination checks.
@@ -533,8 +456,6 @@ function riskLabel(risk: RiskCategory): string {
       return "a file edit";
     case "shell":
       return "shell execution";
-    case "harness-tool":
-      return "a harness tool call";
     case "unknown-tool":
       return "an unclassified tool call";
     default:

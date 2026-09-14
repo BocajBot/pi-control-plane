@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Control plane extension for the Pi coding agent: inspect effective context, gate task interpretation, and enforce workflow phase and autonomy policies.",
   "pi": {
-    "extensions": ["./extensions/control-plane.ts", "./extensions/pi-harness.ts"],
+    "extensions": ["./extensions/control-plane.ts"],
     "skills": ["./skills"]
   },
   "scripts": {

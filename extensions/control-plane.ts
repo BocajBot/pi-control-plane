@@ -89,28 +89,7 @@ import {
   serializeForCounting,
   type TokenCountResult,
 } from "../src/control-plane/token-counter.ts";
-import {
-  canonicalizePath,
-  classifyTool,
-  evaluateToolCall,
-  riskCategoryFor,
-  validatePolicy,
-  type PathOps,
-} from "../src/control-plane/tool-policy.ts";
-import {
-  defaultBackupRoot,
-  planBackup,
-  resolveNonCollidingPath,
-} from "../src/control-plane/backup.ts";
-import { isSensitiveReadTarget, type SensitiveReadExtra } from "../src/control-plane/sensitive-paths.ts";
-import {
-  addRule,
-  emptyRules,
-  matchRule,
-  removeRule,
-  renderRulesList,
-  restoreRulesFromEntries,
-} from "../src/control-plane/rules.ts";
+import { evaluateToolCall, validatePolicy, type PathOps } from "../src/control-plane/tool-policy.ts";
 import {
   buildInjectionBlock,
   contextWarningLevel,
@@ -145,23 +124,12 @@ import {
   type ScratchpadState,
   type SnapshotItem,
   STATE_ENTRY_TYPE,
-  type ToolDecision,
-  RULES_ENTRY_TYPE,
-  type RememberedRulesState,
 } from "../src/control-plane/types.ts";
 import {
   verifyCompletion,
   type VerificationReport,
   type VerifyAuditEntry,
 } from "../src/control-plane/verify.ts";
-import {
-  DEFAULT_TRANSCRIPTION_BASE_URL,
-  DEFAULT_TRANSCRIPTION_LANGUAGE,
-  DEFAULT_TRANSCRIPTION_MODEL,
-  formatTranscript,
-  type PostAudio,
-  transcribeAudio,
-} from "../src/control-plane/transcription.ts";
 import {
   DEFAULT_SEARXNG_BASE_URL,
   formatSearchResults,
@@ -170,78 +138,12 @@ import {
   searchSearxng,
 } from "../src/control-plane/websearch.ts";
 
-/** Transcription measures 0.03-0.04x realtime on real 8kHz voicemails now
- * that it runs on the GPU, so this is a very generous ceiling: it exists to
- * cover a llama-swap cold start that may first evict a 23 GiB chat model,
- * not a typical HTTP round trip. */
-const TRANSCRIPTION_TIMEOUT_MS = 900_000;
-
 const STATUS_KEY = "control-plane";
 const WIDGET_KEY = "control-plane-context";
 
 interface OutputEntryData {
   title: string;
   lines: string[];
-}
-
-/**
- * One-line render for a control-plane diagnostic entry. Kind-aware: the
- * interpretation-guard block keeps its dedicated phrasing, and every OTHER kind
- * renders as its actual kind plus whatever subject it carries (a toolName, or a
- * target). The previous single template rendered EVERY diagnostic as
- * `blocked tool "?" during interpretation` - so any kind without a toolName
- * field (e.g. a read-out-of-scope-denied keyed by `target`, or an
- * advisor-consult) showed the bare "?" the user directed out of existence, and
- * mislabelled unrelated diagnostics as interpretation blocks.
- */
-export function formatDiagnosticLine(data: Record<string, unknown> | undefined): string {
-  const kind = typeof data?.kind === "string" ? data.kind : "diagnostic";
-  const at = typeof data?.at === "string" ? data.at : "";
-  const subject =
-    typeof data?.toolName === "string" && data.toolName.length > 0
-      ? ` "${data.toolName}"`
-      : typeof data?.target === "string" && data.target.length > 0
-        ? ` ${data.target}`
-        : "";
-  const body =
-    kind === "blocked-tool-during-interpret"
-      ? `blocked tool${subject} during interpretation`
-      : `${kind}${subject}`;
-  return `[control plane] diagnostic: ${body}${at ? ` (${at})` : ""}`;
-}
-
-/**
- * The body shown in an attended confirm dialog. Only prints fields that are
- * actually meaningful: the "Inside project root" line appears solely when a
- * target resolved to a boolean (a tool with no file target omits it rather than
- * printing "Unavailable"); a tool with neither a path nor a command says
- * "no file target" plainly. The permanently-unavailable "Model's stated reason"
- * line is gone - a field that is never available is noise in every confirm.
- */
-export function formatConfirmDetail(args: {
-  toolName: string;
-  riskCategory: string;
-  path: string | null;
-  command: string | null;
-  insideRoot: boolean | null;
-  reason: string;
-}): string {
-  const { toolName, riskCategory, path, command, insideRoot, reason } = args;
-  return [
-    `Tool: ${toolName}`,
-    `Risk: ${riskCategory}`,
-    path !== null
-      ? `Target: ${path}`
-      : command === null
-        ? "Target: no file target"
-        : null,
-    command !== null ? `Command: ${command.length > 200 ? command.slice(0, 200) + "…" : command}` : null,
-    insideRoot !== null ? `Inside project root: ${insideRoot ? "yes" : "no"}` : null,
-    "",
-    reason,
-  ]
-    .filter((line): line is string => line !== null)
-    .join("\n");
 }
 
 export default async function controlPlaneExtension(pi: ExtensionAPI) {
@@ -255,32 +157,13 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let matchesKey: ((data: string, keyId: string) => boolean) | null = null;
   let visibleWidth: ((text: string) => number) | null = null;
   let truncateToWidth: ((text: string, width: number, ellipsis?: string) => string) | null = null;
-  // For the three-option attended dialog (Yes once / No / Always). Same
-  // dynamic-import-with-fallback posture as the tui imports below: null under
-  // the unit-test harness (where these packages are not resolvable), in which
-  // case the attended gate falls back to a plain yes/no confirm.
-  type SelectListItem = { value: string; label: string; description?: string };
-  interface SelectListLike {
-    onSelect?: (item: SelectListItem) => void;
-    onCancel?: () => void;
-    render(width: number): string[];
-    handleInput(data: string): void;
-    invalidate(): void;
-  }
-  let SelectListCtor:
-    | (new (items: SelectListItem[], maxVisible: number, theme?: unknown) => SelectListLike)
-    | null = null;
-  let getSelectListThemeFn: (() => unknown) | null = null;
   try {
     const piPkg = (await import("@earendil-works/pi-coding-agent")) as unknown as {
       formatSkillsForPrompt: typeof formatSkillsForPrompt;
-      getSelectListTheme?: () => unknown;
     };
     formatSkillsForPrompt = piPkg.formatSkillsForPrompt;
-    getSelectListThemeFn = piPkg.getSelectListTheme ?? null;
   } catch {
     formatSkillsForPrompt = null;
-    getSelectListThemeFn = null;
   }
   try {
     const tui = (await import("@earendil-works/pi-tui")) as unknown as {
@@ -289,21 +172,18 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       matchesKey: (data: string, keyId: string) => boolean;
       visibleWidth: (text: string) => number;
       truncateToWidth: (text: string, width: number, ellipsis?: string) => string;
-      SelectList?: typeof SelectListCtor;
     };
     Box = tui.Box;
     Text = tui.Text;
     matchesKey = tui.matchesKey;
     visibleWidth = tui.visibleWidth;
     truncateToWidth = tui.truncateToWidth;
-    SelectListCtor = tui.SelectList ?? null;
   } catch {
     Box = null;
     Text = null;
     matchesKey = null;
     visibleWidth = null;
     truncateToWidth = null;
-    SelectListCtor = null;
   }
   // TypeBox backs pi.registerTool()'s parameter schema. Same
   // dynamic-import-with-fallback pattern as the two imports above: if it
@@ -333,7 +213,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
   let state: ControlPlaneState = defaultState();
   let scratchpad: ScratchpadState = emptyScratchpad();
-  let rememberedRules: RememberedRulesState = emptyRules();
   let sandbox: SandboxState = emptySandboxState();
   /** Cached bwrap-on-PATH check (spawnSync is not free; the binary does not
    * appear or disappear mid-session). Null = not checked yet. */
@@ -362,26 +241,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // never persisted). Feeds the /verify completion-criteria match on toolName,
   // targetPath and command; cleared by a restart like writtenFiles.
   const sessionAudit: VerifyAuditEntry[] = [];
-  // Read-before-edit read-set (memory only, never persisted): resolved absolute
-  // paths this session has actually read via the `read` tool, each mapped to the
-  // file's mtimeMs at read time. A restart clears it, so a fresh session must
-  // re-read before it may modify — the safe direction. This set is per
-  // control-plane activation: a separate session (e.g. an isolated delegate)
-  // starts empty and inherits no read credit from any other session.
-  const readSet = new Map<string, number>();
-  // Advisor-consult budget (soft policy, memory-only). A read-only advisor
-  // (harness_delegate kind:"advisor") is a cloud model - each consult costs
-  // quota and latency, and a tool-eager coordinator consults freely during
-  // routine work. This caps consults per accepted task (or per session when no
-  // task is accepted): the first ADVISOR_CONSULTS_PER_TASK are silent, further
-  // consults hit the attended Yes/No/Always gate. "Always" lifts the cap for
-  // the rest of the session. A restart resets it (the safe direction). It only
-  // ever downgrades the attended per-call path for advisor consults and never
-  // loosens a hard block (phase/restricted/unattended/guard).
-  const ADVISOR_CONSULTS_PER_TASK = 1;
-  let advisorConsultsThisTask = 0;
-  let advisorBudgetTaskKey: string | null = null;
-  let advisorBudgetLifted = false;
   // Exact token counting (memory only; raw payloads are never persisted).
   let lastProviderRequest: { payload: unknown; model: string; baseUrl: string } | null = null;
   let lastTokenCount: TokenCountResult | null = null;
@@ -509,160 +368,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     exists: (p) => fs.existsSync(p),
   };
 
-  /** Canonical path of the harness agent directory (`<harness-home>/agent`),
-   * which reads freely (Pi reading its own skills/config is not exfil). Computed
-   * from PI_HARNESS_HOME, else ~/.pi, matching the harness's own path logic.
-   * Cached; null only if it cannot be resolved. */
-  let agentDirCache: string | null | undefined;
-  const agentDir = (): string | null => {
-    if (agentDirCache !== undefined) return agentDirCache;
-    const base = process.env.PI_HARNESS_HOME && process.env.PI_HARNESS_HOME.trim().length > 0
-      ? process.env.PI_HARNESS_HOME
-      : path.join(os.homedir(), ".pi");
-    agentDirCache = canonicalizePath(path.join(base, "agent"), os.homedir(), pathOps);
-    return agentDirCache;
-  };
-
-  /** Sensitive-read denylist extensions drawn from the Restricted policy's deny
-   * patterns, so the list is configurable via policy/default-policy.json on top
-   * of the built-in defaults. */
-  const sensitiveReadExtra = (): SensitiveReadExtra =>
-    policy === null
-      ? {}
-      : { basenames: policy.denyPathBasenames, pathSubstrings: policy.denyPathSubstrings };
-
-  /** mtimeMs of a file, or null if it cannot be stat'd. */
-  const mtimeOf = (canonical: string): number | null => {
-    try {
-      return fs.statSync(canonical).mtimeMs;
-    } catch {
-      return null;
-    }
-  };
-
-  /**
-   * Record read credit for the `read` tool: an existing file the coordinator
-   * actually read this session, stamped with its current mtime. Only the read
-   * tool grants credit (grep/find/ls enumerate, they do not establish that a
-   * specific file's contents were seen). Called when a read is permitted.
-   */
-  const recordReadCredit = (event: ToolCallEvent, ctx: ExtensionContext): void => {
-    if (event.toolName !== "read") return;
-    const rawPath = (event.input as Record<string, unknown>).path;
-    if (typeof rawPath !== "string" || rawPath.trim().length === 0) return;
-    const canonical = canonicalizePath(rawPath, ctx.cwd, pathOps);
-    if (canonical === null || !fs.existsSync(canonical)) return;
-    const mtime = mtimeOf(canonical);
-    if (mtime !== null) readSet.set(canonical, mtime);
-  };
-
-  // Per-control-plane-activation backup identity: a tag for naming and a
-  // resolved root directory. One (tag, root) pair per activation means a file
-  // edited N times in one session yields ONE backup (the pre-first-edit state),
-  // while the same file edited across two sessions yields two backups (each
-  // session's pre-edit state). Both are memory-only and minted ONCE when this
-  // extension instance is created, so a restart starts fresh and never reuses an
-  // old activation's backups.
-  //
-  // The root is resolved at EXTENSION INIT, not lazily per decision and not at
-  // session_start. This closure is created exactly once per control-plane
-  // activation (one `controlPlaneExtension(pi)` call), so capturing the env here
-  // pins the destination for the whole activation — matching the sessionTag. It
-  // also matches the test fixture, which sets PI_BACKUP_DIR only around boot()
-  // (i.e. around this very init) and restores it before session_start fires; a
-  // decision-time or session_start read would see the env after restore and fall
-  // back to the real ~/.pi/backups (spilling real backups into the user's home).
-  const backupSessionTag = `bk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  const backupRoot = defaultBackupRoot();
-
-  /**
-   * Backup-before-edit: snapshot an existing file's pre-mutation bytes to a
-   * durable, reviewable location BEFORE the mutation proceeds. Returns undefined
-   * on success (or when exempt), or { block, reason } on failure — fail-closed,
-   * so a mutation never runs without a recoverable pre-image.
-   *
-   * Only called from handleDecision for mutate-class tools (edit/write) whose
-   * target is an existing file, after read-before-edit has already passed and
-   * the policy decision allows/approves the call, immediately before the sandbox.
-   * The copy is written by THIS process on the host fs (not inside any bwrap
-   * child), so it is unaffected by the read-only scope mount.
-   */
-  const takeBackup = (
-    event: ToolCallEvent,
-    ctx: ExtensionContext,
-  ): { block: true; reason: string } | undefined => {
-    if (classifyTool(event.toolName) !== "mutate") return undefined;
-    const rawPath = (event.input as Record<string, unknown>).path;
-    if (typeof rawPath !== "string" || rawPath.trim().length === 0) return undefined;
-    const canonical = canonicalizePath(rawPath, ctx.cwd, pathOps);
-    if (canonical === null) return undefined; // unresolvable: the normal policy path handles it
-    const plan = planBackup(canonical, backupSessionTag, backupRoot, { exists: (p) => fs.existsSync(p) });
-    if (plan === null) return undefined; // new file: nothing to back up (exempt)
-    try {
-      const targetPath = resolveNonCollidingPath(plan.targetPath, { exists: (p) => fs.existsSync(p) });
-      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-      fs.copyFileSync(canonical, targetPath);
-      const bytes = fs.statSync(targetPath).size;
-      pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-        kind: "backup-before-edit",
-        toolName: event.toolName,
-        target: canonical,
-        backupPath: targetPath,
-        sessionTag: backupSessionTag,
-        bytes,
-        at: new Date().toISOString(),
-      });
-      return undefined;
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-        kind: "backup-before-edit-failed",
-        toolName: event.toolName,
-        target: canonical,
-        sessionTag: backupSessionTag,
-        error: msg,
-        at: new Date().toISOString(),
-      });
-      return {
-        block: true,
-        reason:
-          `[control plane] Blocked tool "${event.toolName}" (backup-before-edit). ` +
-          `Could not snapshot "${canonical}" before modifying it (${msg}). ` +
-          `Failing closed: the mutation did not run. Fix the backup path/disk and retry.`,
-      };
-    }
-  };
-
-  /**
-   * Read-before-edit hard rule: an edit/write-class call targeting an EXISTING
-   * file must have read that exact file this session, and the file must not have
-   * changed on disk since (mtime match) — an external modification requires a
-   * re-read. Returns the violation (with the canonical target) or null.
-   *
-   * Scope is exactly read-before-mutate: shell (bash) is not covered (the peer
-   * scoped this to edit/write-class tools; shell mutation is out of scope),
-   * unknown tools are not covered, and creating a NEW file is exempt (there is
-   * nothing to read). Harness-mediated append-only records (audit, proposals)
-   * are written through pi.appendEntry, not the generic write tool, so they
-   * never reach this rule.
-   */
-  const readBeforeEditViolation = (
-    event: ToolCallEvent,
-    ctx: ExtensionContext,
-  ): { canonical: string; stale: boolean } | null => {
-    if (classifyTool(event.toolName) !== "mutate") return null;
-    const rawPath = (event.input as Record<string, unknown>).path;
-    if (typeof rawPath !== "string" || rawPath.trim().length === 0) return null;
-    const canonical = canonicalizePath(rawPath, ctx.cwd, pathOps);
-    if (canonical === null) return null; // unresolvable target: handled by the normal policy path
-    if (!fs.existsSync(canonical)) return null; // creating a new file: nothing to read
-    const recorded = readSet.get(canonical);
-    if (recorded === undefined) return { canonical, stale: false };
-    const current = mtimeOf(canonical);
-    if (current === null || current !== recorded) return { canonical, stale: true };
-    return null;
-  };
-
   // ---- profiles loading (invalid file -> profiles unavailable; safety unaffected) ----
   let profilesConfig: ProfilesConfig | null = null;
   let profilesLoadError: string | null = null;
@@ -710,11 +415,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   const persistScratchpad = () => {
     scratchpad.updatedAt = new Date().toISOString();
     pi.appendEntry(SCRATCHPAD_ENTRY_TYPE, scratchpad);
-  };
-
-  const persistRules = () => {
-    rememberedRules.updatedAt = new Date().toISOString();
-    pi.appendEntry(RULES_ENTRY_TYPE, rememberedRules);
   };
 
   const persistSandbox = () => {
@@ -1277,11 +977,19 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     return box as never;
   });
 
-  pi.registerEntryRenderer<Record<string, unknown>>(
+  pi.registerEntryRenderer<{ kind: string; toolName: string; at: string }>(
     DIAGNOSTIC_ENTRY_TYPE,
     (entry, _options, theme) => {
       if (Text === null) return undefined;
-      return new Text(theme.fg("dim", formatDiagnosticLine(entry.data)), 0, 0) as never;
+      const data = entry.data;
+      return new Text(
+        theme.fg(
+          "dim",
+          `[control plane] diagnostic: blocked tool "${data?.toolName ?? "?"}" during interpretation (${data?.at ?? ""})`,
+        ),
+        0,
+        0,
+      ) as never;
     },
   );
 
@@ -1302,14 +1010,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     if (scratchpadResult.ignoredMalformed > 0) {
       ctx.ui.notify(
         `Control plane: ignored ${scratchpadResult.ignoredMalformed} malformed scratchpad entr${scratchpadResult.ignoredMalformed === 1 ? "y" : "ies"}; ${scratchpadResult.restored ? "restored the latest valid scratchpad" : "starting with an empty scratchpad"}.`,
-        "warning",
-      );
-    }
-    const rulesResult = restoreRulesFromEntries(entries, RULES_ENTRY_TYPE);
-    rememberedRules = rulesResult.rules;
-    if (rulesResult.ignoredMalformed > 0) {
-      ctx.ui.notify(
-        `Control plane: ignored ${rulesResult.ignoredMalformed} malformed remembered-rule entr${rulesResult.ignoredMalformed === 1 ? "y" : "ies"}; ${rulesResult.restored ? "restored the latest valid rule set" : "starting with no remembered rules"}.`,
         "warning",
       );
     }
@@ -1586,201 +1286,21 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     return { ok: true };
   };
 
-  /**
-   * The attended per-call gate for a rememberable confirm: a three-option
-   * dialog (Yes once / No / Always) rendered with pi-tui's SelectList via
-   * ctx.ui.custom. It is a SINGLE prompt — the same one shown today — with a
-   * third choice; "Always" is handled by the caller (it saves exactly the rule
-   * /harness-rules allow would, then allows). Escape / cancel = No. Falls back
-   * to a trivial No if SelectList is unavailable at runtime (should not happen
-   * in an interactive session; the caller only reaches here when ctx.ui.custom
-   * exists). The unit-test harness supplies its own ctx.ui.custom that resolves
-   * a scripted choice without invoking this factory.
-   */
-  const promptAttendedChoice = async (
-    ctx: ExtensionContext,
-    toolName: string,
-    ruleLabel: string,
-    detail: string,
-  ): Promise<"once" | "always" | "no"> => {
-    const header = [...detail.split("\n"), "", "↑↓ choose · enter select · esc = No"];
-    const items: SelectListItem[] = [
-      { value: "once", label: `Yes — allow ${toolName} once` },
-      { value: "no", label: "No — deny this call" },
-      {
-        value: "always",
-        label: `Always — allow ${ruleLabel}`,
-        description: "saves a scope-bound rule; manage with /harness-rules",
-      },
-    ];
-    const ui = ctx.ui as unknown as {
-      custom: <T>(factory: (tui: unknown, theme: unknown, kb: unknown, done: (v: T) => void) => SelectListLike) => Promise<T>;
-    };
-    const choice = await ui.custom<string | null>((_tui, _theme, _kb, done) => {
-      if (SelectListCtor === null) {
-        done("no");
-        return { render: () => header, handleInput: () => {}, invalidate: () => {} };
-      }
-      const list = new SelectListCtor(items, items.length, getSelectListThemeFn ? getSelectListThemeFn() : undefined);
-      list.onSelect = (item) => done(item.value);
-      list.onCancel = () => done("no"); // Escape / ctrl+c = No
-      return {
-        render: (width: number) => [...header, ...list.render(width)],
-        handleInput: (data: string) => list.handleInput(data),
-        invalidate: () => list.invalidate(),
-      };
+  pi.on("tool_call", async (event: ToolCallEvent, ctx) => {
+    const decision = evaluateToolCall({
+      toolName: event.toolName,
+      toolInput: event.input as Record<string, unknown>,
+      guardActive: state.interpretGuard?.active ?? false,
+      phase: state.phase,
+      autonomy: state.autonomy,
+      projectRoot: rootOf(ctx),
+      cwd: ctx.cwd,
+      policy,
+      ops: pathOps,
+      hasAcceptedTask: state.acceptedTask !== null,
     });
-    return choice === "once" || choice === "always" ? choice : "no"; // null/escape/unknown -> No
-  };
 
-  /**
-   * For an attended confirm, the target a remembered rule (and the three-option
-   * dialog's "Always") would key on, so EVERY confirm path is rememberable and
-   * shows the rule - not just resolvable-path ones:
-   *   - a resolvable path (edit/write/outside-root read) -> the canonical path;
-   *   - a shell command (bare `bash` or the harness shell) -> the exact command
-   *     string (conservative: only the identical command is later suppressed);
-   *   - a harness meta-tool or a genuinely foreign tool -> "*" (a tool-level
-   *     rule: "always allow this tool" in this scope; "*" is a non-empty
-   *     sentinel so validateRule accepts it and it never collides with a
-   *     canonical path, which is always absolute).
-   * Returns null when the confirm must NOT be rememberable - a sensitive read,
-   * the one documented hard exception (remembering an exfil path is forbidden),
-   * which therefore keeps a plain yes/no.
-   */
-  const rememberTargetFor = (
-    event: ToolCallEvent,
-    decision: ToolDecision,
-    ctx: ExtensionContext,
-  ): { target: string; label: string } | null => {
-    const input = event.input as Record<string, unknown>;
-    const rawPath = typeof input.path === "string" ? input.path : null;
-    const command = typeof input.command === "string" ? input.command : null;
-    const canonical = rawPath !== null ? canonicalizePath(rawPath, ctx.cwd, pathOps) : null;
-    if (
-      decision.rule === "attended:read-outside-root" &&
-      canonical !== null &&
-      isSensitiveReadTarget(canonical, agentDir(), sensitiveReadExtra())
-    ) {
-      return null; // sensitive read: hard boundary, never rememberable
-    }
-    if (canonical !== null) {
-      return { target: canonical, label: `${event.toolName} on ${canonical}` };
-    }
-    if (decision.riskCategory === "shell" && command !== null) {
-      const shown = command.length > 60 ? command.slice(0, 60) + "…" : command;
-      return { target: command, label: `${event.toolName}: ${shown}` };
-    }
-    if (decision.riskCategory === "harness-tool" || decision.riskCategory === "unknown-tool") {
-      return { target: "*", label: `${event.toolName} (any call in this scope)` };
-    }
-    return null;
-  };
-
-  /**
-   * P2, control-plane side: stamp a human approval onto the tool-call event so
-   * the harness's own authorization seam can consume it instead of asking the
-   * same question a second time (GATE-FATIGUE-REDESIGN.md P2).
-   *
-   * Deliberately passed ON THE EVENT rather than through shared state: the two
-   * extensions share no state by design (docs/ARCHITECTURE.md), and each must
-   * keep working when the other is not installed. The harness reads the field
-   * if present and ignores it otherwise.
-   *
-   * The stamp carries the tool-call id so it authorizes exactly one call, and
-   * only an APPROVAL is ever stamped — a decline blocks here and never reaches
-   * the harness.
-   */
-  const markConfirmedForHarness = (event: ToolCallEvent): void => {
-    const callId = (event as { toolCallId?: string }).toolCallId;
-    (event as { __cpUserApproved?: { callId: string | null; at: string } }).__cpUserApproved = {
-      callId: typeof callId === "string" ? callId : null,
-      at: new Date().toISOString(),
-    };
-  };
-
-  /**
-   * Harness tools whose EFFECT is read-only: they answer a question and change
-   * nothing, so the attended layer lets them through silently (P1). The harness
-   * already treats these as reads at its own seam, so gating them here was the
-   * only thing standing between the coordinator and a free lookup — it cost a
-   * real prompt in the observed trace.
-   *
-   * Deliberately excluded and still gated: harness_note and
-   * harness_set_posture (they write) and harness_delegate (it spawns an actor).
-   */
-  const READ_EFFECT_HARNESS_TOOLS: ReadonlySet<string> = new Set([
-    "harness_find_capability",
-    "harness_memory_search",
-    // harness_request_scope is deliberately NOT here. The design note claimed it
-    // only RECORDS a request and that Core decides separately - that is wrong.
-    // Its auto-granted path widens the scope itself (src/harness/scope.ts:270
-    // returns a new root; extensions/pi-harness.ts then assigns session.scope and
-    // persists it), bounded only by a one-expansion-per-scope budget, with no
-    // human in the loop. A tool that can widen authority must not be downgraded
-    // to a silent allow - same anomaly class as harness_note.
-  ]);
-
-  /**
-   * The over-budget advisor-consult gate: Yes (this once) / No / Always (lift
-   * the cap for the session). Same three-option ctx.ui.custom dialog as the
-   * attended per-call gate, but "Always" lifts a session budget rather than
-   * saving a path rule, so it is a distinct helper. Falls back to a plain
-   * yes/no confirm when ctx.ui.custom is unavailable (no "Always" then).
-   */
-  const promptAdvisorBudget = async (
-    ctx: ExtensionContext,
-    detail: string,
-  ): Promise<"once" | "always" | "no"> => {
-    const hasCustom = typeof (ctx.ui as { custom?: unknown }).custom === "function";
-    if (!hasCustom) {
-      const ok = await ctx.ui.confirm("Consult the advisor again?", detail);
-      return ok ? "once" : "no";
-    }
-    const header = [...detail.split("\n"), "", "↑↓ choose · enter select · esc = No"];
-    const items: SelectListItem[] = [
-      { value: "once", label: "Yes — consult the advisor this once" },
-      { value: "no", label: "No — skip this consult" },
-      {
-        value: "always",
-        label: "Always — stop asking for advisor consults this session",
-        description: "lifts the per-task advisor budget until the session ends",
-      },
-    ];
-    const ui = ctx.ui as unknown as {
-      custom: <T>(factory: (tui: unknown, theme: unknown, kb: unknown, done: (v: T) => void) => SelectListLike) => Promise<T>;
-    };
-    const choice = await ui.custom<string | null>((_tui, _theme, _kb, done) => {
-      if (SelectListCtor === null) {
-        done("no");
-        return { render: () => header, handleInput: () => {}, invalidate: () => {} };
-      }
-      const list = new SelectListCtor(items, items.length, getSelectListThemeFn ? getSelectListThemeFn() : undefined);
-      list.onSelect = (item) => done(item.value);
-      list.onCancel = () => done("no"); // Escape / ctrl+c = No
-      return {
-        render: (width: number) => [...header, ...list.render(width)],
-        handleInput: (data: string) => list.handleInput(data),
-        invalidate: () => list.invalidate(),
-      };
-    });
-    return choice === "once" || choice === "always" ? choice : "no"; // null/escape/unknown -> No
-  };
-
-  /**
-   * Enact a policy decision: allow (with /verify bookkeeping + sandbox),
-   * confirm (attended per-call dialog), or block. Factored out so the
-   * phase-switch dialog below can re-dispatch a call through the SAME path
-   * after an attended phase change, rather than duplicating the logic.
-   */
-  const handleDecision = async (
-    event: ToolCallEvent,
-    ctx: ExtensionContext,
-    decision: ToolDecision,
-  ): Promise<{ block: true; reason: string } | undefined> => {
     if (decision.action === "allow") {
-      // A permitted read establishes read-before-edit credit for that file.
-      recordReadCredit(event, ctx);
       // Record files written/edited this session so /verify has observable
       // evidence of what actually changed (independent of autonomy mode).
       const input = event.input as Record<string, unknown>;
@@ -1811,23 +1331,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           at: new Date().toISOString(),
         });
       }
-      // Auto mode, P2 extension: an allow under the auto:in-root-edit rule
-      // rests on the same human decision a dialog would have collected — the
-      // user chose /mode auto, a standing "yes" for exactly this class of call
-      // (in-root, non-protected file writes/edits; nothing else earns the
-      // rule). Stamp it so the harness layer consumes that answer instead of
-      // asking its own section-21 question, in the TUI and headless alike.
-      // Same per-callId, single-use stamp as a dialog approval; the harness
-      // still evaluates and still enforces its scope and hard rules.
-      if (decision.rule === "auto:in-root-edit") {
-        markConfirmedForHarness(event);
-      }
-      // Backup-before-edit (hard rule): snapshot the pre-mutation state of an
-      // existing file before it changes. Runs on the allow path (attended or
-      // unattended) and fails closed — a mutation never proceeds without a
-      // recoverable pre-image. Exempt for new files and non-mutate tools.
-      const backupResult = takeBackup(event, ctx);
-      if (backupResult !== undefined) return backupResult;
       const sandboxResult = applySandboxIfEnabled(event, ctx);
       if (!sandboxResult.ok) return { block: true, reason: sandboxResult.reason };
       return;
@@ -1837,111 +1340,31 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       if (!ctx.hasUI) {
         return {
           block: true,
-          // Actionable, because a refusal that only says "failing closed" leaves
-          // a non-interactive session with no move at all: name both ways the
-          // user can pre-authorize this without a dialog.
           reason:
             formatDenial(decision, event.toolName) +
-            " No confirmation UI is available in this mode; failing closed." +
-            " To pre-authorize without a dialog: /mode auto (applies in-root file edits without asking)," +
-            " or /harness-rules allow <tool> <path> plus /harness-rules headless on, which applies" +
-            " the rules you saved in sessions with no UI.",
+            " No confirmation UI is available in this mode; failing closed.",
         };
       }
       const input = event.input as Record<string, unknown>;
       const command = typeof input.command === "string" ? input.command : null;
       const target = typeof input.path === "string" ? input.path : null;
-      const detail = formatConfirmDetail({
-        toolName: event.toolName,
-        riskCategory: decision.riskCategory,
-        path: target,
-        command,
-        insideRoot: decision.insideRoot,
-        reason: decision.reason,
-      });
-      // EVERY confirm routes through the three-option dialog (Yes/No/Always) so
-      // no confirm is a bare, un-rememberable yes/no: a resolvable path keys the
-      // rule on the path, a shell command on the exact command, a harness/foreign
-      // tool at tool level. "Always" saves that rule and suppresses the prompt
-      // next time. The one exception is a sensitive read (rememberTargetFor ->
-      // null), the documented hard boundary, which keeps a plain yes/no. Without
-      // ctx.ui.custom, plain yes/no.
-      const remember = rememberTargetFor(event, decision, ctx);
-      const hasCustom = typeof (ctx.ui as { custom?: unknown }).custom === "function";
-      let approved: boolean;
-      if (hasCustom && remember !== null) {
-        const choice = await promptAttendedChoice(ctx, event.toolName, remember.label, detail);
-        if (choice === "always") {
-          const scopeRoot = rootOf(ctx);
-          const result = addRule(
-            rememberedRules,
-            { tool: event.toolName, target: remember.target, scopeRoot },
-            new Date().toISOString(),
-          );
-          if (result.rule !== null && !result.duplicate) {
-            rememberedRules = result.state;
-            persistRules();
-            pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-              kind: "remembered-rule-added",
-              actor: "user",
-              provenance: "attended-dialog",
-              ruleId: result.rule.id,
-              toolName: event.toolName,
-              target: remember.target,
-              scopeRoot,
-              at: new Date().toISOString(),
-            });
-          }
-        }
-        approved = choice === "once" || choice === "always";
-      } else {
-        approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, detail);
-      }
+      const detail = [
+        `Tool: ${event.toolName}`,
+        `Risk: ${decision.riskCategory}`,
+        target !== null ? `Target: ${target}` : null,
+        command !== null ? `Command: ${command.length > 200 ? command.slice(0, 200) + "…" : command}` : null,
+        `Inside project root: ${decision.insideRoot === null ? "Unavailable" : decision.insideRoot ? "yes" : "no"}`,
+        "Model's stated reason: Unavailable (Pi does not expose tool-call rationale)",
+        "",
+        decision.reason,
+      ]
+        .filter((line): line is string => line !== null)
+        .join("\n");
+      const approved = await ctx.ui.confirm(`Allow ${event.toolName}?`, detail);
       if (approved) {
-        // P2 "one door per decision" (GATE-FATIGUE-REDESIGN.md): the harness
-        // registered a tool_call handler too, and this extension only
-        // short-circuits on BLOCK — so an ALLOW here lets the same call reach
-        // the harness, whose authorize() may independently return
-        // needs-approval and ask the identical question again. That double
-        // dialog was two of the five prompts in the observed trace.
-        //
-        // Stamp the human's answer onto the event, keyed to THIS tool call. The
-        // harness consumes it in place of prompting. Both layers still evaluate
-        // and still enforce; only the second QUESTION disappears. Single-use and
-        // per-callId, so it can never be replayed onto a later call, and it is
-        // never persisted. A denial is never stamped: a decline blocks here, so
-        // the harness never sees the call.
-        markConfirmedForHarness(event);
-        // A confirmed read (e.g. an outside-root read approved in Attended)
-        // also earns read-before-edit credit for that file.
-        recordReadCredit(event, ctx);
-        // Backup-before-edit: same hard precondition as the allow path — a
-        // user-approved mutation of an existing file still needs its pre-image
-        // snapshotted first. Fails closed on backup failure.
-        const backupResult = takeBackup(event, ctx);
-        if (backupResult !== undefined) return backupResult;
         const sandboxResult = applySandboxIfEnabled(event, ctx);
         if (!sandboxResult.ok) return { block: true, reason: sandboxResult.reason };
         return;
-      }
-      // Decision B: record a declined out-of-scope READ so a refused read is a
-      // first-class event, not just an inline block reason. Emitted only on the
-      // decline of a read-risk confirm (attended:read-outside-root) — an
-      // approved read takes the branch above and records nothing here, so there
-      // is no double-count. This lands in the control-plane diagnostic log (the
-      // retrospective reviewer reads the session transcript); it does NOT reach
-      // the harness tamper-evident chain — AU1 makes the harness audit() the
-      // sole writer of that chain and control-plane's block short-circuits the
-      // harness, so a control-plane-refused read cannot appear there. Closing
-      // that fully is a harness-side change tracked separately.
-      if (decision.riskCategory === "read") {
-        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-          kind: "read-out-of-scope-denied",
-          toolName: event.toolName,
-          ...(target !== null ? { target } : {}),
-          rule: decision.rule,
-          at: new Date().toISOString(),
-        });
       }
       return {
         block: true,
@@ -1958,309 +1381,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       });
     }
     return { block: true, reason: formatDenial(decision, event.toolName) };
-  };
-
-  pi.on("tool_call", async (event: ToolCallEvent, ctx) => {
-    const decision = evaluateToolCall({
-      toolName: event.toolName,
-      toolInput: event.input as Record<string, unknown>,
-      guardActive: state.interpretGuard?.active ?? false,
-      phase: state.phase,
-      autonomy: state.autonomy,
-      projectRoot: rootOf(ctx),
-      cwd: ctx.cwd,
-      policy,
-      ops: pathOps,
-      hasAcceptedTask: state.acceptedTask !== null,
-    });
-
-    // Reads free by default: a read outside the project root would otherwise
-    // confirm (attended:read-outside-root), which turns a normal read workload
-    // into a yes/no every few seconds. Downgrade it to a silent (still scope-
-    // checked, still read-before-edit-crediting) allow UNLESS the target is on
-    // the sensitive-path denylist — those keep the exfil confirm. In-scope reads
-    // were already allowed, so this only touches the out-of-root read prompt.
-    if (decision.action === "confirm" && decision.rule === "attended:read-outside-root") {
-      const rawPath = typeof (event.input as Record<string, unknown>).path === "string"
-        ? ((event.input as Record<string, unknown>).path as string)
-        : null;
-      const canonical = rawPath !== null ? canonicalizePath(rawPath, ctx.cwd, pathOps) : null;
-      if (canonical !== null && !isSensitiveReadTarget(canonical, agentDir(), sensitiveReadExtra())) {
-        recordReadCredit(event, ctx);
-        return; // allow silently
-      }
-      // Sensitive (or unresolvable): fall through to the confirm below.
-    }
-
-    // P1 (GATE-FATIGUE-REDESIGN.md): a harness tool whose effect is read-only
-    // flows free. These answer a question and change nothing — the harness
-    // itself already classifies them as reads at its own seam, so the attended
-    // confirm here was the only prompt standing in front of a lookup, and it
-    // was one of the five in the observed trace. Same shape as the reads-free
-    // downgrade above. Write-effect (harness_note, harness_set_posture) and
-    // escalating (harness_delegate) harness tools are deliberately excluded and
-    // keep their gate; a hard block is never downgraded, only a confirm.
-    if (decision.action === "confirm" && READ_EFFECT_HARNESS_TOOLS.has(event.toolName)) {
-      return; // read-effect harness tool: silent allow
-    }
-
-    // Advisor-consult budget (soft policy): a read-only advisor consult
-    // (harness_delegate kind:"advisor") is a cloud model - each call costs quota
-    // and latency. The first ADVISOR_CONSULTS_PER_TASK consults per accepted
-    // task (or per session when none) are silent; further consults hit the
-    // attended Yes/No/Always gate, where "Always" lifts the cap for the session.
-    // This only downgrades/gates the ATTENDED path - a consult a hard rule
-    // already blocks (phase/restricted/unattended/read-only/guard) has
-    // decision.action === "block" and is left untouched, so the budget never
-    // expands capability. A no-UI session fails closed over budget. Allowed
-    // consults are already recorded in the harness tamper-evident chain (AU1);
-    // the control plane cannot write that chain, so budget blocks and lifts are
-    // recorded here as control-plane diagnostics instead.
-    const advisorConsult =
-      event.toolName === "harness_delegate" &&
-      (event.input as Record<string, unknown>).kind === "advisor";
-    if (advisorConsult && decision.action !== "block") {
-      // Per-task identity = the full accepted brief (not just updatedAt, so two
-      // briefs set in the same millisecond still count as different tasks); no
-      // accepted task = one shared per-session budget.
-      const taskKey = state.acceptedTask === null ? "__session__" : JSON.stringify(state.acceptedTask);
-      if (taskKey !== advisorBudgetTaskKey) {
-        advisorBudgetTaskKey = taskKey;
-        advisorConsultsThisTask = 0;
-      }
-      const withinBudget =
-        advisorBudgetLifted || advisorConsultsThisTask < ADVISOR_CONSULTS_PER_TASK;
-      if (!withinBudget) {
-        if (!ctx.hasUI) {
-          pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-            kind: "advisor-budget-blocked",
-            reason: "no-ui",
-            count: advisorConsultsThisTask,
-            limit: ADVISOR_CONSULTS_PER_TASK,
-            taskKey,
-            at: new Date().toISOString(),
-          });
-          return {
-            block: true,
-            reason:
-              `[control plane] Advisor consult budget reached (${ADVISOR_CONSULTS_PER_TASK} per task) ` +
-              "and no confirmation UI is available; failing closed. Raise the budget or re-run in an " +
-              "attended session to approve further consults.",
-          };
-        }
-        const detail = [
-          `Advisor consult budget reached: ${advisorConsultsThisTask} of ${ADVISOR_CONSULTS_PER_TASK} used for this task.`,
-          "An advisor is a cloud model; each consult costs quota and latency.",
-          "",
-          "Approve this extra consult, skip it, or stop asking for the rest of the session.",
-        ].join("\n");
-        const choice = await promptAdvisorBudget(ctx, detail);
-        if (choice === "no") {
-          pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-            kind: "advisor-budget-blocked",
-            count: advisorConsultsThisTask,
-            limit: ADVISOR_CONSULTS_PER_TASK,
-            taskKey,
-            at: new Date().toISOString(),
-          });
-          return {
-            block: true,
-            reason: `[control plane] Advisor consult declined (over the per-task budget of ${ADVISOR_CONSULTS_PER_TASK}).`,
-          };
-        }
-        if (choice === "always") {
-          advisorBudgetLifted = true;
-          pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-            kind: "advisor-budget-lifted",
-            actor: "user",
-            provenance: "attended-dialog",
-            taskKey,
-            at: new Date().toISOString(),
-          });
-        }
-        advisorConsultsThisTask += 1;
-        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-          kind: "advisor-consult",
-          count: advisorConsultsThisTask,
-          overBudgetApproved: true,
-          taskKey,
-          at: new Date().toISOString(),
-        });
-        return; // approved over-budget consult: allow (downgrade any confirm)
-      }
-      advisorConsultsThisTask += 1;
-      pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-        kind: "advisor-consult",
-        count: advisorConsultsThisTask,
-        overBudgetApproved: false,
-        taskKey,
-        at: new Date().toISOString(),
-      });
-      return; // within budget: silent allow (downgrade the attended confirm)
-    }
-
-    // Read-only harness shell flows freely: pi_harness_bash is bwrap-sandboxed
-    // by the harness with the scope root mounted READ-ONLY unless the call
-    // passes mode:"write" (see PHASE4-RO-SHELL-DESIGN.md). A read-mode call
-    // cannot mutate, cannot reach out-of-scope/credential paths (the mount table
-    // is the classifier), and has no network - so in Execute+attended it is
-    // auto-allowed silently instead of prompting for every wc/grep/git-status.
-    // The harness still writes the shell_exec audit (runId + exit code), so the
-    // run is recorded. Gated on bwrap being available: without it the harness
-    // would refuse and there is no read-only guarantee to lean on, so it falls
-    // through to the confirm (never a silent allow). A write-mode call also falls
-    // through to the gate (the Part-2 three-option dialog, scope root shown).
-    if (
-      event.toolName === "pi_harness_bash" &&
-      decision.action === "confirm" &&
-      (event.input as Record<string, unknown>).mode !== "write" &&
-      isBwrapAvailable()
-    ) {
-      return; // read-only sandboxed shell: silent allow
-    }
-
-    // Read-before-edit (hard rule): an edit/write targeting an EXISTING file
-    // must have read that file this session (and it must not have changed on
-    // disk since). This is a strict precondition on mutation — it preempts both
-    // the attended per-call confirm and the phase-switch dialog, because the
-    // actionable fix for a blind edit is to read the file first, not to confirm
-    // it or switch phase. New files are exempt; shell and reads are out of
-    // scope. Each denial is audited so refused blind writes are visible to
-    // /harness-eval and the retrospective reviewer.
-    const rbe = readBeforeEditViolation(event, ctx);
-    if (rbe !== null) {
-      const rule = rbe.stale ? "read-before-edit:stale" : "read-before-edit";
-      const why = rbe.stale
-        ? `"${rbe.canonical}" changed on disk since this session last read it (external modification).`
-        : `"${rbe.canonical}" has not been read in this session.`;
-      pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-        kind: "blocked-read-before-edit",
-        toolName: event.toolName,
-        target: rbe.canonical,
-        stale: rbe.stale,
-        at: new Date().toISOString(),
-      });
-      return {
-        block: true,
-        reason:
-          `[control plane] Blocked tool "${event.toolName}" (${riskCategoryFor(event.toolName)}). ` +
-          `Rule: ${rule}. ${why} Inspect before editing — do not infer source state. ` +
-          `Fix: read ${rbe.canonical} first, then retry.`,
-      };
-    }
-
-    // Remembered decisions: a soft-policy rule the user saved converts a
-    // matching attended confirm into an allow, so the same prompt never recurs.
-    // Placed AFTER read-before-edit (a rule cannot resurrect a blind edit) and
-    // it never matches a sensitive-read confirm (rememberTargetFor -> null), so
-    // it can only skip a prompt the user has already, explicitly, agreed to skip
-    // — never loosen a hard boundary. Keyed by the SAME rememberTargetFor as the
-    // dialog's "Always", so path-ful, shell (by command) and tool-level
-    // (harness/foreign) rules all match here.
-    //
-    // Gated on hasUI by DEFAULT, unchanged: a rule suppresses a PROMPT, and a
-    // no-UI session has none, so it fails closed. The opt-in
-    // (/harness-rules headless on, persisted as applyWithoutUi) is the one way
-    // that default moves, and only a human can set it. It widens WHEN the
-    // user's existing approvals apply, never WHAT they cover — the rule set,
-    // its scope binding, and the hard boundaries above are untouched.
-    if (decision.action === "confirm" && (ctx.hasUI || rememberedRules.applyWithoutUi === true)) {
-      const remember = rememberTargetFor(event, decision, ctx);
-      if (
-        remember !== null &&
-        matchRule(rememberedRules, event.toolName, remember.target, rootOf(ctx)) !== null
-      ) {
-        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-          kind: "remembered-rule-allow",
-          toolName: event.toolName,
-          target: remember.target,
-          at: new Date().toISOString(),
-        });
-        recordReadCredit(event, ctx);
-        // P2: a remembered rule IS a human approval - the "Always" answer the
-        // user gave, replayed. Stamp it like the live dialog answer it stands
-        // in for, or the harness asks its own section-21 question about a call
-        // the user already approved (observed live: rule allowed
-        // harness_delegate, harness dialog still popped).
-        markConfirmedForHarness(event);
-        const backupResult = takeBackup(event, ctx);
-        if (backupResult !== undefined) return backupResult;
-        const sandboxResult = applySandboxIfEnabled(event, ctx);
-        if (!sandboxResult.ok) return { block: true, reason: sandboxResult.reason };
-        return; // allowed by a remembered rule, no prompt
-      }
-    }
-
-    // Attended phase-switch dialog: when a call is blocked SOLELY by the phase
-    // rule (a non-Execute phase prohibiting a mutating tool) and a UI is
-    // available, offer the human the same transition they could type as
-    // /mode execute — a prose dead end ("type /mode execute") becomes a Yes/No
-    // at the moment of the block. This is user-actor authority (the human
-    // answers), identical to the attended confirm and read-out-of-scope gates;
-    // it grants no model actor any new capability. Autonomy still gates
-    // independently: we recompute the decision AS IF already in Execute and,
-    // if that would still block, fall back to the plain block (never stack two
-    // escalations into one Yes); if it would only confirm, the retry hits the
-    // attended per-call dialog separately below.
-    if (decision.action === "block" && decision.rule.startsWith("phase:") && ctx.hasUI) {
-      const exec = stateForMode("execute");
-      const postSwitch = evaluateToolCall({
-        toolName: event.toolName,
-        toolInput: event.input as Record<string, unknown>,
-        guardActive: state.interpretGuard?.active ?? false,
-        phase: exec.phase,
-        autonomy: exec.autonomy,
-        projectRoot: rootOf(ctx),
-        cwd: ctx.cwd,
-        policy,
-        ops: pathOps,
-        hasAcceptedTask: state.acceptedTask !== null,
-      });
-      if (postSwitch.action !== "block") {
-        const input = event.input as Record<string, unknown>;
-        const command = typeof input.command === "string" ? input.command : null;
-        const target = typeof input.path === "string" ? input.path : null;
-        const body = [
-          `The current phase (${state.phase}) blocks mutating tool calls.`,
-          `Blocked tool: ${event.toolName}`,
-          target !== null ? `Target: ${target}` : null,
-          command !== null ? `Command: ${command.length > 200 ? command.slice(0, 200) + "…" : command}` : null,
-          "",
-          "Switching to Execute permits mutating tools until you change the phase back.",
-          postSwitch.action === "confirm"
-            ? "After switching, this call still requires a separate per-action confirmation (autonomy is unchanged)."
-            : null,
-        ]
-          .filter((line): line is string => line !== null)
-          .join("\n");
-        const approved = await ctx.ui.confirm("Switch to Execute phase?", body);
-        if (approved) {
-          const fromMode = modeOf(state.phase, state.autonomy) ?? state.phase;
-          setMode(ctx, "execute", false);
-          // Audit the phase change with the dialog as provenance so a
-          // dialog-driven switch is visible to /verify and review, and is
-          // attributable to the human who answered (user actor).
-          pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-            kind: "phase-switch-via-dialog",
-            from: fromMode,
-            to: "execute",
-            actor: "user",
-            provenance: "attended-phase-dialog",
-            blockedTool: event.toolName,
-            blockedRule: decision.rule,
-            at: new Date().toISOString(),
-          });
-          // Re-dispatch the SAME call under the new phase so the user does not
-          // retype anything; autonomy gates it independently (attended → the
-          // per-call confirm dialog runs here).
-          return handleDecision(event, ctx, postSwitch);
-        }
-        // Declined: block exactly as today.
-        return handleDecision(event, ctx, decision);
-      }
-    }
-
-    return handleDecision(event, ctx, decision);
   });
 
   // ---- commands ----
@@ -2571,37 +1691,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     },
   });
 
-  const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-  type EffortLevel = Parameters<typeof pi.setThinkingLevel>[0];
-  pi.registerCommand("effort", {
-    description: "Show or set the thinking level (off/minimal/low/medium/high/xhigh/max)",
-    getArgumentCompletions: (prefix) => {
-      const matches = EFFORT_LEVELS.filter((s) => s.startsWith(prefix.toLowerCase()));
-      return matches.length > 0 ? matches.map((s) => ({ value: s, label: s })) : null;
-    },
-    handler: async (args, ctx) => {
-      const requested = (args ?? "").trim().toLowerCase();
-      if (requested === "") {
-        emit("effort", [
-          `Thinking level: ${pi.getThinkingLevel()}`,
-          `Usage: /effort ${EFFORT_LEVELS.join("|")}`,
-        ]);
-        return;
-      }
-      if (!(EFFORT_LEVELS as readonly string[]).includes(requested)) {
-        emit("effort", [
-          `Unknown thinking level "${requested}".`,
-          `Usage: /effort ${EFFORT_LEVELS.join("|")}`,
-        ]);
-        return;
-      }
-      pi.setThinkingLevel(requested as EffortLevel);
-      emit("effort", [
-        `Thinking level set to ${pi.getThinkingLevel()} (requested ${requested}; clamped to model capabilities).`,
-      ]);
-    },
-  });
-
   pi.registerCommand("interpret", {
     description: "Run a no-tools interpretation of a task request (then /task accept|reject)",
     handler: async (args, ctx) => {
@@ -2795,147 +1884,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("harness-rules", {
-    description: "Save, list, or revoke remembered soft-policy rules (Always-allow decisions)",
-    getArgumentCompletions: (prefix) => {
-      const subs = ["list", "allow ", "revoke ", "clear", "headless "];
-      const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
-      return matches.length > 0 ? matches.map((s) => ({ value: s, label: s.trim() })) : null;
-    },
-    handler: async (args, ctx) => {
-      const parts = args.trim().split(/\s+/).filter(Boolean);
-      const sub = (parts[0] ?? "list").toLowerCase();
-      if (sub === "list" || parts.length === 0) {
-        emit("harness-rules", [
-          ...renderRulesList(rememberedRules),
-          "",
-          "Save: /harness-rules allow <tool> <path>   Revoke: /harness-rules revoke <id>   Clear: /harness-rules clear",
-          `Apply without a confirmation UI: ${rememberedRules.applyWithoutUi === true ? "on" : "off"} (/harness-rules headless on|off)`,
-        ]);
-        return;
-      }
-      // The only switch that lets a confirm gate be satisfied with no UI. It
-      // does not create approvals - it decides whether the ones the user
-      // already saved apply when nobody can answer a dialog, which is what a
-      // non-interactive or piped session needs.
-      if (sub === "headless") {
-        const target = (parts[1] ?? "").toLowerCase();
-        if (target !== "on" && target !== "off") {
-          ctx.ui.notify("Usage: /harness-rules headless on|off", "warning");
-          return;
-        }
-        rememberedRules = { ...rememberedRules, applyWithoutUi: target === "on" };
-        persistRules();
-        emit("harness-rules", [
-          target === "on"
-            ? "Remembered rules now apply in sessions with no confirmation UI. Only calls matching a rule you already saved are allowed; everything else still fails closed."
-            : "Remembered rules no longer apply without a confirmation UI (default). A no-UI session fails closed on every confirm.",
-        ]);
-        return;
-      }
-      if (sub === "allow") {
-        const tool = parts[1];
-        const rawTarget = parts.slice(2).join(" ");
-        if (tool === undefined || rawTarget.length === 0) {
-          ctx.ui.notify("Usage: /harness-rules allow <tool> <path>", "warning");
-          return;
-        }
-        // "*" is the tool-level target the dialog's "Always" saves for
-        // harness/unknown tools (rememberTargetFor). Accept the same spelling
-        // here - but only for tools where the dialog itself would produce it,
-        // so the command cannot mint a blanket rule for path or shell tools
-        // that the dialog would always scope to a concrete target.
-        const toolLevelTarget = rawTarget === "*";
-        if (toolLevelTarget && classifyTool(tool) !== "harness" && classifyTool(tool) !== "unknown") {
-          ctx.ui.notify(
-            `Refused: "*" is only valid for harness/unknown tools; "${tool}" rules need a concrete path or command.`,
-            "warning",
-          );
-          return;
-        }
-        const canonical = toolLevelTarget ? "*" : canonicalizePath(rawTarget, ctx.cwd, pathOps);
-        if (canonical === null) {
-          ctx.ui.notify(`Could not resolve path "${rawTarget}".`, "warning");
-          return;
-        }
-        // Sensitive reads stay unrememberable-as-allow (hard boundary).
-        if (tool === "read" && isSensitiveReadTarget(canonical, agentDir(), sensitiveReadExtra())) {
-          ctx.ui.notify(
-            `Refused: "${canonical}" is a sensitive path; a sensitive read cannot be remembered as allow.`,
-            "warning",
-          );
-          return;
-        }
-        const scopeRoot = rootOf(ctx as ExtensionContext);
-        const result = addRule(rememberedRules, { tool, target: canonical, scopeRoot }, new Date().toISOString());
-        if (result.rule === null) {
-          ctx.ui.notify("Remembered-rule limit reached; not saved.", "warning");
-          return;
-        }
-        if (result.duplicate) {
-          ctx.ui.notify(`Already remembered: allow ${tool} on ${canonical} (rule ${result.rule.id}).`, "info");
-          return;
-        }
-        rememberedRules = result.state;
-        persistRules();
-        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-          kind: "remembered-rule-added",
-          actor: "user",
-          provenance: "harness-rules-command",
-          ruleId: result.rule.id,
-          toolName: tool,
-          target: canonical,
-          scopeRoot,
-          at: new Date().toISOString(),
-        });
-        ctx.ui.notify(
-          `Remembered: allow ${tool} on ${canonical} (rule ${result.rule.id}). Revoke with /harness-rules revoke ${result.rule.id}.`,
-          "info",
-        );
-        return;
-      }
-      if (sub === "revoke" || sub === "remove") {
-        const id = parts[1];
-        if (id === undefined) {
-          ctx.ui.notify("Usage: /harness-rules revoke <id>  (see /harness-rules list for ids)", "warning");
-          return;
-        }
-        const result = removeRule(rememberedRules, id, new Date().toISOString());
-        if (result.removed === null) {
-          ctx.ui.notify(`No remembered rule with id "${id}".`, "warning");
-          return;
-        }
-        rememberedRules = result.state;
-        persistRules();
-        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-          kind: "remembered-rule-revoked",
-          actor: "user",
-          ruleId: id,
-          at: new Date().toISOString(),
-        });
-        ctx.ui.notify(
-          `Revoked rule ${id} (was: allow ${result.removed.tool} on ${result.removed.target}).`,
-          "info",
-        );
-        return;
-      }
-      if (sub === "clear") {
-        const count = rememberedRules.rules.length;
-        rememberedRules = emptyRules(new Date().toISOString());
-        persistRules();
-        pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-          kind: "remembered-rules-cleared",
-          actor: "user",
-          count,
-          at: new Date().toISOString(),
-        });
-        ctx.ui.notify(`Cleared ${count} remembered rule(s).`, "info");
-        return;
-      }
-      ctx.ui.notify("Usage: /harness-rules [list|revoke <id>|clear]", "warning");
-    },
-  });
-
   // ---- web search tool (searxng-backed, see websearch.ts) ----
   // Named "local_web_search", not the more obvious "web_search": pi-web-access
   // (if installed) already registers a tool literally named "web_search", and
@@ -2963,93 +1911,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         const baseUrl = process.env.PI_CONTROL_PLANE_SEARXNG_URL ?? DEFAULT_SEARXNG_BASE_URL;
         const outcome = await searchSearxng(baseUrl, query, fetchGet, MAX_SEARCH_RESULTS);
         return { output: formatSearchResults(outcome) } as never;
-      },
-    });
-
-    // ---- audio transcription tool (whisper-voicemail, see transcription.ts) ----
-    // Backed by the `whisper-voicemail` llama-swap model. Read-only in the
-    // same sense as local_web_search: it uploads a file the user pointed at
-    // and returns text, mutating nothing.
-    pi.registerTool({
-      name: "transcribe_audio",
-      label: "Transcribe Audio",
-      // Pi executes sibling tool calls in parallel unless any tool in the
-      // batch opts into sequential execution. whisper-server owns one mutable
-      // model context: two simultaneous uploads both returned HTTP 200 in a
-      // live directory test, but their text drifted from the deterministic
-      // single-file baselines. Serialize the whole sibling batch whenever it
-      // contains transcription so each result has an isolated inference.
-      executionMode: "sequential",
-      description:
-        "Transcribe a voicemail, call recording or other audio/video file to plain text using the local whisper large-v3-turbo model. Accepts any ffmpeg-readable container (wav, mp3, mp4, m4a, ogg, opus, ...). Phone numbers come back as digits (555-1234), never spelled out as words. Read-only: uploads the file to a loopback service and returns text.",
-      promptSnippet:
-        "transcribe_audio(path) — transcribe a local audio/video file to text via the local whisper model",
-      parameters: T.Object({
-        path: T.String({
-          description: "Path to the audio or video file to transcribe.",
-        }),
-        language: T.Optional(
-          T.String({
-            description:
-              'Spoken-language hint such as "en", or "auto" to let the model detect it. Defaults to "en".',
-          }),
-        ),
-      }) as never,
-      execute: async (_toolCallId, params) => {
-        const { path: audioPath, language } = params as { path: string; language?: string };
-        const resolved = path.resolve(audioPath.replace(/^~(?=$|\/)/, os.homedir()));
-
-        let bytes: Buffer;
-        try {
-          const stat = fs.statSync(resolved);
-          if (!stat.isFile()) {
-            return {
-              content: [{ type: "text", text: `Transcription failed: not a file: ${resolved}` }],
-            } as never;
-          }
-          bytes = fs.readFileSync(resolved);
-        } catch {
-          return {
-            content: [
-              { type: "text", text: `Transcription failed: audio file not found: ${resolved}` },
-            ],
-          } as never;
-        }
-
-        // See TRANSCRIPTION_TIMEOUT_MS: a generous ceiling covering a
-        // llama-swap cold start, not a typical HTTP call.
-        const postAudio: PostAudio = async (url, request) => {
-          const form = new FormData();
-          form.append("file", new Blob([request.bytes]), request.filename);
-          form.append("model", request.model);
-          form.append("response_format", "json");
-          form.append("temperature", "0");
-          // Always sent, including the literal "auto": whisper-server runs
-          // with `-l en`, so omitting it would mean English, not detection.
-          form.append("language", request.language);
-          const res = await fetch(url, {
-            method: "POST",
-            body: form,
-            signal: AbortSignal.timeout(TRANSCRIPTION_TIMEOUT_MS),
-          });
-          return { ok: res.ok, status: res.status, json: () => res.json() as Promise<unknown> };
-        };
-
-        const baseUrl =
-          process.env.PI_CONTROL_PLANE_TRANSCRIBE_URL ?? DEFAULT_TRANSCRIPTION_BASE_URL;
-        const outcome = await transcribeAudio(
-          baseUrl,
-          {
-            filename: path.basename(resolved),
-            bytes,
-            language: language ?? DEFAULT_TRANSCRIPTION_LANGUAGE,
-            model: process.env.PI_CONTROL_PLANE_TRANSCRIBE_MODEL ?? DEFAULT_TRANSCRIPTION_MODEL,
-          },
-          postAudio,
-        );
-        return {
-          content: [{ type: "text", text: formatTranscript(outcome) }],
-        } as never;
       },
     });
   }
@@ -3352,22 +2213,12 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     },
   });
 
-  const cycleModeHandler = (ctx: ExtensionContext) => {
-    // Legacy combos (restored old sessions) enter the cycle at discuss.
-    const current = modeOf(state.phase, state.autonomy) ?? "discuss";
-    setMode(ctx, cycleMode(current), false);
-  };
-
   pi.registerShortcut("alt+p", {
     description: "Control plane: cycle mode",
-    handler: cycleModeHandler,
-  });
-
-  // shift+tab is pi's default "cycle thinking level" binding; that keybinding
-  // is unbound in ~/.pi/agent/keybindings.json ("app.thinking.cycle": []) so
-  // this shortcut can claim the key. Thinking level moves to /effort.
-  pi.registerShortcut("shift+tab", {
-    description: "Control plane: cycle mode",
-    handler: cycleModeHandler,
+    handler: (ctx) => {
+      // Legacy combos (restored old sessions) enter the cycle at discuss.
+      const current = modeOf(state.phase, state.autonomy) ?? "discuss";
+      setMode(ctx, cycleMode(current), false);
+    },
   });
 }

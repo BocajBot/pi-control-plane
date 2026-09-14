@@ -87,7 +87,6 @@ export const MODES = [
   "discuss",
   "plan",
   "execute",
-  "auto",
   "execute-restricted",
   "execute-unattended",
   "verify",
@@ -102,8 +101,6 @@ export function stateForMode(mode: Mode): { phase: Phase; autonomy: Autonomy } {
       return { phase: "plan", autonomy: "read-only" };
     case "execute":
       return { phase: "execute", autonomy: "attended" };
-    case "auto":
-      return { phase: "execute", autonomy: "auto" };
     case "execute-restricted":
       return { phase: "execute", autonomy: "restricted" };
     case "execute-unattended":
@@ -117,7 +114,6 @@ export function stateForMode(mode: Mode): { phase: Phase; autonomy: Autonomy } {
 export function modeOf(phase: Phase, autonomy: Autonomy): Mode | null {
   if (phase === "execute") {
     if (autonomy === "attended") return "execute";
-    if (autonomy === "auto") return "auto";
     if (autonomy === "restricted") return "execute-restricted";
     if (autonomy === "unattended") return "execute-unattended";
     return null;

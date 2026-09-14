@@ -2,11 +2,10 @@
   "schemaVersion": 2,
   "profiles": {
     "minimal": {
-      "description": "Core coding tools only \u2014 everything else toggled off",
+      "description": "Core coding tools only — everything else toggled off",
       "tools": [
         "read",
         "bash",
-        "pi_harness_bash",
         "edit",
         "write",
         "grep",
@@ -22,21 +21,8 @@
         "find",
         "ls"
       ]
-    },
-    "voicemail": {
-      "description": "Transcription plus read tools \u2014 for working through voicemails and call recordings",
-      "tools": [
-        "transcribe_audio",
-        "read",
-        "grep",
-        "find",
-        "ls",
-        "write"
-      ]
     }
   },
   "defaultProfile": "minimal",
-  "alwaysDisabledTools": [
-    "web_search"
-  ]
+  "alwaysDisabledTools": ["web_search"]
 }

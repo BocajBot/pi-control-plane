@@ -173,51 +173,6 @@ Registered directly by this package (no separate extension needed): searches the
 
 **Named `local_web_search`, not the more obvious `web_search`:** if you also have `pi-web-access` (or any other extension shipping a tool literally named `web_search`) installed, Pi's tool registry is a flat last-registered-wins map — there is no collision error and no picker the way colliding *command* names get one. A same-named tool from an extension that loads later in `packages` (`~/.pi/agent/settings.json`) would silently and completely replace this one; the model would never see it again, with no warning anywhere. Check `pi list` and grep for `registerTool` in anything else you install before assuming a new tool this package adds is actually reaching the model.
 
-## Audio transcription (`transcribe_audio` tool)
-
-Transcribes voicemails, call recordings and any other ffmpeg-readable audio or video file to plain text, using a local whisper.cpp `large-v3-turbo` model. Nothing leaves the machine. Like `local_web_search` it is classified as a read tool, so it works in Discuss/Plan/Verify as well as Execute, and it is likewise not registered at all if `typebox` cannot be resolved.
-
-```text
-transcribe_audio(path: "~/voicemails/2026-08-11-0912.mp4")
-transcribe_audio(path: "call.m4a", language: "auto")
-```
-
-**It is off under the default profile.** Fresh sessions auto-apply `defaultProfile` (ships as `minimal`), and profiles are allowlists — `transcribe_audio` is no more in `minimal` than `local_web_search` is. Reach it with `/context profile voicemail` (a bundled profile: transcription plus read tools and `write`, for saving transcripts out), `/context profile all`, or `/context toggle tool:transcribe_audio` for just this one. The `defaultProfile` is deliberately left alone here; change it yourself with **space** in the `alt+t` picker if you want transcription on by default.
-
-**Phone numbers come back as digits, not words.** Three layers, weakest to strongest:
-
-1. the whisper server runs with an initial `--prompt` whose example callback numbers are digit-formatted, biasing the decoder's output style;
-2. `large-v3-turbo` already emits digits unprompted for clean speech (measured: 3/3 identical runs on a phone-band fixture);
-3. `normalizeSpokenDigits()` in `src/control-plane/transcription.ts` deterministically collapses runs of spoken digit words — `"five five five, one two three four"` becomes `555-1234`. Only layer 3 is a guarantee rather than a tendency.
-
-Layer 3 is deliberately conservative: it rewrites a run only when it lands on a US phone shape (7, 10, or 1+10 digits), a numeral can never *start* a run (so `"in 2024 one two three"` is untouched), and a run that misses those shapes is emitted verbatim rather than re-scanned from its second word. `"one of the tenants"` stays prose. The cost of that caution is that international numbers outside those lengths are not reformatted — they are still whatever whisper emitted, which is normally already digits.
-
-**Backend.** The tool posts to the `whisper-voicemail` model in `~/.config/llama-swap/config.yaml` (`http://127.0.0.1:9292/v1` by default; override with `PI_CONTROL_PLANE_TRANSCRIBE_URL`, and the model id with `PI_CONTROL_PLANE_TRANSCRIBE_MODEL`). That entry runs on the **GPU (Vulkan0)** and lives in llama-swap's exclusive `chat` group. Measured on real 8kHz voicemails: 0.03–0.04x realtime (a 32.8s voicemail transcribes in ~1.0s; 1.8s cold through llama-swap). It was CPU-only until 2026-08-11 — GPU is ~15x faster on identical audio and flags.
-
-Two consequences worth knowing:
-
-- **Transcribing evicts your loaded chat model**, and the next chat turn reloads it. That is the price of the exclusive group, and the group is not optional: peak VRAM here is 1234 MiB while the tightest chat entries leave under 1 GiB free, so a free-floating GPU entry would attempt an allocation it cannot satisfy — the failure mode behind this box's amdkfd crashes.
-- **The group does not protect against processes llama-swap doesn't manage.** `ds4-server` (hermes' default provider on :8000) was measured holding 18.5 GiB while llama-swap believed only whisper was loaded. Check `rocm-smi --showpids` before raising the model size here.
-
-The tool's request ceiling stays at 15 minutes — a cold start may have to evict a 23 GiB model before loading weights.
-
-Multiple files in one Pi request are safe: `transcribe_audio` is registered with
-sequential execution. Pi otherwise runs sibling tool calls in parallel; a live
-two-voicemail directory test showed that concurrent Whisper requests could both
-return HTTP 200 while their text drifted from the deterministic single-file
-results. Sequential execution keeps each upload on an isolated inference pass.
-
-**Same logic from outside Pi.** `bin/transcribe-voicemail.ts` is a CLI over the identical module — it prints the transcript to stdout and nothing else:
-
-```bash
-./bin/transcribe-voicemail.ts ~/voicemails/2026-08-11-0912.wav
-./bin/transcribe-voicemail.ts call.mp4 --language auto --output call.txt
-```
-
-That is how the Hermes agent reaches it too, wired as an `stt.providers.voicemail: type: command` provider in `~/.hermes/config.yaml`. Hermes' built-in `openai` STT provider *cannot* be pointed at llama-swap instead: it builds its client with a hardcoded `timeout=30`, which a voicemail much past a minute would exceed once a cold start is added. Routing both agents through this one module also means there is a single implementation of the phone-number rules for them to agree on.
-
-**Hermes rewrites its own `config.yaml` and drops every comment when it does** (observed: it reflowed the `command:` string and stripped an entire commented rationale block, while leaving the settings themselves correct and working). Do not keep durable reasoning in that file — it lives here and in `docs/ARCHITECTURE.md` instead. Re-verify the `stt` block after anything causes Hermes to write its config.
-
 ## Example workflow
 
 ```text
@@ -231,124 +186,6 @@ That is how the Hermes agent reaches it too, wired as an `stt.providers.voicemai
 ```
 
 Note: the mode controls what *tools* may do. It does not change the model or its thinking level.
-
-## Pi Harness (`/harness`, second extension)
-
-The control plane above governs one session: what the model can see, what it
-believes it is doing, and what it is allowed to touch right now. The **Pi
-Harness** is a second, independent extension in this same package that
-governs what persists *between* sessions — authority, durable state,
-evidence, and recovery. Its specification is `ARCHITECTURE2.md` at the repo
-root (v0.2); the acceptance invariants it is built against are section 27
-there, and the v0.2 integration-hardening delta is section 32.
-
-The organizing idea is that Pi is the persistent agent and models are
-interchangeable workers. Switching models changes who is reasoning; it
-changes nothing about scope, approval posture, or the current task.
-
-| Command | What it does |
-|---|---|
-| `/harness help` | Command guide, available even before a harness session starts; tab completion includes transcript navigation |
-| `/harness status` | Session, project, scope, coordinator, autonomy, approval posture, sandbox availability |
-| `/harness scope [approve <path>\|network on\|off]` | Show scope; grant a wider one; grant or revoke sandbox networking |
-| `/harness authority <actor>` | What that actor may ever do, plus the constitutional rules no model can change |
-| `/harness audit` | The most recent append-only audit events |
-| `/harness capability [grant\|revoke <tool> <reason>]` | The tool catalog, what is active, and per-session exceptions for unconfined tools |
-| `/harness recover` | Reconcile persisted state against the real environment; reports conflicts and uncertainties rather than resolving them |
-| `/harness checkpoint <verified state>` | Record a verified resume point and flush `WORKSTATE.md` |
-| `/harness-mode reasoning\|autonomy\|approval <value>` | Reasoning style and autonomy are independent controls |
-| `/harness-task list\|new\|status` | The explicit task queue — nothing becomes a task by being mentioned |
-| `/harness-delegate [list]` | Show each delegate's latest status and pending read root, with approve/deny commands |
-| `/harness-decide`, `/harness-incident` | First-class decision and incident records |
-| `/harness-memory list [all]\|search\|add [global\|project]` | Durable memory, typed as fact / assumption / opinion, and scoped global or per project |
-| `/harness-review list\|run [id]` | The retrospective review queue, and running a reviewer over an archived session |
-| `/harness-policy show\|set <level> <field> <value>` | Durable soft policy: global, device and project layers, resolved broadest-first |
-| `/harness-identity show\|add\|remove` | Who Pi is across sessions and models. User-writable only; injected into every turn |
-| `/harness-goal list\|new\|status\|link\|check` | Goals above tasks and relationships between projects. Advisory, never permissions |
-
-Task commands complete project task IDs and only valid next statuses. Delegate
-approve/deny commands complete blocked contract IDs; approval still requires the
-exact requested root inside parent scope. Listing or completing commands grants
-no authority.
-
-Tools it registers: `pi_harness_bash` (the only permitted shell path),
-`harness_request_scope`, `harness_memory_search`, `harness_note`,
-`harness_find_capability`, `harness_delegate` (read-only advisor or bounded
-subagent under an explicit delegation contract), and `harness_set_posture`.
-
-What it enforces rather than merely displays:
-
-- **The builtin shell is blocked.** `bash` is removed from the active tool set
-  *and* denied at the `tool_call` seam, so another extension restoring the
-  tool set does not reopen it. `pi_harness_bash` runs under bubblewrap or
-  refuses — there is no fallback to an unenforced shell.
-- **Scope is an authority object.** One automatic expansion to the next
-  boundary is available per scope, and it is spent, not renewed. Anything
-  wider needs the user. Symlinks are resolved before the comparison.
-- **Authority is per actor.** A coordinator cannot promote durable memory, a
-  reviewer cannot mutate files, an advisor can only read, and no actor —
-  including the user — has an operation that rewrites audit history.
-- **A subagent cannot exceed its parent.** Delegation contracts derive scope,
-  autonomy, and approval by intersection, so there is no parameter through
-  which a child gets more than the parent had.
-- **Claimed and validated completion are different fields.** So are observed
-  effect and suspected cause on an incident, and fact, assumption, and
-  opinion in memory.
-
-Added in v0.2 (section 32):
-
-- **Scope carries a ceiling, not just a budget.** Narrowing is
-  authority-reducing and may happen automatically — which means a narrowed
-  scope must be able to step back out, which means it could otherwise walk
-  out one legal step at a time past anything the user authorized. The
-  ceiling is the limit those steps can never cross; only a user approval
-  moves it.
-- **Tools are catalogued, not automatically active.** The active set is
-  computed from the catalog rather than inherited, so a tool the harness
-  cannot resolve a target for is `unconfined` and stays inactive until the
-  user grants a per-session exception. It is labelled unconfined in the
-  prompt and in the audit log — never described as sandboxed. **This
-  withholds `local_web_search` and `transcribe_audio` by default**, since
-  from the harness's side they are another extension's tools.
-- **Loosening posture needs the user.** The coordinator may change reasoning
-  style freely and may tighten its own autonomy or approval, but "ask me less
-  often" is the same act as enlarging scope and is gated as one — even under
-  `approvalPolicy: "none"`, so a posture of never-ask cannot extend itself.
-- **Audit events are SHA-256 hash chained, with an endpoint commitment.**
-  Editing a stored event is detected at that line; deleting events off the
-  end is detected by a separate `audit.tip.json`, because a chain commits to
-  order and content and to nothing about length. This is not tamper-proofing
-  — anything that can write the log can usually write the tip beside it. What
-  it covers is accidents, crashes, and a model, and the reason a model is
-  covered is that the harness home sits outside every project scope. v0.1
-  records carry no hash and are declared a legacy-unverified prefix that the
-  first chained event anchors to; no hash is ever back-filled, because that
-  would claim a protection that did not exist when the record was written.
-- **State is per session, with a global index.** `sessions.json` maps a
-  session id to its project root, structured state lives at
-  `projects/<hash>/sessions/<id>.json`, and `.pi/workstates/<id>.md` sits
-  alongside `WORKSTATE.md`. In v0.1 the second session in a project
-  overwrote the first.
-- **Durable memory is global or project-scoped.** Default retrieval is global
-  plus the current project, so one repository's lesson stops following you
-  into unrelated ones.
-- **A reviewer is accepted only on evidence.** Complete read of the session,
-  valid output shape, and every finding, pattern, lesson, unresolved item and
-  memory candidate citing a real entry id from that session. Repeated reviews
-  are stored as separate generations rather than overwriting the earlier
-  reading.
-
-State lives in `~/.pi/agent/pi-harness/` (override with `PI_HARNESS_HOME`),
-plus a human-readable `.pi/WORKSTATE.md` in the project — a recovery
-snapshot that is explicitly *not* authoritative: structured state and the
-observed environment both outrank it.
-
-`VALIDATION.md` records what has actually been executed against a real Pi,
-including an adversarial pass in which seven of fourteen constructed attacks
-succeeded on the first run; `BUILD_STATUS.md` records what is still asserted
-rather than shown, and what the adversarial pass deliberately did not close.
-`node bin/build-isolated.mjs` produces the harness as a standalone package in
-the layout of `ARCHITECTURE2.md` section 29.
 
 ## What each file does
 
@@ -369,27 +206,9 @@ the layout of `ARCHITECTURE2.md` section 29.
 | `src/control-plane/commands.ts` | Argument parsing for every command (so bad input handling is testable). |
 | `src/control-plane/ui.ts` | All text formatting: status line, summaries, denial messages, the injected state block. |
 | `policy/default-policy.json` | Restricted/Unattended-mode rules: denied path names/substrings, whether bash is allowed (default: no), out-of-root allowlist prefixes (default: none). Also the credential-path source of truth `/bwrap`'s `$HOME` shadowing reuses. Edit carefully — an invalid or old-schema file makes Restricted/Unattended behave as Read-only. |
-| `extensions/pi-harness.ts` | The harness extension entry point. Wiring only, same discipline as `control-plane.ts`: enforcement points attached to Pi's events, decisions made in `src/harness/`. |
-| `src/harness/types.ts` | Every persisted state contract (session, scope, task, decision, incident, memory, audit, delegation) plus the mode and actor vocabularies. |
-| `src/harness/policy.ts` | The authorization decision: constitutional rules, the per-actor capability matrix, policy inheritance, and `authorize()` — deny-by-default, no model input. |
-| `src/harness/scope.ts` | Scope as an authority object: symlink-safe canonicalization, the one-step automatic expansion, the ceiling that bounds where those steps can reach, and two distinct narrowings — automatic (re-expandable) and delegated (not). |
-| `src/harness/store.ts` | The only module that does I/O: atomic whole-file writes for current state, append-only JSONL for evidence, and a reader that tolerates an interrupted append. |
-| `src/harness/audit.ts` | Audit-event construction and the SHA-256 hash chain. Cannot write and cannot amend — a correction is a new event pointing at the old one. |
-| `src/harness/capability.ts` | The tool catalog and the scope-aware / harness / unconfined classification that decides what the coordinator actually sees. |
-| `src/harness/state.ts` | Session lifecycle, checkpoints, and the recovery reconciliation that reports conflicts instead of resolving them. |
-| `src/harness/memory.ts` | Promotion, supersession, and the active view. Refuses a coordinator promotion and an uncited reviewer promotion. |
-| `src/harness/records.ts` | Decision and incident constructors that refuse a decision with no rationale, a temporary decision with no revisit condition, and an incident with no observed effect. |
-| `src/harness/tasks.ts` | The explicit task queue: frozen authority envelopes, legal transitions, and validated-vs-claimed completion. |
-| `src/harness/agents.ts` | Delegation contracts, handoff parsing, the retrospective-review prompt/parse, and the evidence gate that accepts a reviewer only on a complete read, a valid shape, and real citations. Never spawns anything; execution is injected. |
-| `src/harness/sandbox.ts` | The harness shell boundary: scope-derived mounts and fail-safe refusal. Reuses the control plane's bwrap argv builder rather than forking a second one. |
-| `src/harness/workstate.ts`, `project.ts`, `config.ts`, `util.ts` | Recovery-file rendering, project-root inference, the storage layout, and ids/timestamps/keys. |
-| `src/harness/identity.ts`, `goals.ts` | Identity state (user-writable only) and goals/project relationships, which inform recommendations and are structurally incapable of changing an authorization outcome. |
-| `bin/build-isolated.mjs` | Builds the harness as a standalone package in the `ARCHITECTURE2.md` section 29 layout, rewriting imports and inlining the bwrap builder. One artifact, generated — never a hand-maintained second tree. |
-| `VALIDATION.md`, `BUILD_STATUS.md` | What has actually been executed (with the ablations that make the checks discriminating), and what is still asserted rather than shown. |
-| `tests/` | 505 unit, invariant, extension-harness, and adversarial regression tests. Run with `npm test`. |
+| `tests/` | 168 unit and harness tests. Run with `npm test`. |
 | `docs/` | Architecture, security model, and testing guides. |
 | `IMPLEMENTATION-PROMPT.md` | The specification the first milestone was built from. Milestone 2 (unattended autonomy, web search, scratchpad, out-of-root allowlists) is documented in `docs/ARCHITECTURE.md`. |
-| `ARCHITECTURE.md` | The Pi Harness specification (identity, authority, memory, lifecycle, acceptance invariants). Distinct from `docs/ARCHITECTURE.md`, which documents the control plane. |
 
 ## Pi built-ins worth knowing alongside this
 
@@ -407,17 +226,12 @@ the layout of `ARCHITECTURE2.md` section 29.
 - Secret redaction is pattern-based: it reduces risk, it does not guarantee detection of every secret.
 - Restricted and Unattended modes are policy enforcement inside Pi's process — **not** an operating-system sandbox (see `docs/SECURITY.md`).
 - `local_web_search` depends on a local searxng instance being reachable; if it is not, the tool returns a clear error string to the model rather than throwing, but there is no fallback search source (deliberately not a paid API — see `docs/ARCHITECTURE.md`).
-- `transcribe_audio` depends on llama-swap serving the `whisper-voicemail` model; if it is unreachable the tool returns an error string naming both rather than throwing. Its spoken-digit pass only reformats US phone shapes (7, 10, 1+10 digits) — that narrowness is deliberate (a false rewrite corrupts a transcript undetectably), but it means other number formats are left exactly as whisper produced them. Containers actually exercised end to end are wav, mp4 and m4a; the rest are inferred from whisper-server's `--convert` handing decoding to ffmpeg. The digit guarantee is an English-language one: with `language: "auto"` on non-English audio, whisper groups digits by that language's conventions and the phone-shape pass does not apply.
 - Tool-name collisions across extensions are silent (last-registered-wins, no error) — unlike command-name collisions, which Pi disambiguates automatically. Verify with `pi list` + a grep for `registerTool` before assuming a newly added tool is actually reaching the model, especially after installing another extension.
-- `harness_delegate` and `/harness-review run` register only when Pi's `createAgentSession` SDK export resolves at load time. Outside Pi it does not, so the tool is simply absent rather than throwing — the same guarded-degradation pattern the control plane uses for `pi-tui`. If the tool is missing inside Pi, that import is the first thing to check.
-- The Pi Harness is smoke-tested inside a real pi process: `node tests/smoke/harness-smoke.mjs` (17 checks) and `node tests/smoke/harness-review-smoke.mjs` (the full retrospective-review loop, including a real reviewer model promoting cited memory). `harness_delegate` is now the only path never executed against a live model — it shares the nested-agent plumbing the reviewer exercises, but no advisor or subagent has actually run.
-- Extension order matters. Pi short-circuits `tool_call` on the first blocking handler and the control plane is registered first, so a call it blocks never reaches the harness and is absent from the harness audit log. Calls the control plane *allows* are still independently scope-checked by the harness (the smoke test proves this by approving a write at the control plane prompt and watching the harness deny it).
-- The harness `tool_call` gate reads a tool's target from a fixed list of argument keys (`path`, `file_path`, `filePath`, `filename`, `file`, `target_file`, `dir`, `directory`). A tool naming its target under some other key still reaches the gate — an unrecognized tool is classified as *mutating*, so it is gated and audited rather than waved through — but its path itself is not scope-checked. The residual risk is a mutating tool with an exotic argument name that the user then approves at the prompt.
 - Live behavior is validated headlessly by `node tests/smoke/rpc-smoke.mjs` (17 checks over pi's RPC mode against llama-swap); only TUI rendering of dialogs/widget and terminal hotkey delivery still need a human check. See `docs/TESTING.md`.
 
 ## Development
 
 ```bash
-npm test        # 505 tests, no dependencies, uses Node's built-in test runner
+npm test        # 77 tests, no dependencies, uses Node's built-in test runner
 /reload         # inside pi, after editing extension code
 ```

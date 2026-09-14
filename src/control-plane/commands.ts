@@ -90,12 +90,6 @@ export function parseModeArgs(args: string): ModeCommand {
   if (trimmed === "sandboxed" || trimmed === "execute-sandboxed") {
     return { kind: "set", mode: "execute-restricted", sandboxAlias: true };
   }
-  // "execute-auto" and "accept-edits" both name the same level: the first is
-  // consistent with the other execute-* names, the second is what people
-  // arriving from other agents call it.
-  if (trimmed === "execute-auto" || trimmed === "accept-edits" || trimmed === "auto-accept") {
-    return { kind: "set", mode: "auto", sandboxAlias: false };
-  }
   if (trimmed === "unattended") {
     return { kind: "set", mode: "execute-unattended", sandboxAlias: false };
   }

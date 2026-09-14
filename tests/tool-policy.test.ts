@@ -48,104 +48,22 @@ function evalInput(overrides: Partial<EvaluateInput> & { toolName: string }): Ev
   };
 }
 
-test("denial hints reference the merged /mode command, never the retired /phase or /autonomy", () => {
-  // /phase and /autonomy were merged into /mode; a hint that still names them
-  // is user-facing misinformation (the coordinator relays it verbatim).
-  const root = makeTempRoot();
-  const hints = [
-    // phase gate
-    evaluateToolCall(evalInput({ toolName: "write", phase: "discuss", autonomy: "read-only", projectRoot: root, cwd: root, toolInput: { path: "f.txt" } })).hint,
-    // autonomy read-only gate
-    evaluateToolCall(evalInput({ toolName: "write", phase: "execute", autonomy: "read-only", projectRoot: root, cwd: root, toolInput: { path: "f.txt" } })).hint,
-    // restricted shell gate (policy.allowBash === false)
-    evaluateToolCall(evalInput({ toolName: "bash", phase: "execute", autonomy: "restricted", projectRoot: root, cwd: root, toolInput: { command: "ls" } })).hint,
-    // restricted unknown-tool gate
-    evaluateToolCall(evalInput({ toolName: "wget_tool", phase: "execute", autonomy: "restricted", projectRoot: root, cwd: root })).hint,
-  ];
-  for (const hint of hints) {
-    assert.ok(hint, "each of these blocks must carry an actionable hint");
-    assert.match(hint!, /\/mode\b/, `hint must point at /mode: "${hint}"`);
-    assert.doesNotMatch(hint!, /\/phase\b/, `hint must not name the retired /phase: "${hint}"`);
-    assert.doesNotMatch(hint!, /\/autonomy\b/, `hint must not name the retired /autonomy: "${hint}"`);
-  }
-});
-
 test("tool classification: read tools known, unknown tools never safe", () => {
   assert.equal(classifyTool("read"), "read");
   assert.equal(classifyTool("grep"), "read");
   assert.equal(classifyTool("find"), "read");
   assert.equal(classifyTool("ls"), "read");
   assert.equal(classifyTool("local_web_search"), "read");
-  assert.equal(classifyTool("transcribe_audio"), "read");
   assert.equal(classifyTool("edit"), "mutate");
   assert.equal(classifyTool("write"), "mutate");
   assert.equal(classifyTool("bash"), "shell");
-  // Harness-own tools are named, not "unknown": the harness shell is its own
-  // class, meta-tools are "harness"; genuinely foreign tools stay "unknown".
-  assert.equal(classifyTool("pi_harness_bash"), "harness-shell");
-  assert.equal(classifyTool("harness_delegate"), "harness");
-  assert.equal(classifyTool("harness_note"), "harness");
-  assert.equal(classifyTool("harness_find_capability"), "harness");
   assert.equal(classifyTool("browser_navigate"), "unknown");
   assert.equal(classifyTool(""), "unknown");
-});
-
-test("harness shell: named 'shell' risk, inside-root resolves, and Restricted still blocks (non-loosening)", () => {
-  const root = fs.realpathSync(makeTempRoot());
-  // Attended: confirm, labelled shell (not unknown-tool), inside-root resolves
-  // to yes instead of "Unavailable".
-  const attended = evaluateToolCall(
-    evalInput({ toolName: "pi_harness_bash", phase: "execute", autonomy: "attended", projectRoot: root, cwd: root, toolInput: { command: "wc -l x" } }),
-  );
-  assert.equal(attended.action, "confirm");
-  assert.equal(attended.riskCategory, "shell");
-  assert.equal(attended.insideRoot, true, "the harness shell runs inside the scope root, not Unavailable");
-  assert.equal(attended.rule, "attended:harness-shell");
-
-  // Restricted (allowBash:false): still BLOCKED, exactly as the unknown path
-  // did before reclassification. Reclassification must never turn block->confirm.
-  const restricted = evaluateToolCall(
-    evalInput({ toolName: "pi_harness_bash", phase: "execute", autonomy: "restricted", projectRoot: root, cwd: root, toolInput: { command: "wc -l x" } }),
-  );
-  assert.equal(restricted.action, "block");
-  assert.equal(restricted.rule, "restricted:harness-shell");
-
-  // Even with allowBash:true (which turns a bare `bash` into a confirm), the
-  // harness shell is NOT routed through that opt-in - it stays blocked.
-  const restrictedBashOn = evaluateToolCall({
-    ...evalInput({ toolName: "pi_harness_bash", phase: "execute", autonomy: "restricted", projectRoot: root, cwd: root, toolInput: { command: "wc -l x" } }),
-    policy: { ...policy, allowBash: true },
-  });
-  assert.equal(restrictedBashOn.action, "block", "harness shell never enters the allowBash confirm path");
-});
-
-test("harness meta-tools: named 'harness-tool' risk, confirm in attended, block in Restricted", () => {
-  const root = fs.realpathSync(makeTempRoot());
-  const attended = evaluateToolCall(
-    evalInput({ toolName: "harness_delegate", phase: "execute", autonomy: "attended", projectRoot: root, cwd: root, toolInput: { kind: "advisor", objective: "x" } }),
-  );
-  assert.equal(attended.action, "confirm");
-  assert.equal(attended.riskCategory, "harness-tool");
-  assert.equal(attended.rule, "attended:harness");
-  assert.match(attended.reason, /harness_delegate/, "the confirm names the tool, not 'unknown'");
-
-  const restricted = evaluateToolCall(
-    evalInput({ toolName: "harness_delegate", phase: "execute", autonomy: "restricted", projectRoot: root, cwd: root, toolInput: { kind: "advisor", objective: "x" } }),
-  );
-  assert.equal(restricted.action, "block");
-  assert.equal(restricted.rule, "restricted:harness");
 });
 
 test("local_web_search is treated as a read tool: available in Discuss without Execute/autonomy elevation", () => {
   const decision = evaluateToolCall(
     evalInput({ toolName: "local_web_search", phase: "discuss", autonomy: "read-only" }),
-  );
-  assert.equal(decision.action, "allow");
-});
-
-test("transcribe_audio is treated as a read tool: available in Discuss without Execute/autonomy elevation", () => {
-  const decision = evaluateToolCall(
-    evalInput({ toolName: "transcribe_audio", phase: "discuss", autonomy: "read-only" }),
   );
   assert.equal(decision.action, "allow");
 });
@@ -430,61 +348,4 @@ test("allowPathPrefixes: an entry that does not exist on disk is skipped, never 
   );
   assert.equal(decision.action, "block");
   assert.equal(decision.rule, "restricted:outside-root");
-});
-
-test("auto mode: an in-root edit applies without asking, where attended would confirm", () => {
-  const root = fs.realpathSync(makeTempRoot());
-  const target = path.join(root, "src.ts");
-  const attended = evaluateToolCall(
-    evalInput({ toolName: "edit", phase: "execute", autonomy: "attended", projectRoot: root, cwd: root, toolInput: { path: target } }),
-  );
-  const auto = evaluateToolCall(
-    evalInput({ toolName: "edit", phase: "execute", autonomy: "auto", projectRoot: root, cwd: root, toolInput: { path: target } }),
-  );
-  assert.equal(attended.action, "confirm", "precondition: attended asks about this edit");
-  assert.equal(auto.action, "allow");
-  assert.equal(auto.rule, "auto:in-root-edit");
-});
-
-test("auto mode still confirms shell, out-of-root writes and harness tools", () => {
-  const root = fs.realpathSync(makeTempRoot());
-  const outside = fs.realpathSync(makeTempRoot());
-  const cases: [string, Record<string, unknown>][] = [
-    ["bash", { command: "rm -rf /" }],
-    ["write", { path: path.join(outside, "x.txt") }],
-    ["harness_delegate", { kind: "advisor", objective: "x" }],
-  ];
-  for (const [toolName, toolInput] of cases) {
-    const decision = evaluateToolCall(
-      evalInput({ toolName, phase: "execute", autonomy: "auto", projectRoot: root, cwd: root, toolInput }),
-    );
-    assert.notEqual(decision.action, "allow", `${toolName} must not be auto-approved`);
-  }
-});
-
-test("auto mode does not reach protected paths that a confirmation was guarding", () => {
-  const root = fs.realpathSync(makeTempRoot());
-  const decision = evaluateToolCall(
-    evalInput({
-      toolName: "write",
-      phase: "execute",
-      autonomy: "auto",
-      projectRoot: root,
-      cwd: root,
-      toolInput: { path: path.join(root, ".env") },
-    }),
-  );
-  // Pin the mechanism, not just the outcome: without this the test would pass
-  // even if .env were rejected for some unrelated reason.
-  assert.equal(decision.action, "confirm");
-  assert.equal(decision.rule, "auto:credential-path");
-});
-
-test("auto mode cannot mutate outside the Execute phase", () => {
-  const root = fs.realpathSync(makeTempRoot());
-  const decision = evaluateToolCall(
-    evalInput({ toolName: "edit", phase: "discuss", autonomy: "auto", projectRoot: root, cwd: root, toolInput: { path: path.join(root, "a.ts") } }),
-  );
-  assert.equal(decision.action, "block");
-  assert.match(decision.rule, /^phase:/);
 });

@@ -83,15 +83,9 @@ export function shQuote(s: string): string {
 }
 
 export interface SandboxCommandOptions {
-  /** Bound read-write by default. This is the only place the sandboxed command
-   * may write; it is the reason to sandbox at all rather than just chroot.
-   * When `projectRootReadOnly` is set it is bound read-only instead. */
+  /** Bound read-write. This is the only place the sandboxed command may
+   * write; it is the reason to sandbox at all rather than just chroot. */
   projectRoot: string;
-  /** When true, bind the project root READ-ONLY (`--ro-bind`) instead of
-   * read-write. A command that tries to write then fails with EROFS. This is
-   * the read-only-shell default: mutation is impossible by construction, no
-   * command parsing involved - the mount table is the classifier. */
-  projectRootReadOnly?: boolean;
   /** bwrap --chdir target. Should be projectRoot or a path under one of
    * roBindPaths - this function does not check, it only assembles argv. */
   cwd: string;
@@ -128,8 +122,7 @@ export function buildSandboxedCommand(command: string, options: SandboxCommandOp
   if (options.network) argv.push("--share-net");
   argv.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");
   for (const p of options.roBindPaths) argv.push("--ro-bind-try", p, p);
-  if (options.projectRootReadOnly) argv.push("--ro-bind", options.projectRoot, options.projectRoot);
-  else argv.push("--bind", options.projectRoot, options.projectRoot);
+  argv.push("--bind", options.projectRoot, options.projectRoot);
   for (const p of options.shadowDirs) argv.push("--tmpfs", p);
   for (const p of options.shadowFiles) argv.push("--ro-bind", "/dev/null", p);
   argv.push("--chdir", options.cwd);
