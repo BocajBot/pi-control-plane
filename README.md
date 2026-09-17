@@ -47,8 +47,12 @@ sandbox, edited context and active extension statuses remain visible;
 are unchanged.
 
 Use `/control-ui details` for full path, branch, session name, model/effort,
-sent/received tokens, cache usage, cost, context counts, and live draft counters.
-Use `/control-ui minimal` to return; `/control-ui timing` shows last prompt timing. This display preference lasts for this
+sent/received tokens, cache usage, cost, context counts, live draft counters,
+and the workload timer (`time 4m 12s · 9 turns`).
+Use `/control-ui minimal` to return; `/control-ui timing` shows the workload ledger: the last turn (time to first text +
+total), cumulative model time across turns (count, total, average, slowest), and recent turn durations — the time the
+model spends working between prompts. The ledger is persisted as its own
+session entry, so a resumed session keeps its totals. This display preference lasts for this
 extension instance; it changes no permissions or model settings.
 
 Context warnings begin at 75%, urgent at 90%. Exact counts describe the last
@@ -198,11 +202,12 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 | `src/control-plane/scratchpad.ts` | Structured working notes: validation, persistence/restoration, and rendering. Same patterns as `state.ts`, applied to its own entry type. |
 | `src/control-plane/sandbox.ts` | Bwrap command-line assembly and its own persisted on/off + network toggle. Pure: builds a command string, never spawns anything itself. Same patterns as `state.ts`/`scratchpad.ts`. |
 | `src/control-plane/model-picker.ts` | Pure model-picker logic: frecency ordering, usage IO, substring filtering, page-jump math, key classification. Wiring (SelectList modal, startup handler, `/models`, `alt+m`) lives in `extensions/model-picker.ts`. |
+| `src/control-plane/turn-timing.ts` | Workload timing ledger: per-turn records (TTFT + total), cumulative totals, strict validation, compaction-safe restoration, footer and summary rendering. |
 | `src/control-plane/websearch.ts` | Pure searxng client (injected fetch): URL building, response parsing, result formatting. No Pi imports. |
 | `src/control-plane/commands.ts` | Argument parsing for every command (so bad input handling is testable). |
 | `src/control-plane/ui.ts` | All text formatting: status line, summaries, denial messages, the injected state block. |
 | `policy/default-policy.json` | Auto (unattended) policy rules: denied path names/substrings, whether bash is allowed (default: no), out-of-root allowlist prefixes (default: none). Also the credential-path source of truth `/bwrap`'s `$HOME` shadowing reuses. Edit carefully — an invalid or old-schema file makes Auto enforce read-only. |
-| `tests/` | 295 unit and harness tests. Run with `npm test`. |
+| `tests/` | 301 unit and harness tests. Run with `npm test`. |
 | `docs/` | Architecture, security model, and testing guides. |
 | `IMPLEMENTATION-PROMPT.md` | The specification the first milestone was built from. Milestone 2 (unattended autonomy, web search, scratchpad, out-of-root allowlists) is documented in `docs/ARCHITECTURE.md`. |
 
@@ -228,7 +233,7 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 ## Development
 
 ```bash
-npm test        # 295 tests, no dependencies, uses Node's built-in test runner
+npm test        # 301 tests, no dependencies, uses Node's built-in test runner
 /reload         # inside pi, after editing extension code
 ```
 

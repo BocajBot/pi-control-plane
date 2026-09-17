@@ -21,16 +21,17 @@ No dependencies: Node 22's built-in test runner executes the TypeScript directly
 | `ui.test.ts` | Status/mode display strings, footer stats formatting, context-warning thresholds, draft/added-context counters |
 | `scratchpad.test.ts` | Note CRUD, truncation and capacity limits, strict validation, compaction-safe restoration, injection-block rendering (incl. the empty-scratchpad-renders-nothing rule) |
 | `websearch.test.ts` | searxng URL building, response parsing (missing URL/results dropped gracefully), network/HTTP/JSON failure handling (caught, never thrown), result formatting |
-| `extension-harness.test.ts` | The real entry against a fake Pi API: attended deny-blocks/approve-allows, no-UI fail-closed, cross-"session" restoration incl. tool toggles, sandboxed alias warning, injection block + verified excision + honest failure, hotkey cycling through all four modes, `/scratchpad` end-to-end incl. system-prompt injection, `local_web_search` tool registration, Unattended's per-call audit logging |
+| `extension-harness.test.ts` | The real entry against a fake Pi API: attended deny-blocks/approve-allows, no-UI fail-closed, cross-"session" restoration incl. tool toggles, sandboxed alias warning, injection block + verified excision + honest failure, hotkey cycling through all four modes, `/scratchpad` end-to-end incl. system-prompt injection, `local_web_search` tool registration, Unattended's per-call audit logging, workload-timing ledger end-to-end (persist + restore + footer segment) |
 | `backup.test.ts` | Backup-before-edit decision logic: pre-mutation snapshot, fail-closed |
 | `credits.test.ts` | OpenRouter balance parsing and formatting (`CreditBalance`) |
 | `model-picker.test.ts` | Frecency ordering (recency decay, local-provider boost), usage IO (record, atomic save, tolerant load), substring filtering, page-jump clamping, key classification (printables, backspace, PageUp/PageDown incl. modifier variants), `modelPicker:false` opt-out, `/models` argument resolution |
+| `turn-timing.test.ts` | Workload ledger: turn recording and accumulation, recent cap, strict validation, backward-walking restoration, duration formatting, footer segment and summary rendering |
 | `rules.test.ts` | Remembered-decision soft rules ("Always" confirmations) validation and matching |
 | `sandbox.test.ts` | Bwrap command-line assembly: arg building, credential shadowing, pure (no spawn) |
 | `sensitive-paths.test.ts` | Sensitive read-target denylist matching |
 | `transcription.test.ts` | Audio transcription tool (`transcribe_audio`) logic |
 
-Expected result: `pass 294, skip 1, fail 0`.
+Expected result: `pass 300, skip 1, fail 0`.
 
 ## Testing without exposing credentials
 

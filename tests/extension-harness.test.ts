@@ -2139,7 +2139,7 @@ test("prompt lifecycle refreshes credits without blocking and exposes timing", a
     await controlPlaneExtension(pi as never);
     const ctx = makeCtx();
     Object.assign(ctx.sessionManager, {
-      getCwd: () => "/work/project", getSessionName: () => undefined,
+      getCwd: () => "/work/project", getSessionName: () => undefined, getEntries: () => [],
     });
     let footer: { render: (width: number) => string[] } | undefined;
     ctx.ui.setFooter = (factory: Function) => {
@@ -2160,6 +2160,27 @@ test("prompt lifecycle refreshes credits without blocking and exposes timing", a
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(requests, 3);
     await pi.commands.get("control-ui")!.handler("timing", ctx);
-    assert.match(ctx.notifications.at(-1)!.message, /First text: [0-9.]+s; total:/);
+    // The workload ledger: last turn (TTFT + total) and the cumulative line.
+    const timingNotifications = ctx.notifications.slice(-3).map((n: { message: string }) => n.message).join("\n");
+    assert.match(timingNotifications, /Last turn: first text [0-9.]+s · total [0-9.]+s/);
+    assert.match(timingNotifications, /Workload: 1 turn · [0-9.]+s model time · avg [0-9.]+s\/turn/);
+    // Every completed turn persists its own ledger entry.
+    const timingEntries = pi.entries.filter((e) => e.customType === "pi-control-plane-timing");
+    assert.equal(timingEntries.length, 1);
+    assert.equal((timingEntries[0]!.data as { turns: number }).turns, 1);
+    // A fresh instance restores the ledger from the session entries.
+    const pi2 = new FakePi();
+    await controlPlaneExtension(pi2 as never);
+    const ctx2 = makeCtx({ branchEntries: [...pi.entries] });
+    await pi2.emit("session_start", { reason: "resume" }, ctx2);
+    await pi2.commands.get("control-ui")!.handler("timing", ctx2);
+    const restored = ctx2.notifications.at(-1)!.message;
+    assert.match(restored, /Workload: 1 turn · [0-9.]+s model time/);
+    // The detailed footer carries the timer segment once a turn completed
+    // (the footer factory reads detailedUI at render time, so no reload is
+    // needed — and a reload on this ctx's empty branch would reset the ledger).
+    await pi.commands.get("control-ui")!.handler("details", ctx);
+    const detailLines = footer!.render(140).join("\n");
+    assert.match(detailLines, /time [0-9.]+s · 1 turn/);
   } finally { globalThis.fetch = originalFetch; }
 });

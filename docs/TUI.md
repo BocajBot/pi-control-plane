@@ -198,8 +198,12 @@ Tool output starts collapsed and successful/pending tools have transparent
 backgrounds; error surfaces remain distinct. These presentation changes do not
 remove tool results from model context.
 
-`/control-ui timing` reports first streamed text and total prompt duration,
-including model, tools and hooks.
+`/control-ui timing` shows the workload ledger: last turn (first streamed text
++ total, including model, tools and hooks), cumulative model time across all
+turns (count, total, average, slowest), and recent turn durations. The ledger
+is persisted as its own session entry (`pi-control-plane-timing`), so resumed
+sessions keep their totals; the detailed footer carries a compact segment
+(`time 4m 12s · 9 turns`) once any turn has completed.
 
 ## Model picker modal (alt+m / /models)
 

@@ -24,14 +24,14 @@ Verified against pi 0.85.1 (`dist/core/extensions/types.d.ts`):
 | `tool_result` | Read-credit accounting (refreshReadCredit) |
 | `context` | Context-editor overlay merge (alt+e override applied per turn, invalidated on shrink) |
 | `message_update` | Time-to-first-text timing |
-| `agent_end` | Track timing, refresh credits |
+| `agent_end` | Record the workload-timing ledger turn (persisted as its own entry), track timing, refresh credits |
 | `agent_settled`, `model_select` | Refresh the footer status segment |
 
 ## State model
 
 `ControlPlaneState` (schemaVersion 2): phase, autonomy, previousContextSnapshot, sourceToggles, updatedAt.
 
-- Persisted via `pi.appendEntry("pi-control-plane-state", state)` on every change. Custom entries live in the session file but never enter LLM context, and they survive `/compact` (compaction summarizes messages; entries remain on the branch).
+- Persisted via `pi.appendEntry("pi-control-plane-state", state)` on every change. Custom entries live in the session file but never enter LLM context, and they survive `/compact` (compaction summarizes messages; entries remain on the branch). The same pattern carries the scratchpad, sandbox, remembered rules and the workload-timing ledger, each with its own entry type and schema.
 - Restoration (`state.ts: restoreFromEntries`) walks the branch backward, takes the newest entry that passes strict validation, ignores malformed ones, and falls back to the read-only default (Plan) when prior state existed but was malformed — never to an edit mode. A session with nothing ever persisted opens edit-ready as Accept (`freshState`). An unknown `schemaVersion` is malformed by definition (bumped 1 -> 2 when the task-brief subsystem was removed, so a session saved under the old shape restores read-only rather than partially).
 
 ## Context snapshot model

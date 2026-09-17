@@ -26,6 +26,15 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import {
+  emptyTimingState,
+  recordTurn,
+  renderTimingSummary,
+  restoreTimingFromEntries,
+  TIMING_ENTRY_TYPE,
+  timingFooterSegment,
+} from "../src/control-plane/turn-timing.ts";
+
+import {
   parseBwrapArgs,
   parseContextArgs,
   parseModeArgs,
@@ -852,6 +861,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     pi.appendEntry(RULES_ENTRY_TYPE, rememberedRules);
   };
 
+  const persistTiming = () => {
+    timing.updatedAt = new Date().toISOString();
+    pi.appendEntry(TIMING_ENTRY_TYPE, timing);
+  };
+
   const persistSandbox = () => {
     sandbox.updatedAt = new Date().toISOString();
     pi.appendEntry(SANDBOX_ENTRY_TYPE, sandbox);
@@ -929,7 +943,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let credits: CreditBalance | null = null;
   let promptStarted = 0;
   let firstTextMs: number | null = null;
-  let lastTiming = "No completed prompt measured.";
+  // Workload ledger: every completed turn (count, total model time, slowest,
+  // recent) persisted as its own session entry so resumed sessions keep their
+  // totals. Pure logic + rendering live in src/control-plane/turn-timing.ts.
+  let timing = emptyTimingState();
   // Nonblocking: session_start constructs the balance poller and queues its
   // first lookup without awaiting network I/O. The footer therefore starts at
   // "loading" and resolves to the real balance without requiring a prompt.
@@ -1161,7 +1178,13 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         // Line 2: stats left, model right — same anchor-accent palette as the
         // compact footer: muted/dim baseline, neon-yellow model + thinking
         // level, purple balance, semantic warn/error on ctx under pressure.
-        const leftPlain = stats.length > 0 ? `${stats} · ${context}` : context;
+        // The workload timer segment ("time 4m 12s · 9 turns") joins the
+        // cumulative token stats once any turn has completed.
+        const timeSegment = timingFooterSegment(timing);
+        const leftPlain =
+          [stats, ...(timeSegment.length > 0 ? [timeSegment] : []), context]
+            .filter((part) => part.length > 0)
+            .join(" · ") || context;
         const pct =
           exactTokens !== null && contextWindow > 0
             ? (exactTokens / contextWindow) * 100
@@ -1639,6 +1662,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         "warning",
       );
     }
+    const timingResult = restoreTimingFromEntries(entries, TIMING_ENTRY_TYPE);
+    timing = timingResult.timing;
+    if (timingResult.ignoredMalformed > 0) {
+      ctx.ui.notify(
+        `Control plane: ignored ${timingResult.ignoredMalformed} malformed timing entr${timingResult.ignoredMalformed === 1 ? "y" : "ies"}; starting the workload ledger from zero.`,
+        "warning",
+      );
+    }
     if (policyLoadError !== null) {
       ctx.ui.notify(`Control plane: ${policyLoadError}`, "warning");
     }
@@ -1796,7 +1827,19 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       messagesSinceLastRequest.push(serializeForCounting(tail));
     }
     if (promptStarted) {
-      lastTiming = `First text: ${firstTextMs === null ? "none" : `${(firstTextMs / 1000).toFixed(2)}s`}; total: ${((Date.now() - promptStarted) / 1000).toFixed(2)}s (model, tools and hooks combined).`;
+      // Workload ledger: one record per completed turn. The turn boundary is
+      // before_agent_start -> agent_end: model streaming, tool calls and
+      // hooks combined — the time the model spends working between prompts.
+      timing = recordTurn(
+        timing,
+        {
+          firstTextMs,
+          totalMs: Date.now() - promptStarted,
+          endedAt: new Date().toISOString(),
+        },
+        new Date().toISOString(),
+      );
+      persistTiming();
       promptStarted = 0;
     }
     void credits?.refresh("end");
@@ -2518,7 +2561,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       .map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
       const choice = args.trim();
-      if (choice === "timing") { ctx.ui.notify(lastTiming, "info"); return; }
+      if (choice === "timing") {
+        for (const line of renderTimingSummary(timing)) ctx.ui.notify(line, "info");
+        return;
+      }
       if (choice !== "minimal" && choice !== "details") {
         ctx.ui.notify("Usage: /control-ui minimal|details|timing", "info");
         return;
