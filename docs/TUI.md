@@ -227,7 +227,8 @@ sessions keep their totals; the detailed footer carries a compact segment
 
 ## Model picker modal (alt+m / /models)
 
-The model picker is a `ctx.ui.custom` overlay: a one-line keymap header, a
+The model picker is a `ctx.ui.custom` modal: a keymap header and separate
+`Ctrl+s select and save as default` hint, both clipped to viewport width, a
 filter line (`> query`), and pi-tui's `SelectList` (15 visible). Printable keys
 extend the substring filter (rebuilt per keystroke), backspace edits it,
 ↑↓/enter/esc go to the list, and PageUp/PageDown jump a page via
@@ -235,7 +236,11 @@ extend the substring filter (rebuilt per keystroke), backspace edits it,
 retired `bin/patch-pi-model-page-nav.mjs` approach is archived under
 `~/.pi/agent/archive/`). OpenRouter rows show input/output pricing in Pi's
 native `$input/$output per Mtok` format; `+` marks models with request-size
-pricing tiers. At startup the same modal appears once; escape there
+pricing tiers. Ctrl+s selects the highlighted filtered row, closes the modal,
+and saves it as the global default after selection succeeds. Enter remains
+session-only; Ctrl+s with no matches does nothing. Save success/failure is
+notified explicitly, including when saving the already-current or only model.
+Input requests an immediate repaint. At startup the same modal appears once; escape there
 quits pi (guarded by `isIdle` so only a human answering it can). Outside the
 TUI (`ctx.mode !== "tui"`), no modal is attempted — `/models <query>` switches
 directly and `/models` prints the frecency-ordered list.

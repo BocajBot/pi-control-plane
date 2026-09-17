@@ -60,6 +60,7 @@ import {
   parseContextArgs,
   parseModeArgs,
   parseScratchpadArgs,
+  parseTaskArgs,
 } from "../src/control-plane/commands.ts";
 import { diffIsEmpty, diffSnapshots } from "../src/control-plane/context-diff.ts";
 import {
@@ -2710,6 +2711,36 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   });
 
   // ---- commands ----
+
+  pi.registerCommand("task", {
+    description: "Append a To-Do task and inform the current model: /task add <text>",
+    handler: async (args, ctx) => {
+      const command = parseTaskArgs(args);
+      if (command.kind === "usage") {
+        ctx.ui.notify("Usage: /task add <text> (500 chars max)", "warning");
+        return;
+      }
+      const result = addTodo(todo, command.text, new Date().toISOString());
+      if (!result.ok) {
+        ctx.ui.notify(result.error, "warning");
+        return;
+      }
+      todo = result.state;
+      persistTodo(ctx);
+      refreshTodoWidget();
+      // Unlike appendEntry/notify, custom messages enter the model's context.
+      // Steer a running turn; when idle, append without starting generation.
+      try {
+        pi.sendMessage({
+          customType: "pi-control-plane-task-added",
+          content: `The user added a task to the To-Do list via /task add.\n${result.message}\nThe task is already tracked; do not add a duplicate.`,
+          display: true,
+        }, { deliverAs: "steer", triggerTurn: false });
+      } catch {
+        ctx.ui.notify(`${result.message}. Model notification failed; the task remains saved and will appear in the next task-context refresh.`, "warning");
+      }
+    },
+  });
 
   pi.registerCommand("todo-clear", {
     description: "Clear all To-Do tasks, including unfinished tasks",

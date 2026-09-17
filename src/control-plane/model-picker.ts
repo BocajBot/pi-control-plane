@@ -150,6 +150,7 @@ export type PickerKey =
   | { kind: "backspace" }
   | { kind: "page-up" }
   | { kind: "page-down" }
+  | { kind: "save-default" }
   | { kind: "other"; data: string };
 
 /**
@@ -160,6 +161,7 @@ export type PickerKey =
  * enter, escape).
  */
 export function classifyKey(data: string): PickerKey {
+  if (data === "\x13") return { kind: "save-default" };
   if (data === "\x7f" || data === "\b") return { kind: "backspace" };
   if (data.length > 0 && !/[\x00-\x1f]/.test(data)) return { kind: "type", char: data };
   if (/^\x1b\[5(?:;[0-9]+)?~$/.test(data)) return { kind: "page-up" };
@@ -175,6 +177,50 @@ export function pickerDisabled(fs: UsageFs, settingsFile: string): boolean {
     return (parsed as Record<string, unknown>).modelPicker === false;
   } catch {
     return false;
+  }
+}
+
+export interface ModelPick {
+  value: string;
+  saveDefault: boolean;
+}
+
+/** Minimal public SettingsManager surface, injected for tests. */
+export interface DefaultModelSettings {
+  setDefaultModelAndProvider(provider: string, modelId: string): void;
+  flush(): Promise<void>;
+  drainErrors(): unknown[];
+}
+
+/** Wait for actual persistence; SettingsManager queues writes and collects errors. */
+export async function persistDefaultModel(settings: DefaultModelSettings, model: ModelLike): Promise<void> {
+  if (settings.drainErrors().length > 0) throw new Error("Cannot load model defaults.");
+  settings.setDefaultModelAndProvider(model.provider, model.id);
+  await settings.flush();
+  if (settings.drainErrors().length > 0) throw new Error("Cannot save model defaults.");
+}
+
+/** Select first, persist only on explicit request and successful selection. */
+export async function applyModelPick<T extends ModelLike>(
+  pick: ModelPick,
+  models: readonly T[],
+  select: (model: T) => Promise<boolean>,
+  saveDefault: (model: T) => Promise<void>,
+): Promise<"selected" | "saved" | "switch-failed" | "save-failed"> {
+  const target = models.find((m) => keyOf(m.provider, m.id) === pick.value);
+  if (!target) return "switch-failed";
+  try {
+    if (!await select(target)) return "switch-failed";
+  } catch {
+    return "switch-failed";
+  }
+  if (!pick.saveDefault) return "selected";
+  try {
+    await saveDefault(target);
+    return "saved";
+  } catch {
+    // Never surface parser errors that could contain sensitive settings text.
+    return "save-failed";
   }
 }
 

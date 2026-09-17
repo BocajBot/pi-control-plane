@@ -36,6 +36,10 @@ class FakePi {
   tools = new Map<string, { name: string; execute: (...args: unknown[]) => unknown }>();
   entries: { type: string; customType: string; data: unknown }[] = [];
   sentUserMessages: string[] = [];
+  sentMessages: { message: { customType: string; content: string; display: boolean }; options: unknown }[] = [];
+  sendMessage(message: { customType: string; content: string; display: boolean }, options: unknown) {
+    this.sentMessages.push({ message, options });
+  }
   activeTools = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
   on(event: string, handler: Handler) {
@@ -163,7 +167,7 @@ async function boot(): Promise<FakePi> {
 
 test("registers the commands, the local_web_search tool, and the shortcuts", async () => {
   const pi = await boot();
-  for (const name of ["clear", "context", "mode", "scratchpad", "bwrap", "harness-rules"]) {
+  for (const name of ["clear", "context", "mode", "scratchpad", "bwrap", "harness-rules", "task"]) {
     assert.ok(pi.commands.has(name), `missing /${name}`);
   }
   assert.ok(!pi.commands.has("phase") && !pi.commands.has("autonomy"), "phase/autonomy merged into /mode");
@@ -2033,6 +2037,69 @@ test("top-right context tools header reads active registry on every render", asy
   pi.setActiveTools(pi.allToolNames);
   assert.match(header.render(120)[0], /\+4 more  ·  ctrl\+alt\+t/, "11 tools collapse to 7 + more");
   for (const width of [1, 12, 40, 80]) assert.ok(header.render(width).every((line) => line.length <= width));
+});
+
+test("/task add appends, persists, repaints, and informs the current model without starting a turn", async () => {
+  const previous = process.env.PI_CONTROL_PLANE_STATE_DIR;
+  const stateDirectory = tmpRoot();
+  const workspace = tmpRoot();
+  process.env.PI_CONTROL_PLANE_STATE_DIR = stateDirectory;
+  try {
+    const pi = await boot();
+    const ctx = makeCtx({ cwd: workspace });
+    let renders = 0;
+    let overlay: { render(width: number): string[] } | undefined;
+    ctx.ui.setWidget = (key: string, factory: unknown) => {
+      if (key !== "control-plane-todo" || typeof factory !== "function") return;
+      factory({
+        requestRender() { renders++; },
+        showOverlay(component: { render(width: number): string[] }) { overlay = component; return { hide() {} }; },
+      }, { fg: (_color: string, text: string) => text });
+    };
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    const tool = pi.tools.get("todo")!;
+    await tool.execute("seed", { op: "add", text: "Existing task" }, undefined, undefined, ctx);
+    const command = pi.commands.get("task")!;
+    const before = renders;
+    await command.handler("add User task", ctx);
+    ctx.isIdle = () => false;
+    await command.handler("add Busy task", ctx);
+    assert.ok(renders > before);
+    assert.match(overlay!.render(44).join("\n"), /User task/);
+    assert.equal(pi.sentMessages.length, 2);
+    for (const sent of pi.sentMessages) {
+      assert.equal(sent.message.customType, "pi-control-plane-task-added");
+      assert.equal(sent.message.display, true);
+      assert.deepEqual(sent.options, { deliverAs: "steer", triggerTurn: false });
+      assert.match(sent.message.content, /already tracked; do not add a duplicate/);
+    }
+    assert.match(pi.sentMessages[0].message.content, /Added \[2\] User task/);
+    assert.match(pi.sentMessages[1].message.content, /Added \[3\] Busy task/);
+    const { readWorkspaceTodo } = await import("../src/control-plane/todo-store.ts");
+    assert.deepEqual(readWorkspaceTodo(workspace).todo?.items.map((i) => i.text), ["Existing task", "User task", "Busy task"]);
+    const injection = await pi.emit("before_agent_start", {
+      systemPrompt: "BASE", systemPromptOptions: ctx.getSystemPromptOptions(),
+    }, ctx);
+    assert.match(JSON.stringify(injection), /User task/);
+    const count = pi.entries.length;
+    for (const args of ["", "add", "add   ", "remove 1", `add ${"x".repeat(501)}`]) await command.handler(args, ctx);
+    assert.equal(pi.entries.length, count, "invalid input must not mutate state");
+    assert.equal(pi.sentMessages.length, 2, "invalid input must not notify model");
+    const restored = await boot();
+    const restoredCtx = makeCtx({ cwd: workspace });
+    await restored.emit("session_start", { reason: "new" }, restoredCtx);
+    const list = await restored.tools.get("todo")!.execute("list", { op: "list" }, undefined, undefined, restoredCtx);
+    assert.match(JSON.stringify(list), /User task/);
+    pi.sendMessage = () => { throw Error("delivery unavailable"); };
+    await command.handler("add Retain after notification failure", ctx);
+    assert.equal(readWorkspaceTodo(workspace).todo?.items.length, 4);
+    assert.ok(ctx.notifications.some((n) => /Model notification failed/.test(n.message)));
+  } finally {
+    if (previous === undefined) delete process.env.PI_CONTROL_PLANE_STATE_DIR;
+    else process.env.PI_CONTROL_PLANE_STATE_DIR = previous;
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("/todo-clear removes unfinished tasks, persists empty state, and refreshes the widget", async () => {

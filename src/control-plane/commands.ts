@@ -111,6 +111,15 @@ export function parseScratchpadArgs(args: string): ScratchpadCommand {
   }
 }
 
+export type TaskCommand = { kind: "add"; text: string } | { kind: "usage" };
+
+export function parseTaskArgs(args: string): TaskCommand {
+  const match = /^add\s+([\s\S]+)$/i.exec(args.trim());
+  return match && match[1].trim()
+    ? { kind: "add", text: match[1].trim() }
+    : { kind: "usage" };
+}
+
 export type BwrapCommand =
   | { kind: "status" }
   | { kind: "on" }

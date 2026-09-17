@@ -20,13 +20,18 @@ relevant source, tests, and `docs/` before changing Pi behavior.
   tool profiles, exact recounting, and edited-context restoration. `/bwrap`
   provides optional OS isolation. `/harness-rules` manages remembered
   confirmations. `/control-ui` selects minimal, details, or timing views.
-- **Persistent work state:** `/scratchpad` survives compaction and remains
+- **Persistent work state:** `/task add <text>` appends to the persistent task
+  list, refreshes the overlay, and injects a model-visible update into the
+  current session (steered into a running turn; otherwise included on the next
+  turn without starting generation; never a request to duplicate the task).
+  `/scratchpad` survives compaction and remains
   injected. `todo` creates visible tasks. Open tasks stay in a noncapturing
   top-right widget; `done` removes task state and writes `Task [id] -
   description has completed.` into transcript. `/todo-clear` removes all tasks
   (including unfinished ones) without completion entries. `/clear` aliases Pi `/new`.
 - **Custom model surface:** `/models` and `alt+m` provide typeahead, frecency,
-  direct model references, PageUp/PageDown navigation, and OpenRouter
+  direct model references, PageUp/PageDown navigation, Ctrl+s to select and
+  save the highlighted model as the global default, and OpenRouter
   input/output price badges. Native `/model` also keeps OpenRouter price badges
   for both all and scoped lists.
 - **Native `/model` patch:** Pi 0.85.1 source and executable bundle under
@@ -216,7 +221,7 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 | `ctrl+alt+r` | Reload Pi resources (same as `/reload`); refuses while Pi is busy |
 | `alt+p` | Cycle mode: Plan → Manual → Accept → Auto |
 | `shift+tab` | Same cycle as `alt+p` (Claude-Code-style) |
-| `alt+m` | Model picker: typeahead with ↑↓ move, **PgUp/PgDn page**, enter select, esc close (also `/models`; `/models <query>` switches directly) |
+| `alt+m` | Model picker: typeahead with ↑↓ move, **PgUp/PgDn page**, enter select, **Ctrl+s select + save default**, esc close (also `/models`; `/models <query>` switches directly) |
 | `alt+i` | Diagnostics panel: a centered modal listing this session's diagnostic entries (declined reads, unattended action logs, verification events) |
 | `alt+h` | Hotkey cheat sheet as a centered modal (any key closes; `/hotkeys` lists everything) |
 
@@ -238,10 +243,10 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 
 A typeahead model picker built entirely on public extension APIs — the isolated replacement for the retired `bin/patch-pi-model-page-nav.mjs`, which patched minified anchors inside pi's bundle and broke on every `pi update`. Paged navigation (PageUp/PageDown jump 15 models — the exact feature the patch existed for) is implemented via `SelectList.setSelectedIndex`, so it survives updates by construction. OpenRouter rows retain Pi's input/output price badge (`$input/$output per Mtok`, with `+` for tiered pricing).
 
-- `alt+m` or `/models` — the picker, on demand. Type to filter (substring), ↑↓ move, PgUp/PgDn page, enter selects, esc closes.
+- `alt+m` or `/models` — the picker, on demand. Type to filter (substring), ↑↓ move, PgUp/PgDn page, enter selects for this session, **Ctrl+s selects and saves as the global default**, esc closes.
 - At interactive startup the picker also appears (frecency-ordered: most-used-recently first, local models leading while history is cold, usage tracked in `~/.pi/agent/model-usage.json`); esc at launch quits pi — no model chosen, no session. Disable the startup dialog with `"modelPicker": false` in `~/.pi/agent/settings.json` (usage tracking continues either way).
 - `/models <query>` (any mode, incl. RPC/print) — switch directly; exact `provider/model` wins, then unique substring match; ambiguous queries list their matches instead of guessing.
-- `pi.setModel` switches; pi itself persists the switched-to model as the default for new sessions.
+- `pi.setModel` switches for this session only (including `/models <query>`). Ctrl+s explicitly saves `defaultProvider` and `defaultModel` through Pi's exported `SettingsManager`, preserving unrelated settings and thinking defaults. Success is reported only after the write finishes; a failed switch never saves, and a failed save reports that the model is session-only. Project settings and CLI overrides still take precedence over global defaults.
 
 Native `/model` retains its own selector. Its installed-runtime scoped
 OpenRouter pricing repair is documented in the continuity contract above.

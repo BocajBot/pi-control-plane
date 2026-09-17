@@ -68,6 +68,23 @@ Three mechanisms, by kind:
 
 An accepted edit becomes an in-memory `Overlay { messages, baseCount, systemPrompt }`. On every `context` event the overlay replaces the first `baseCount` live messages and newer messages are appended unchanged (`mergeOverlay`); if the live conversation shrinks below `baseCount` (compaction, tree navigation) the overlay is invalidated with a notification. The system-prompt override substitutes the base prompt in `before_agent_start` before toggles and the control-plane block apply. `/context restore` clears it; the status segment shows `Context edited` while active. Nothing about the override is persisted.
 
+## Custom model picker persistence
+
+`extensions/model-picker.ts` owns `/models`, `alt+m`, and the startup picker;
+native `/model` and its installed pricing patch remain separate. Enter returns
+a session-only selection. Ctrl+s (Pi's `matchesKey`, including Kitty encoding)
+returns the highlighted filtered model plus explicit save intent. Both flow
+through `applyModelPick`: select first, then persist only after success. Saving
+the already-current model is supported, as is a one-model catalog.
+
+The save uses a fresh exported `SettingsManager` with project loading disabled
+(`projectTrusted: false`), its default agent directory, and
+`setDefaultModelAndProvider`. Pi merges the two modified fields under its settings
+lock, preserving unrelated fields. `persistDefaultModel` checks load errors,
+awaits `flush`, and checks write errors before reporting success. Errors never
+include raw settings content. No runtime patch, tool, or global Ctrl+s shortcut
+is added; thinking defaults and project settings are untouched.
+
 ## Command flow
 
 `registerCommand` handlers parse arguments through the pure parsers in `commands.ts` (usage errors are data, not exceptions), act on state, persist, refresh status, and emit chat-visible output as custom entries (`pi-control-plane-output`) rendered by a registered entry renderer — visible in the TUI, excluded from LLM context.

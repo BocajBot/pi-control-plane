@@ -6,7 +6,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  applyModelPick,
   classifyKey,
+  persistDefaultModel,
   filterModels,
   frecency,
   keyOf,
@@ -143,6 +145,8 @@ test("modelPriceLabel: shows OpenRouter input/output rates and tier marker", () 
 });
 
 test("classifyKey: typeable, backspace, page keys, modifier variants, other", () => {
+  assert.deepEqual(classifyKey("\x13"), { kind: "save-default" });
+  assert.deepEqual(classifyKey("s"), { kind: "type", char: "s" });
   assert.deepEqual(classifyKey("a"), { kind: "type", char: "a" });
   assert.deepEqual(classifyKey("Z"), { kind: "type", char: "Z" });
   assert.deepEqual(classifyKey("\x7f"), { kind: "backspace" });
@@ -165,6 +169,43 @@ test("pickerDisabled: only modelPicker === false disables; junk tolerated", () =
   assert.equal(pickerDisabled(absent, "/s.json"), false);
   const broken = memoryFs({ "/s.json": "{oops" });
   assert.equal(pickerDisabled(broken, "/s.json"), false);
+});
+
+test("default save: select first, explicit saves only, failures never report saved", async () => {
+  const pick = { value: "openrouter/gamma", saveDefault: true };
+  const calls: string[] = [];
+  const select = async (m: { id: string }) => { calls.push(`select:${m.id}`); return true; };
+  const save = async (m: { id: string }) => { calls.push(`save:${m.id}`); };
+  assert.equal(await applyModelPick(pick, models, select, save), "saved");
+  assert.deepEqual(calls, ["select:gamma", "save:gamma"]);
+  calls.length = 0;
+  assert.equal(await applyModelPick({ ...pick, saveDefault: false }, models, select, save), "selected");
+  assert.deepEqual(calls, ["select:gamma"]);
+  calls.length = 0;
+  assert.equal(await applyModelPick(pick, models, async () => false, save), "switch-failed");
+  assert.equal(await applyModelPick(pick, models, async () => { throw Error(); }, save), "switch-failed");
+  assert.equal(await applyModelPick({ ...pick, value: "gone" }, models, select, save), "switch-failed");
+  assert.deepEqual(calls, []);
+  assert.equal(await applyModelPick(pick, models, select, async () => { throw Error(); }), "save-failed");
+});
+
+test("default persistence waits for flush and rejects load/write failures", async () => {
+  const calls: unknown[] = [];
+  let errors: unknown[] = [];
+  let failWrite = false;
+  const settings = {
+    drainErrors() { const out = errors; errors = []; return out; },
+    setDefaultModelAndProvider(provider: string, id: string) { calls.push([provider, id]); },
+    async flush() { await Promise.resolve(); calls.push("flushed"); if (failWrite) errors.push(Error()); },
+  };
+  await persistDefaultModel(settings, models[2]);
+  assert.deepEqual(calls, [["openrouter", "gamma"], "flushed"]);
+  calls.length = 0;
+  errors.push(Error("malformed settings"));
+  await assert.rejects(persistDefaultModel(settings, models[2]), /Cannot load/);
+  assert.deepEqual(calls, []);
+  failWrite = true;
+  await assert.rejects(persistDefaultModel(settings, models[2]), /Cannot save/);
 });
 
 test("resolveModelArgument: exact match wins, then substring; empty matches none", () => {

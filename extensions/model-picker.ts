@@ -29,7 +29,10 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
+  applyModelPick,
   classifyKey,
+  persistDefaultModel,
+  type ModelPick,
   keyOf,
   loadUsage,
   MAX_VISIBLE,
@@ -125,10 +128,16 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
     theme?: unknown,
   ) => SelectListLike) | null = null;
   let selectListTheme: unknown;
+  let matchesSaveKey = (data: string) => classifyKey(data).kind === "save-default";
+  let truncate = (text: string, width: number) => text.slice(0, Math.max(0, width));
   try {
     const tui = (await import("@earendil-works/pi-tui")) as unknown as {
       SelectList?: typeof SelectListCtor;
+      matchesKey?: (data: string, key: string) => boolean;
+      truncateToWidth?: typeof truncate;
     };
+    if (tui.matchesKey) matchesSaveKey = (data) => tui.matchesKey!(data, "ctrl+s");
+    truncate = tui.truncateToWidth ?? truncate;
     SelectListCtor = tui.SelectList ?? null;
     if (SelectListCtor !== null) {
       const piPkg = (await import("@earendil-works/pi-coding-agent")) as unknown as {
@@ -162,29 +171,35 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
    */
   const makeTypeahead = (
     items: SelectListItem[],
-    onPick: (value: string) => void,
+    onPick: (value: ModelPick) => void,
     onQuit: () => void,
   ) => {
     let query = "";
     let list = new SelectListCtor!(items, MAX_VISIBLE, selectListTheme);
-    list.onSelect = (item) => onPick(item.value);
+    list.onSelect = (item) => onPick({ value: item.value, saveDefault: false });
     list.onCancel = () => onQuit();
     const rebuild = () => {
       const q = query.toLowerCase();
       const matches = q ? items.filter((i) => i.value.toLowerCase().includes(q)) : items;
       list = new SelectListCtor!(matches, MAX_VISIBLE, selectListTheme);
-      list.onSelect = (item) => onPick(item.value);
+      list.onSelect = (item) => onPick({ value: item.value, saveDefault: false });
       list.onCancel = () => onQuit();
     };
     return {
       render(width: number): string[] {
         return [
-          " Model — type to search · ↑↓ move · PgUp/PgDn page · enter select · esc close",
-          ` > ${query}${query ? "" : "(type to search)"}`,
+          truncate(" Model — ↑↓ move · PgUp/PgDn page · enter select · esc close", width),
+          truncate(" Ctrl+s select and save as default", width),
+          truncate(` > ${query}${query ? "" : "(type to search)"}`, width),
           ...list.render(width),
         ];
       },
       handleInput(data: string): void {
+        if (matchesSaveKey(data)) {
+          const selected = list.filteredItems[list.selectedIndex];
+          if (selected) onPick({ value: selected.value, saveDefault: true });
+          return;
+        }
         const key = classifyKey(data);
         if (key.kind === "type") {
           query += key.char;
@@ -215,11 +230,11 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
     };
   };
 
-  /** Open the typeahead modal. Returns the picked "provider/id", or null. */
-  const openPicker = async (ctx: ExtensionContext): Promise<string | null> => {
+  /** Open the typeahead modal, retaining whether persistence was requested. */
+  const openPicker = async (ctx: ExtensionContext): Promise<ModelPick | null> => {
     if (SelectListCtor === null) return null;
     const sorted = sortedModels(ctx);
-    if (sorted.length < 2) return null;
+    if (sorted.length === 0) return null;
     const current = (ctx as unknown as { model?: PickerModel | undefined }).model;
     const currentKey = current ? keyOf(current.provider, current.id) : null;
     const items = sorted.map((m) => {
@@ -239,11 +254,14 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
         ) => { render(width: number): string[]; handleInput(data: string): void; invalidate(): void },
       ) => Promise<T>;
     };
-    return await ui.custom<string | null>((_tui, _theme, _kb, done) => {
+    return await ui.custom<ModelPick | null>((tui, _theme, _kb, done) => {
       const typeahead = makeTypeahead(items, (value) => done(value), () => done(null));
       return {
         render: (width: number) => typeahead.render(width),
-        handleInput: (data: string) => typeahead.handleInput(data),
+        handleInput: (data: string) => {
+          typeahead.handleInput(data);
+          tui.requestRender();
+        },
         invalidate: () => typeahead.invalidate(),
       };
     });
@@ -274,6 +292,26 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
     return await pi.setModel(target as never);
   };
 
+  const applyPickerResult = async (ctx: ExtensionContext, picked: ModelPick): Promise<void> => {
+    const models = sortedModels(ctx);
+    const result = await applyModelPick(
+      picked,
+      models,
+      (target) => applyPick(ctx, keyOf(target.provider, target.id), models),
+      async (target) => {
+        const { SettingsManager } = await import("@earendil-works/pi-coding-agent");
+        // Fresh manager merges only modified fields under Pi's settings lock.
+        const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: false });
+        await persistDefaultModel(settings, target);
+      },
+    );
+    if (result === "saved") ctx.ui.notify(`Default model saved: ${picked.value}.`, "info");
+    if (result === "save-failed") {
+      ctx.ui.notify("Model selected for this session, but saving the default failed. Check Pi settings permissions and JSON validity.", "error");
+    }
+    if (result === "switch-failed") ctx.ui.notify("Model switch failed; default not saved.", "error");
+  };
+
   // Keep the frecency data warm on every selection, however it happens.
   pi.on("model_select", (event: { model?: PickerModel | undefined }) => {
     const m = event?.model;
@@ -298,8 +336,7 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
       if (typeof idle !== "function" || idle() !== false) process.exit(0);
       return;
     }
-    const sorted = sortedModels(ctx);
-    await applyPick(ctx, picked, sorted);
+    await applyPickerResult(ctx, picked);
   });
 
   pi.registerCommand("models", {
@@ -321,7 +358,7 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
       if (query.length === 0) {
         if (ctx.mode === "tui" && hasSelectList) {
           const picked = await openPicker(ctx);
-          if (picked !== null) await applyPick(ctx, picked, models);
+          if (picked !== null) await applyPickerResult(ctx, picked);
           return;
         }
         const current = (ctx as unknown as { model?: PickerModel | undefined }).model;
@@ -371,8 +408,7 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
       }
       const picked = await openPicker(ctx);
       if (picked !== null) {
-        const sorted = sortedModels(ctx);
-        await applyPick(ctx, picked, sorted);
+        await applyPickerResult(ctx, picked);
       }
     },
   });
