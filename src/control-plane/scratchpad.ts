@@ -18,8 +18,8 @@ import { SCRATCHPAD_SCHEMA_VERSION, type ScratchpadNote, type ScratchpadState } 
 
 export const MAX_NOTES = 50;
 export const MAX_NOTE_LENGTH = 4000;
-/** Total injected block is capped separately in ui.ts alongside the task
- * brief's own injectionTotal limit; this bounds an individual note only. */
+/** Total injected block is capped separately by ui.ts's own injectionTotal
+ * limit; this bounds an individual note only. */
 
 export function emptyScratchpad(now: string = new Date().toISOString()): ScratchpadState {
   return { schemaVersion: SCRATCHPAD_SCHEMA_VERSION, notes: [], updatedAt: now };

@@ -2,12 +2,15 @@
  * Control-plane state: safe defaults, normalization, cycling, validation,
  * and restoration from persisted session entries.
  *
- * Fail-closed rules enforced here:
- * - Defaults are always Discuss + Read-only.
- * - Restoration failure of any kind yields the defaults, never Execute and
- *   never an autonomy above Read-only.
- * - A restored interpretation guard is always cleared (the interpretation
- *   turn cannot survive a session restart).
+ * Posture defaults:
+ * - A TRULY FRESH session (no prior control-plane state at all) opens
+ *   edit-ready: Execute + Auto (accept-edits), so the daily driver "just goes"
+ *   without a mode switch. See freshState().
+ * - defaultState() stays the fail-closed safe fallback: Discuss + Read-only.
+ *   It is used whenever prior state EXISTED but could not be trusted, so a
+ *   corrupted session never silently gains edit power.
+ * - Restoration of malformed/unknown state yields defaultState() (read-only),
+ *   never Execute and never an autonomy above Read-only.
  */
 
 import {
@@ -15,12 +18,10 @@ import {
   type Autonomy,
   type ControlPlaneState,
   type ContextSnapshot,
-  type PendingInterpretation,
   type Phase,
   PHASES,
   SNAPSHOT_SCHEMA_VERSION,
   STATE_SCHEMA_VERSION,
-  type TaskBrief,
 } from "./types.ts";
 
 export function defaultState(now: string = new Date().toISOString()): ControlPlaneState {
@@ -28,13 +29,22 @@ export function defaultState(now: string = new Date().toISOString()): ControlPla
     schemaVersion: STATE_SCHEMA_VERSION,
     phase: "discuss",
     autonomy: "read-only",
-    acceptedTask: null,
-    pendingInterpretation: null,
     previousContextSnapshot: null,
     sourceToggles: {},
-    interpretGuard: null,
     updatedAt: now,
   };
+}
+
+/**
+ * The posture a genuinely fresh session opens in: Execute + Auto (accept-edits).
+ * Edits inside the project root apply without a confirm from turn one (see
+ * tool-policy.ts "auto:in-root-edit"); writes outside the root still prompt.
+ * This is deliberately NOT defaultState(): defaultState stays the read-only
+ * fallback for untrusted/corrupted restores, so only a clean fresh start is
+ * edit-ready.
+ */
+export function freshState(now: string = new Date().toISOString()): ControlPlaneState {
+  return { ...defaultState(now), phase: "execute", autonomy: "auto" };
 }
 
 /** Normalize a phase name. Returns null for anything unrecognized. */
@@ -73,68 +83,54 @@ export function cycleAutonomy(current: Autonomy): Autonomy {
 
 /**
  * The user-facing merged setting. Internally phase and autonomy stay separate
- * (enforcement precedence is unchanged), but only these six combinations are
- * reachable: Discuss/Plan/Verify imply read-only, and Execute chooses between
- * attended, restricted, and unattended.
- *
- * execute-unattended is deliberately placed last in the cycle, after
- * execute-restricted: alt+p / /mode cycling reaches it only by passing
- * through the other four modes first, never as an accidental single step
- * from Discuss. It carries its own gate (an accepted task brief is required)
- * enforced in tool-policy.ts, not here - this module only sequences modes.
+ * (enforcement precedence is unchanged); these four labels select the only
+ * combinations Pi exposes:
+ *   plan   -> read-only (talk/plan; every mutating tool blocked, reads allowed)
+ *   manual -> execute + attended (changes allowed, risky operations confirm)
+ *   accept -> execute + auto (in-root edits apply silently; everything else confirms)
+ *   auto   -> execute + unattended (full autonomy, policy-enforced by
+ *             tool-policy.ts, not here). It is deliberately last in the
+ *             cycle so alt+p / /mode reaches it only after the other modes,
+ *             never as an accidental single step from read-only Plan.
  */
-export const MODES = [
-  "discuss",
-  "plan",
-  "execute",
-  "auto",
-  "execute-restricted",
-  "execute-unattended",
-  "verify",
-] as const;
+export const MODES = ["plan", "manual", "accept", "auto"] as const;
 export type Mode = (typeof MODES)[number];
 
 export function stateForMode(mode: Mode): { phase: Phase; autonomy: Autonomy } {
   switch (mode) {
-    case "discuss":
-      return { phase: "discuss", autonomy: "read-only" };
     case "plan":
       return { phase: "plan", autonomy: "read-only" };
-    case "execute":
+    case "manual":
       return { phase: "execute", autonomy: "attended" };
-    case "auto":
+    case "accept":
       return { phase: "execute", autonomy: "auto" };
-    case "execute-restricted":
-      return { phase: "execute", autonomy: "restricted" };
-    case "execute-unattended":
+    case "auto":
       return { phase: "execute", autonomy: "unattended" };
-    case "verify":
-      return { phase: "verify", autonomy: "read-only" };
   }
 }
 
-/** The mode a phase/autonomy pair corresponds to, or null for legacy combos. */
+/** The mode a phase/autonomy pair corresponds to, or null for combos with no
+ * mode (execute+restricted, execute+read-only). Any read-only phase maps to
+ * Plan, the sole read-only mode. */
 export function modeOf(phase: Phase, autonomy: Autonomy): Mode | null {
   if (phase === "execute") {
-    if (autonomy === "attended") return "execute";
-    if (autonomy === "auto") return "auto";
-    if (autonomy === "restricted") return "execute-restricted";
-    if (autonomy === "unattended") return "execute-unattended";
+    if (autonomy === "attended") return "manual";
+    if (autonomy === "auto") return "accept";
+    if (autonomy === "unattended") return "auto";
     return null;
   }
-  return autonomy === "read-only" ? (phase as Mode) : null;
+  return autonomy === "read-only" ? "plan" : null;
 }
 
 /**
- * Coerce a legacy phase/autonomy combo (from a session saved before phase and
- * autonomy were merged) to the nearest mode WITHOUT escalating permissions:
- * non-execute phases drop elevated autonomy to read-only; execute+read-only
- * (which allowed nothing mutating anyway) becomes discuss.
+ * Coerce any phase/autonomy combo to a mode WITHOUT escalating permissions.
+ * Anything that has no direct mode - execute+restricted, execute+read-only, or
+ * a non-execute phase carrying elevated autonomy (from a session saved before
+ * the modes were reduced) - falls back to the safe read-only Plan; the coercion
+ * never grants edit power the raw pair lacked.
  */
 export function coerceToMode(phase: Phase, autonomy: Autonomy): Mode {
-  const mode = modeOf(phase, autonomy);
-  if (mode !== null) return mode;
-  return phase === "execute" ? "discuss" : (phase as Mode);
+  return modeOf(phase, autonomy) ?? "plan";
 }
 
 export function cycleMode(current: Mode): Mode {
@@ -146,67 +142,8 @@ function isString(value: unknown): value is string {
   return typeof value === "string";
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every(isString);
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export function validateTaskBrief(value: unknown): TaskBrief | null {
-  if (!isRecord(value)) return null;
-  const listFields = [
-    "deliverables",
-    "includedScope",
-    "excludedScope",
-    "constraints",
-    "assumptions",
-    "unknowns",
-    "completionCriteria",
-    "approvalBoundaries",
-  ] as const;
-  if (!isString(value.id) || value.id.length === 0) return null;
-  if (!isString(value.objective)) return null;
-  if (!isString(value.sourceRequest)) return null;
-  if (value.source !== "direct" && value.source !== "interpretation") return null;
-  if (!isString(value.createdAt) || !isString(value.updatedAt)) return null;
-  for (const field of listFields) {
-    if (!isStringArray(value[field])) return null;
-  }
-  return {
-    id: value.id,
-    objective: value.objective,
-    deliverables: value.deliverables as string[],
-    includedScope: value.includedScope as string[],
-    excludedScope: value.excludedScope as string[],
-    constraints: value.constraints as string[],
-    assumptions: value.assumptions as string[],
-    unknowns: value.unknowns as string[],
-    completionCriteria: value.completionCriteria as string[],
-    approvalBoundaries: value.approvalBoundaries as string[],
-    sourceRequest: value.sourceRequest,
-    source: value.source,
-    createdAt: value.createdAt,
-    updatedAt: value.updatedAt,
-  };
-}
-
-function validatePendingInterpretation(value: unknown): PendingInterpretation | null {
-  if (!isRecord(value)) return null;
-  if (!isString(value.raw)) return null;
-  if (typeof value.valid !== "boolean") return null;
-  if (!isStringArray(value.missingSections)) return null;
-  if (!isString(value.createdAt)) return null;
-  const brief = value.brief === null ? null : validateTaskBrief(value.brief);
-  if (value.brief !== null && brief === null) return null;
-  return {
-    raw: value.raw,
-    brief,
-    valid: value.valid,
-    missingSections: value.missingSections as string[],
-    createdAt: value.createdAt,
-  };
 }
 
 function validateSnapshot(value: unknown): ContextSnapshot | null {
@@ -238,15 +175,6 @@ export function validateState(value: unknown): ControlPlaneState | null {
   const autonomy = value.autonomy as Autonomy;
   if (!isString(value.updatedAt)) return null;
 
-  const acceptedTask = value.acceptedTask === null ? null : validateTaskBrief(value.acceptedTask);
-  if (value.acceptedTask !== null && acceptedTask === null) return null;
-
-  const pending =
-    value.pendingInterpretation === null
-      ? null
-      : validatePendingInterpretation(value.pendingInterpretation);
-  if (value.pendingInterpretation !== null && pending === null) return null;
-
   const snapshot =
     value.previousContextSnapshot === null ? null : validateSnapshot(value.previousContextSnapshot);
   if (value.previousContextSnapshot !== null && snapshot === null) return null;
@@ -262,13 +190,8 @@ export function validateState(value: unknown): ControlPlaneState | null {
     schemaVersion: STATE_SCHEMA_VERSION,
     phase,
     autonomy,
-    acceptedTask,
-    pendingInterpretation: pending,
     previousContextSnapshot: snapshot,
     sourceToggles,
-    // Guard state is validated structurally but always cleared on restore by
-    // sanitizeRestoredState(); carry it through untouched here.
-    interpretGuard: null,
     updatedAt: value.updatedAt,
   };
 }
@@ -300,12 +223,16 @@ export function restoreFromEntries(
     }
     ignoredMalformed++;
   }
-  return { state: defaultState(now), restored: false, ignoredMalformed };
+  // No trusted prior state. Distinguish a truly fresh session (nothing was
+  // ever persisted) from a corrupted one (entries existed but were malformed):
+  // the former opens edit-ready, the latter falls back to the safe read-only
+  // default so corruption never silently escalates authority.
+  const state = ignoredMalformed === 0 ? freshState(now) : defaultState(now);
+  return { state, restored: false, ignoredMalformed };
 }
 
-/** A restored session must never resume with an active interpretation guard,
- * and legacy phase/autonomy combos are coerced to a mode without escalation. */
+/** Legacy phase/autonomy combos are coerced to a mode without escalation. */
 export function sanitizeRestoredState(state: ControlPlaneState): ControlPlaneState {
   const { phase, autonomy } = stateForMode(coerceToMode(state.phase, state.autonomy));
-  return { ...state, phase, autonomy, interpretGuard: null };
+  return { ...state, phase, autonomy };
 }

@@ -36,14 +36,12 @@ function evalInput(overrides: Partial<EvaluateInput> & { toolName: string }): Ev
   const root = overrides.projectRoot ?? makeTempRoot();
   return {
     toolInput: {},
-    guardActive: false,
     phase: "execute",
     autonomy: "restricted",
     cwd: root,
     projectRoot: root,
     policy,
     ops: realOps,
-    hasAcceptedTask: true,
     ...overrides,
   };
 }
@@ -201,12 +199,6 @@ test("policy validation: strict shape, unknown keys rejected", () => {
   assert.equal(validatePolicy({ ...policy, extraKey: true }), null);
 });
 
-test("interpretation guard blocks every tool including reads", () => {
-  const decision = evaluateToolCall(evalInput({ toolName: "read", guardActive: true, toolInput: { path: "x" } }));
-  assert.equal(decision.action, "block");
-  assert.equal(decision.rule, "interpretation-guard");
-});
-
 test("Discuss/Plan/Verify block mutation and shell regardless of autonomy; reads still allowed", () => {
   for (const phase of ["discuss", "plan", "verify"] as const) {
     for (const autonomy of ["read-only", "attended", "restricted"] as const) {
@@ -312,49 +304,77 @@ test("unresolvable path is denied even in permissive modes", () => {
   assert.equal(decision.rule, "path-unresolvable");
 });
 
-test("Unattended: mutation blocked without an accepted task brief; reads unaffected", () => {
+test("Unattended (Auto): full autonomy - shell, unknown tools and out-of-root writes run; protected paths stay blocked", () => {
+  // Contract change, 2026-09-16. Unattended used to share Restricted's
+  // enforcement, so Auto BLOCKED bash ("restricted:shell") and unknown tools
+  // ("restricted:unknown-tool") that Manual merely CONFIRMS - the top of the
+  // mode ladder was stricter than the middle of it, contradicting state.ts
+  // ("auto -> execute + unattended (full autonomy)"). Auto now returns only
+  // allow or block: no human is present to answer a confirmation.
   const root = fs.realpathSync(makeTempRoot());
   const base = {
     phase: "execute" as const,
     autonomy: "unattended" as const,
     projectRoot: root,
     cwd: root,
-    hasAcceptedTask: false,
   };
-  const write = evaluateToolCall(evalInput({ toolName: "write", ...base, toolInput: { path: "f.txt", content: "" } }));
-  assert.equal(write.action, "block");
-  assert.equal(write.rule, "unattended:no-task");
-  const bash = evaluateToolCall(evalInput({ toolName: "bash", ...base, toolInput: { command: "ls" } }));
-  assert.equal(bash.action, "block");
-  assert.equal(bash.rule, "unattended:no-task");
-  // Reads are not gated by the task-brief requirement.
   const read = evaluateToolCall(evalInput({ toolName: "read", ...base, toolInput: { path: "f.txt" } }));
   assert.equal(read.action, "allow");
-});
-
-test("Unattended: with an accepted task, enforcement is identical to Restricted", () => {
-  const root = fs.realpathSync(makeTempRoot());
-  const base = {
-    phase: "execute" as const,
-    autonomy: "unattended" as const,
-    projectRoot: root,
-    cwd: root,
-    hasAcceptedTask: true,
-  };
   const inRoot = evaluateToolCall(evalInput({ toolName: "write", ...base, toolInput: { path: "src/new.ts", content: "" } }));
   assert.equal(inRoot.action, "allow");
+  // Out-of-root writes: Manual confirms them, so Auto must not block them.
   const outRoot = evaluateToolCall(evalInput({ toolName: "write", ...base, toolInput: { path: "/tmp/elsewhere.txt", content: "" } }));
-  assert.equal(outRoot.action, "block");
-  assert.equal(outRoot.rule, "restricted:outside-root");
+  assert.equal(outRoot.action, "allow");
+  // Rule carries the tool CATEGORY (classifyTool), so a write is "mutate".
+  assert.equal(outRoot.rule, "unattended:mutate");
+  // Shell runs without confirmation - the reported defect.
+  const shell = evaluateToolCall(evalInput({ toolName: "bash", ...base, toolInput: { command: "curl x" } }));
+  assert.equal(shell.action, "allow");
+  assert.equal(shell.rule, "unattended:shell");
+  // A third-party tool the control plane does not classify is no longer
+  // categorically denied.
+  const unknown = evaluateToolCall(evalInput({ toolName: "ask_user_question", ...base, toolInput: { question: "x" } }));
+  assert.equal(unknown.action, "allow");
+  assert.equal(unknown.rule, "unattended:unknown");
+  // The one surviving categorical guard: protected paths are BLOCKED, not
+  // confirmed - no confirmation step exists in Auto that could release them.
   const cred = evaluateToolCall(evalInput({ toolName: "write", ...base, toolInput: { path: ".env", content: "" } }));
   assert.equal(cred.action, "block");
-  assert.equal(cred.rule, "restricted:credential-path");
-  const shell = evaluateToolCall(evalInput({ toolName: "bash", ...base, toolInput: { command: "curl x" } }));
-  assert.equal(shell.action, "block");
-  assert.equal(shell.rule, "restricted:shell");
+  assert.equal(cred.rule, "unattended:credential-path");
 });
 
-test("Unattended: an invalid/missing policy still fails closed to Read-only, task brief or not", () => {
+test("mode ladder is monotonic: Auto never blocks what Manual or Accept would permit", () => {
+  // The invariant the inverted-ladder bug violated, pinned so it cannot return.
+  // A confirm is releasable by the user; a block is not - so Auto blocking a
+  // call that a lower autonomy level allows or confirms is a regression.
+  const root = fs.realpathSync(makeTempRoot());
+  const calls = [
+    { toolName: "bash", toolInput: { command: "echo hi" } },
+    { toolName: "ask_user_question", toolInput: { question: "x" } },
+    { toolName: "write", toolInput: { path: "src/new.ts", content: "" } },
+    { toolName: "write", toolInput: { path: "/tmp/elsewhere.txt", content: "" } },
+    { toolName: "read", toolInput: { path: "f.txt" } },
+  ];
+  for (const call of calls) {
+    const auto = evaluateToolCall(
+      evalInput({ ...call, phase: "execute", autonomy: "unattended", projectRoot: root, cwd: root }),
+    );
+    for (const lower of ["attended", "auto"] as const) {
+      const lowerDecision = evaluateToolCall(
+        evalInput({ ...call, phase: "execute", autonomy: lower, projectRoot: root, cwd: root }),
+      );
+      if (lowerDecision.action !== "block") {
+        assert.notEqual(
+          auto.action,
+          "block",
+          `Auto blocked ${call.toolName} (${auto.rule}) while ${lower} returned ${lowerDecision.action}`,
+        );
+      }
+    }
+  }
+});
+
+test("Unattended: an invalid/missing policy still fails closed to Read-only", () => {
   const root = fs.realpathSync(makeTempRoot());
   const base = {
     phase: "execute" as const,
@@ -362,7 +382,6 @@ test("Unattended: an invalid/missing policy still fails closed to Read-only, tas
     projectRoot: root,
     cwd: root,
     policy: null,
-    hasAcceptedTask: true,
   };
   const write = evaluateToolCall(evalInput({ toolName: "write", ...base, toolInput: { path: "a", content: "" } }));
   assert.equal(write.action, "block");

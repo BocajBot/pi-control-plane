@@ -4,11 +4,9 @@
 
 What this extension defends against:
 
-- **Scope drift** — the agent doing more than the accepted task (phase gates, task-brief injection, approval boundaries).
-- **Unreviewed mutation** — files changed or commands run before the user has seen and corrected the agent's understanding (Discuss/Plan/Verify block mutation; Read-only default; Attended confirmations).
-- **Accidental damage** — writes outside the project, credential files touched, destructive operations (Restricted policy: root containment, canonical paths, deny lists).
+- **Unreviewed mutation** — files changed or commands run before the user has seen and corrected the agent's understanding (Plan blocks mutation; Manual confirms each risky call; Accept confirms everything except in-root edits; Auto runs unattended — see below).
+- **Accidental damage** — writes outside the project, credential files touched, destructive operations (Manual/Accept confirmations; in Auto, credential-pattern paths stay blocked and every allowed call is logged).
 - **Context opacity** — not knowing what the model can see (redacted inspection, hashes, diffs).
-- **Prompt-injection via task text** — user-supplied or interpreted task content imitating control-plane instructions (delimiter neutralization; task text treated as data).
 
 What it does **not** defend against:
 
@@ -20,17 +18,17 @@ What it does **not** defend against:
 
 Everything runs inside Pi's Node process with the user's full privileges. The `tool_call` hook is a policy checkpoint **inside** that process — cooperative enforcement, not containment.
 
-## Unattended is Restricted plus a mandatory scope boundary, not a separate permission tier
+## Auto runs unattended by design; the audit log is the compensating control
 
-`/mode execute-unattended` reuses `RestrictedPolicy` enforcement byte-for-byte (same deny lists, same root/allowlist containment, same `allowBash` gate) — it is not a more permissive mode. The one thing it adds is a precondition: no mutating call is permitted until a task brief is accepted (`/interpret` + `/task accept`, or `/task set`), because this is the one mode meant to run with nobody confirming actions in real time, and the accepted brief is the only scope boundary a human reviewed before that happened. Every *allowed* mutating or shell call is additionally logged as a diagnostic entry, specifically so there is something to review after the fact when there was no one to review it during. Reads are not gated by the task-brief requirement, and read tools are not logged (matches "reads execute immediately" everywhere else in this codebase — the volume would drown out the signal, and reads are not the risk this precondition targets). None of this is sandboxing; see below — it is the same cooperative Pi-level policy interception as Restricted, run without a human watching, which is exactly why the extra precondition and the audit trail exist.
+`/mode auto` (aliases `unattended`/`execute-unattended`) is the top of the mode ladder and is deliberately at least as permissive as Manual: there is no human in the loop to answer a confirmation, so every decision is allow or block — shell commands, unclassified third-party tools, and out-of-root targets run without asking. Two guards survive because neither is a confirmation a human could have released: an unloadable or invalid policy file fails closed to read-only, and credential-pattern paths (`denyPathBasenames`/`denyPathSubstrings`) are categorically blocked. Because this is the one mode meant to run with nobody confirming actions in real time, every *allowed* mutating or shell call is additionally logged as a diagnostic entry, specifically so there is something to review after the fact when there was no one to review it during. Read tools are not logged (matches "reads execute immediately" everywhere else in this codebase — the volume would drown out the signal). None of this is sandboxing; see below — it is cooperative Pi-level policy interception, which is exactly why the audit trail exists.
 
-## Restricted is not a sandbox
+## Pi-level policy enforcement is not a sandbox
 
-`/mode execute-restricted` (and its alias `sandboxed`) is Pi-level policy interception. It is not equivalent to a container, a VM, a restricted Unix user, Linux namespaces, seccomp, AppArmor, SELinux, Bubblewrap, Firejail, or filesystem virtualization. A process that escapes cooperation (native code, a compromised dependency, a Pi bug) is not contained by it. That is why the alias prints a warning and the status bar never says "Sandboxed". For real isolation, run Pi inside an OS-level sandbox.
+The control plane's policy layer (`RestrictedPolicy` in `tool-policy.ts`, applied in Auto) is Pi-level policy interception. It is not equivalent to a container, a VM, a restricted Unix user, Linux namespaces, seccomp, AppArmor, SELinux, Bubblewrap, Firejail, or filesystem virtualization. A process that escapes cooperation (native code, a compromised dependency, a Pi bug) is not contained by it. That is why the `sandboxed` alias still prints a warning (and degrades to read-only Plan — the mode it once selected no longer exists) and the status bar never says "Sandboxed". For real isolation, run Pi inside an OS-level sandbox.
 
 ## `/bwrap` is real isolation, with specific, listed limits
 
-Unlike `execute-restricted`, `/bwrap on` (`sandbox.ts`) is not cooperative enforcement — it wraps the allowed `bash` command in `bwrap`, which asks the *kernel* for unprivileged user namespaces (mount, PID, UTS, IPC, and — unless `/bwrap network on` — network) before the command runs. A command inside cannot write outside the project root, cannot see a different process tree, and (network off, the default) cannot resolve a hostname at all, regardless of what the command itself tries to do. This was verified directly, not just asserted: a write to a read-only-bound system path fails with `Read-only file system`; `curl` against a real host fails with a DNS resolution error; a file placed under a shadowed credential directory reads back empty inside the sandbox while remaining intact outside it.
+Unlike Auto-mode policy, `/bwrap on` (`sandbox.ts`) is not cooperative enforcement — it wraps the allowed `bash` command in `bwrap`, which asks the *kernel* for unprivileged user namespaces (mount, PID, UTS, IPC, and — unless `/bwrap network on` — network) before the command runs. A command inside cannot write outside the project root, cannot see a different process tree, and (network off, the default) cannot resolve a hostname at all, regardless of what the command itself tries to do. This was verified directly, not just asserted: a write to a read-only-bound system path fails with `Read-only file system`; `curl` against a real host fails with a DNS resolution error; a file placed under a shadowed credential directory reads back empty inside the sandbox while remaining intact outside it.
 
 What it still does not cover:
 
@@ -41,13 +39,13 @@ What it still does not cover:
 - **`/bwrap` and `/mode sandboxed` are unrelated settings that happen to share a family resemblance in the word "sandbox".** Enabling one does not enable or imply the other. `/bwrap status` and the footer segment are the only places that report the real setting; `/mode`'s status line never says "Sandboxed" for exactly this reason (see above).
 - **Fails closed, not silently.** If `bwrap` is enabled but the binary is missing from `PATH` (uninstalled, or removed mid-session), the `bash` call is blocked with an explicit reason rather than falling back to running unsandboxed.
 
-## Why shell is blocked entirely in Read-only (and by default in Restricted)
+## Why shell is blocked entirely in Plan (Read-only)
 
-Deciding whether an arbitrary shell command is "safe" requires parsing shell semantics (aliases, subshells, `$(...)`, `xargs`, redirects). Empirical result from a comparable agent harness on this machine: command-*pattern* allow/deny rules failed to reliably block matching commands, while whole-tool denial blocked reliably. So the control plane never classifies commands — the `bash` tool is allowed or denied as a unit. Attended mode is the escape hatch: each command is shown to the user verbatim for approval.
+Deciding whether an arbitrary shell command is "safe" requires parsing shell semantics (aliases, subshells, `$(...)`, `xargs`, redirects). Empirical result from a comparable agent harness on this machine: command-*pattern* allow/deny rules failed to reliably block matching commands, while whole-tool denial blocked reliably. So the control plane never classifies commands — the `bash` tool is allowed or denied as a unit. Manual and Accept are the escape hatch: each command is shown to the user verbatim for approval. Auto allows commands outright, logged.
 
 ## Unknown tools
 
-Any tool not in the built-in classification (`read`, `grep`, `find`, `ls` / `edit`, `write` / `bash`) is unknown. Unknown is never safe: blocked in Read-only and Restricted, confirmation-gated in Attended, blocked outside Execute.
+Any tool not in the built-in classification (`read`, `grep`, `find`, `ls` / `edit`, `write` / `bash`) is unknown. Unknown is never silently safe: blocked in Plan, confirmation-gated in Manual and Accept, and in Auto it runs — logged — because there is no human to ask. The model's own description of the tool is the only signal about what it does; treat unknown-tool calls in Auto as reviewed only after the fact, via the diagnostic log.
 
 ## Path validation
 
@@ -61,9 +59,8 @@ A Restricted-mode (and, since it shares the same policy engine, Unattended-mode)
 
 | Failure | Result |
 |---|---|
-| Saved state malformed / unknown schema | Discuss + Read-only |
-| Restricted or Unattended policy missing/invalid (incl. a policy file saved under the old schema version) | Enforces Read-only semantics; status says so |
-| Unattended mode entered without an accepted task brief | Every mutating/shell call blocked (`unattended:no-task`); reads unaffected |
+| Saved state malformed / unknown schema | Read-only (Plan) |
+| Auto policy missing/invalid (incl. a policy file saved under the old schema version) | Enforces Read-only semantics; status says so |
 | Scratchpad entry malformed / unknown schema | That entry ignored, newest-still-valid entry restored, or empty scratchpad if none valid — same posture as state restoration, never a partially-repaired guess |
 | Sandbox entry malformed / unknown schema | Same posture: entry ignored, newest-still-valid restored, or sandbox off if none valid |
 | `/bwrap on` requested but `bwrap` not on PATH | Refused with an error; sandbox stays off |
@@ -74,7 +71,6 @@ A Restricted-mode (and, since it shares the same policy engine, Unattended-mode)
 | Path unresolvable | Blocked |
 | Tool unknown | Blocked (or confirm in Attended) |
 | Source excision unverifiable | Source re-enabled and reported as enabled |
-| Restart during /interpret | Guard cleared; mode from last persisted state |
 
 ## Secret redaction and its limits
 
@@ -84,9 +80,9 @@ Deterministic regex redaction (`redaction.ts`) runs before context display, befo
 
 Persisted (in the Pi session file, via custom entries excluded from LLM context):
 
-- Control-plane state: phase, autonomy, task briefs, source toggles, one content-free context snapshot (names/counts/hashes only), the redacted+truncated text of a pending interpretation.
-- Command output entries (already-redacted display text) and diagnostic entries (tool name + timestamp; under Unattended, one such entry per *allowed* mutating/shell call too, not only blocked ones).
-- Scratchpad notes: exactly the text given to `/scratchpad add`, capped at 4000 chars per note. This is user/model-authored working content, not redacted like system-prompt or provider-payload text — treat it the same as any other message content you'd put in a task brief.
+- Control-plane state: phase, autonomy, source toggles, one content-free context snapshot (names/counts/hashes only).
+- Command output entries (already-redacted display text) and diagnostic entries (tool name + timestamp; under Auto, one such entry per *allowed* mutating/shell call too, not only blocked ones).
+- Scratchpad notes: exactly the text given to `/scratchpad add`, capped at 4000 chars per note. This is user/model-authored working content, not redacted like system-prompt or provider-payload text — treat it the same as any other message content you'd put in a scratchpad note.
 
 Never persisted by this extension:
 

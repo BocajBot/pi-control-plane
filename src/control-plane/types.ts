@@ -9,10 +9,9 @@ export const PHASES = ["discuss", "plan", "execute", "verify"] as const;
 export type Phase = (typeof PHASES)[number];
 
 /**
- * "unattended" is gated: evaluateToolCall() (tool-policy.ts) refuses to grant
- * it any mutation unless an accepted task brief exists, and every allowed
- * call under it is logged as a diagnostic entry (audit trail for when nobody
- * is watching in real time) - see extension entry, tool_call handler.
+ * "unattended" runs full autonomy with nobody watching in real time: every
+ * allowed call under it is logged as a diagnostic entry (audit trail for
+ * later review) - see extension entry, tool_call handler.
  *
  * "auto" sits between attended and restricted: ordinary edits inside the
  * project root stop asking, while everything a confirmation actually protects
@@ -25,7 +24,7 @@ export type Phase = (typeof PHASES)[number];
 export const AUTONOMY_LEVELS = ["read-only", "attended", "auto", "restricted", "unattended"] as const;
 export type Autonomy = (typeof AUTONOMY_LEVELS)[number];
 
-export const STATE_SCHEMA_VERSION = 1;
+export const STATE_SCHEMA_VERSION = 2;
 export const SNAPSHOT_SCHEMA_VERSION = 1;
 /** Bumped to 2 for allowPathPrefixes (out-of-root allowlist). A policy file
  * saved under schema 1 is unknown-version -> null -> Read-only fallback,
@@ -38,7 +37,7 @@ export const SANDBOX_SCHEMA_VERSION = 1;
 export const STATE_ENTRY_TYPE = "pi-control-plane-state";
 /** Session entry customType used for chat-visible command output. */
 export const OUTPUT_ENTRY_TYPE = "pi-control-plane-output";
-/** Session entry customType used for diagnostic events (e.g. blocked interpret tool calls,
+/** Session entry customType used for diagnostic events (e.g. blocked reads,
  * and every tool call allowed under Unattended autonomy). */
 export const DIAGNOSTIC_ENTRY_TYPE = "pi-control-plane-diagnostic";
 /** Session entry customType used to persist the scratchpad. Survives /compact
@@ -51,34 +50,6 @@ export const SCRATCHPAD_ENTRY_TYPE = "pi-control-plane-scratchpad";
  * into ControlPlaneState so this feature's schema can evolve independently
  * (see scratchpad.ts's header for the same reasoning). */
 export const SANDBOX_ENTRY_TYPE = "pi-control-plane-sandbox";
-
-export interface TaskBrief {
-  id: string;
-  objective: string;
-  deliverables: string[];
-  includedScope: string[];
-  excludedScope: string[];
-  constraints: string[];
-  assumptions: string[];
-  unknowns: string[];
-  completionCriteria: string[];
-  approvalBoundaries: string[];
-  sourceRequest: string;
-  source: "direct" | "interpretation";
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface PendingInterpretation {
-  /** Redacted, size-limited raw model response, retained for display. */
-  raw: string;
-  /** Parsed brief. Null when parsing failed entirely. */
-  brief: TaskBrief | null;
-  /** True only when every required section was present. */
-  valid: boolean;
-  missingSections: string[];
-  createdAt: string;
-}
 
 export type SourceKind = "context-file" | "skill" | "tool" | "prompt-template";
 
@@ -114,28 +85,15 @@ export interface ContextSnapshot {
   providerPayloadHash: string | null;
   phase: Phase;
   autonomy: Autonomy;
-  hasAcceptedTask: boolean;
-}
-
-export interface InterpretGuard {
-  active: boolean;
-  savedPhase: Phase;
-  savedAutonomy: Autonomy;
-  /** The raw task request being interpreted. */
-  taskRequest: string;
-  startedAt: string;
 }
 
 export interface ControlPlaneState {
   schemaVersion: typeof STATE_SCHEMA_VERSION;
   phase: Phase;
   autonomy: Autonomy;
-  acceptedTask: TaskBrief | null;
-  pendingInterpretation: PendingInterpretation | null;
   previousContextSnapshot: ContextSnapshot | null;
   /** Source toggle map: toggle name -> enabled. Missing key means enabled. */
   sourceToggles: Record<string, boolean>;
-  interpretGuard: InterpretGuard | null;
   updatedAt: string;
 }
 
@@ -172,7 +130,7 @@ export type RiskCategory =
 
 export interface ToolDecision {
   action: ToolAction;
-  /** Which layer produced the decision, e.g. "interpretation-guard", "phase:discuss". */
+  /** Which layer produced the decision, e.g. "autonomy:read-only", "phase:discuss". */
   rule: string;
   /** Human-readable reason, safe to show to the user and the model. */
   reason: string;

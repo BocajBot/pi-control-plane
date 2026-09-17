@@ -177,6 +177,23 @@ export function currentProfileName(
   toggles: Record<string, boolean>,
 ): string | null {
   const enabledSet = new Set(allTools.filter((t) => toggles[TOOL_PREFIX + t] !== false));
+  return matchProfileName(config, allTools, enabledSet);
+}
+
+/** Which profile matches Pi's live active-tool registry. */
+export function currentProfileForActiveTools(
+  config: ProfilesConfig | null,
+  allTools: string[],
+  activeTools: readonly string[],
+): string | null {
+  return matchProfileName(config, allTools, new Set(activeTools));
+}
+
+function matchProfileName(
+  config: ProfilesConfig | null,
+  allTools: string[],
+  enabledSet: ReadonlySet<string>,
+): string | null {
   const alwaysDisabled = new Set(config?.alwaysDisabledTools ?? []);
   const allExpected = allTools.filter((t) => !alwaysDisabled.has(t));
   if (enabledSet.size === allExpected.length && allExpected.every((t) => enabledSet.has(t))) {

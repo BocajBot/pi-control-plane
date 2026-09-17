@@ -3,8 +3,8 @@
  * policy validation, and the combined decision function.
  *
  * Precedence (most restrictive applicable rule wins):
- *   interpretation guard -> workflow phase -> autonomy policy
- *   -> tool classification -> path and destination checks
+ *   workflow phase -> autonomy policy -> tool classification
+ *   -> path and destination checks
  *
  * Design rules baked in:
  * - Unknown tools are never classified as safe.
@@ -230,7 +230,6 @@ export function validatePolicy(value: unknown): RestrictedPolicy | null {
 export interface EvaluateInput {
   toolName: string;
   toolInput: Record<string, unknown>;
-  guardActive: boolean;
   phase: Phase;
   autonomy: Autonomy;
   /** Canonicalized project root. */
@@ -239,16 +238,6 @@ export interface EvaluateInput {
   /** Null means the Restricted policy failed to load/validate. */
   policy: RestrictedPolicy | null;
   ops: PathOps;
-  /**
-   * Whether an accepted task brief currently exists. Only consulted for
-   * autonomy "unattended": mutation is refused entirely without one. Ignored
-   * by every other autonomy level (Attended and Restricted both already
-   * require a human to have explicitly chosen that mode for this session;
-   * Unattended is the one level meant to run with nobody watching in real
-   * time, so it is the one level that requires a human-reviewed scope
-   * boundary to already be in place before it starts).
-   */
-  hasAcceptedTask: boolean;
 }
 
 function targetPathOf(toolInput: Record<string, unknown>): string | null {
@@ -280,25 +269,14 @@ function confirm(
 }
 
 const HINT_PHASE =
-  "Mutation is only possible in an Execute mode: /mode execute (or /mode execute-restricted / execute-unattended).";
+  "Mutation is only possible in an Execute mode: /mode manual (or /mode accept / auto).";
 const HINT_AUTONOMY =
-  "Switch to an Execute mode for this to run: /mode execute (confirm each risky action) or /mode execute-restricted (project-bound policy).";
+  "Switch to an Execute mode for this to run: /mode manual (confirm each risky action) or /mode accept (in-root edits without asking).";
 
 export function evaluateToolCall(input: EvaluateInput): ToolDecision {
-  const { toolName, guardActive, phase, autonomy, projectRoot, cwd, policy, ops } = input;
+  const { toolName, phase, autonomy, projectRoot, cwd, policy, ops } = input;
   const category = classifyTool(toolName);
   const risk = riskCategoryFor(toolName);
-
-  // Layer 1: interpretation guard blocks everything, including reads.
-  if (guardActive) {
-    return block(
-      "interpretation-guard",
-      "All tools are disabled during the /interpret turn. Interpretation is analysis only.",
-      risk,
-      null,
-      "Wait for the interpretation to finish, then /task accept or /task reject.",
-    );
-  }
 
   // Resolve the target path once, when one is present.
   const rawPath = targetPathOf(input.toolInput);
@@ -324,9 +302,7 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
 
   // Read-oriented tools: allowed in every phase, subject to autonomy checks.
   if (category === "read") {
-    // Unattended reuses Restricted's read policy unchanged: observation is
-    // not the risk this level gates (mutation is, via hasAcceptedTask below),
-    // so reads are not held back waiting on a task brief.
+    // Unattended reuses Restricted's read policy unchanged.
     if (autonomy === "restricted" || autonomy === "unattended") {
       if (policy === null) {
         // Policy failed: Read-only semantics. Reads are still allowed.
@@ -381,6 +357,44 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
     return block("autonomy:read-only", `Read-only mode blocks this call. ${detail}`, risk, insideRoot, HINT_AUTONOMY);
   }
 
+  // Unattended (Auto): full autonomy, the top of the mode ladder. There is no
+  // human in the loop to answer a confirmation, so every decision here is allow
+  // or block - never confirm.
+  //
+  // This level previously fell through to the Restricted branch below, which
+  // made Auto STRICTER than Manual: shell and unknown tools were blocked
+  // outright ("restricted:shell", "restricted:unknown-tool") while Manual
+  // merely confirms them. That inverted the ladder and contradicted the
+  // documented contract (state.ts: auto -> "execute + unattended (full
+  // autonomy)"). Auto must be at least as permissive as the modes below it.
+  //
+  // Two guards survive, because neither is a confirmation that a human could
+  // have released: an unloadable/invalid policy still fails closed to
+  // Read-only, and deny-pattern paths stay categorically blocked.
+  if (autonomy === "unattended") {
+    if (policy === null) {
+      return block(
+        "policy-fallback",
+        "The Restricted policy failed to load or validate; falling back to Read-only behavior for this call.",
+        risk,
+        insideRoot,
+        "Fix policy/default-policy.json, then /reload.",
+      );
+    }
+    if (canonical !== null) {
+      const denied = matchesDenyPatterns(canonical, policy);
+      if (denied !== null) {
+        return block(
+          "unattended:credential-path",
+          `"${canonical}" matches a protected path pattern (${denied}). Protected paths stay blocked in Auto - there is no confirmation step that could release them.`,
+          risk,
+          insideRoot,
+        );
+      }
+    }
+    return allow(`unattended:${category}`, risk, insideRoot);
+  }
+
   // Auto: the level that stops asking about ordinary editing and keeps asking
   // about everything else. Deliberately narrow - a file write or edit, with a
   // resolved path, inside the project root, and not a protected path. Anything
@@ -423,23 +437,7 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
     );
   }
 
-  // Unattended: gated on an accepted task brief existing before ANY mutation
-  // is permitted (no human is watching in real time to catch scope drift).
-  // Once gated, enforcement below is byte-for-byte the same RestrictedPolicy
-  // logic Restricted uses - autonomy is not referenced again past this point,
-  // so both levels share every remaining check (policy fallback, shell,
-  // unknown tools, destination, deny patterns).
-  if (autonomy === "unattended" && !input.hasAcceptedTask) {
-    return block(
-      "unattended:no-task",
-      "Unattended mode requires an accepted task brief before any mutation is permitted - there is no human in the loop to catch scope drift here.",
-      risk,
-      insideRoot,
-      "Run /interpret then /task accept, or /task set <text>, first. Or use /mode execute-restricted / execute for a human-attended session instead.",
-    );
-  }
-
-  // Restricted (and, past the gate above, Unattended).
+  // Restricted (and Unattended, which shares this same enforcement path).
   if (policy === null) {
     return block(
       "policy-fallback",
@@ -456,7 +454,7 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
         "Shell execution is blocked by the Restricted policy (allowBash: false). Commands are never pattern-parsed to decide safety.",
         risk,
         insideRoot,
-        "Use /mode execute to approve individual shell commands interactively.",
+        "Use /mode manual to approve individual shell commands interactively.",
       );
     }
     return confirm(
@@ -481,7 +479,7 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
       `${what} categorically denied in Restricted mode (no per-command classification).`,
       risk,
       insideRoot,
-      "Use /mode execute to approve interactively.",
+      "Use /mode manual to approve interactively.",
     );
   }
   // Mutating tool under Restricted: destination checks.

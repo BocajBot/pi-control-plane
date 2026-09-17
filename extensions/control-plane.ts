@@ -1,7 +1,7 @@
 /**
  * Pi Control Plane — extension entry point.
  *
- * Registers the /context, /task, /phase, /autonomy, and /interpret commands,
+ * Registers the /context, /phase, and /autonomy commands,
  * the tool-authorization hook, per-turn state injection, session persistence,
  * the footer status segment, and three hotkeys (alt+c context preview,
  * alt+p phase cycle, alt+a autonomy cycle).
@@ -10,6 +10,7 @@
  * without Pi. This file is wiring only.
  */
 
+import { CreditBalance, readOpenRouterBalance } from "../src/control-plane/credits.ts";
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -21,15 +22,14 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
   ToolCallEvent,
+  ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 
 import {
   parseBwrapArgs,
   parseContextArgs,
-  parseInterpretArgs,
   parseModeArgs,
   parseScratchpadArgs,
-  parseTaskArgs,
 } from "../src/control-plane/commands.ts";
 import { diffIsEmpty, diffSnapshots } from "../src/control-plane/context-diff.ts";
 import {
@@ -42,11 +42,6 @@ import {
   serializeContext,
 } from "../src/control-plane/context-editor.ts";
 import { buildSnapshot, sha256 } from "../src/control-plane/context-snapshot.ts";
-import {
-  buildInterpretationPrompt,
-  directBrief,
-  pendingFromResponse,
-} from "../src/control-plane/interpretation.ts";
 import { redactSecrets } from "../src/control-plane/redaction.ts";
 import {
   buildSandboxedCommand,
@@ -79,6 +74,7 @@ import {
   applyAlwaysDisabled,
   applyProfile,
   clearToolToggles,
+  currentProfileForActiveTools,
   currentProfileName,
   type ProfilesConfig,
   validateProfiles,
@@ -114,6 +110,7 @@ import {
 import {
   buildInjectionBlock,
   contextWarningLevel,
+  compactFooterState,
   displayMode,
   formatAddedContext,
   formatContextWarning,
@@ -121,14 +118,16 @@ import {
   formatDraftCounter,
   formatFooterStats,
   formatStatus,
+  formatTokenCount,
   LIMITS,
   type ProfilePickerItem,
   renderContextSummary,
+  renderActiveTools,
+  renderDiagnosticsPanel,
   renderDiff,
   renderHotkeyCheatsheet,
   renderProfilePicker,
   renderSources,
-  renderTask,
   SANDBOX_ALIAS_WARNING,
   SENSITIVE_OUTPUT_WARNING,
   USAGE,
@@ -149,11 +148,6 @@ import {
   RULES_ENTRY_TYPE,
   type RememberedRulesState,
 } from "../src/control-plane/types.ts";
-import {
-  verifyCompletion,
-  type VerificationReport,
-  type VerifyAuditEntry,
-} from "../src/control-plane/verify.ts";
 import {
   DEFAULT_TRANSCRIPTION_BASE_URL,
   DEFAULT_TRANSCRIPTION_LANGUAGE,
@@ -178,6 +172,8 @@ const TRANSCRIPTION_TIMEOUT_MS = 900_000;
 
 const STATUS_KEY = "control-plane";
 const WIDGET_KEY = "control-plane-context";
+/** Shared left grid: every extension-owned footer/header row starts at column 1. */
+const PAD = " ";
 
 interface OutputEntryData {
   title: string;
@@ -185,14 +181,11 @@ interface OutputEntryData {
 }
 
 /**
- * One-line render for a control-plane diagnostic entry. Kind-aware: the
- * interpretation-guard block keeps its dedicated phrasing, and every OTHER kind
- * renders as its actual kind plus whatever subject it carries (a toolName, or a
- * target). The previous single template rendered EVERY diagnostic as
- * `blocked tool "?" during interpretation` - so any kind without a toolName
- * field (e.g. a read-out-of-scope-denied keyed by `target`, or an
- * advisor-consult) showed the bare "?" the user directed out of existence, and
- * mislabelled unrelated diagnostics as interpretation blocks.
+ * One-line render for a control-plane diagnostic entry. Kind-aware: renders
+ * as the actual kind plus whatever subject it carries (a toolName, or a
+ * target) - so any kind without a toolName field (e.g. a
+ * read-out-of-scope-denied keyed by `target`, or an advisor-consult) still
+ * shows something meaningful instead of a bare "?".
  */
 export function formatDiagnosticLine(data: Record<string, unknown> | undefined): string {
   const kind = typeof data?.kind === "string" ? data.kind : "diagnostic";
@@ -203,11 +196,110 @@ export function formatDiagnosticLine(data: Record<string, unknown> | undefined):
       : typeof data?.target === "string" && data.target.length > 0
         ? ` ${data.target}`
         : "";
-  const body =
-    kind === "blocked-tool-during-interpret"
-      ? `blocked tool${subject} during interpretation`
-      : `${kind}${subject}`;
+  const body = `${kind}${subject}`;
   return `[control plane] diagnostic: ${body}${at ? ` (${at})` : ""}`;
+}
+
+export type DiagnosticTone = "dim" | "warning" | "success" | "error";
+export interface DiagnosticRow {
+  glyph: "○" | "◐" | "✓" | "✗";
+  tone: DiagnosticTone;
+  label: string;
+  subject: string;
+  at: string;
+}
+
+/** kind -> [glyph, tone, sentence-case label]. Unknown kinds render pending. */
+const DIAGNOSTIC_LABELS: Record<string, [DiagnosticRow["glyph"], DiagnosticTone, string]> = {
+  "blocked-read-before-edit": ["✗", "error", "Blocked: read before edit"],
+  "read-out-of-scope-denied": ["✗", "error", "Read out of scope"],
+  "backup-before-edit-failed": ["✗", "error", "Backup failed"],
+  "advisor-budget-blocked": ["✗", "error", "Advisor budget blocked"],
+  "advisor-consult": ["◐", "warning", "Advisor consult"],
+  "backup-before-edit": ["✓", "success", "Backup before edit"],
+  "advisor-budget-lifted": ["✓", "success", "Advisor budget lifted"],
+  "unattended-call-allowed": ["✓", "success", "Unattended call allowed"],
+  "remembered-rule-added": ["✓", "success", "Rule remembered"],
+  "remembered-rule-allow": ["✓", "success", "Rule allowed"],
+  "remembered-rule-revoked": ["✓", "success", "Rule revoked"],
+  "remembered-rules-cleared": ["✓", "success", "Rules cleared"],
+  "phase-switch-via-dialog": ["✓", "success", "Phase switched"],
+};
+
+/** Visual form of a diagnostic entry (transcript row and alt+i panel). */
+export function describeDiagnostic(data: Record<string, unknown> | undefined): DiagnosticRow {
+  const kind = typeof data?.kind === "string" ? data.kind : "diagnostic";
+  const [glyph, tone, label] = DIAGNOSTIC_LABELS[kind] ?? ["○", "dim", kind];
+  const subject =
+    typeof data?.toolName === "string" && data.toolName.length > 0
+      ? `"${data.toolName}"`
+      : typeof data?.target === "string" && data.target.length > 0
+        ? data.target
+        : "";
+  return { glyph, tone, label, subject, at: typeof data?.at === "string" ? data.at : "" };
+}
+
+/** Component shapes the diagnostic entry renderer needs from pi-tui. */
+export interface DiagnosticEntryComponents {
+  Box: new (px?: number, py?: number, bgFn?: (s: string) => string) => { addChild(c: unknown): void };
+  Text: new (text: string, px?: number, py?: number) => unknown;
+  Container: new () => { addChild(c: unknown): void };
+  Spacer: new (lines?: number) => unknown;
+}
+
+/**
+ * One opaque transcript row per diagnostic (Box with the customMessageBg
+ * background) followed by one blank line. Text wraps char-by-char inside Pi,
+ * so no explicit clip is needed here.
+ */
+export function buildDiagnosticEntry(
+  data: Record<string, unknown> | undefined,
+  theme: { fg(color: string, text: string): string; bg?(color: string, text: string): string },
+  c: DiagnosticEntryComponents,
+): unknown {
+  const row = describeDiagnostic(data);
+  const bg = typeof theme.bg === "function" ? (s: string) => theme.bg!("customMessageBg", s) : undefined;
+  const box = new c.Box(1, 0, bg);
+  box.addChild(
+    new c.Text(
+      `${theme.fg(row.tone, row.glyph)} ${theme.fg("text", row.label)}` +
+        (row.subject ? ` ${theme.fg("text", row.subject)}` : "") +
+        (row.at ? `  ${theme.fg("muted", row.at)}` : ""),
+      0,
+      0,
+    ),
+  );
+  const container = new c.Container();
+  container.addChild(box);
+  container.addChild(new c.Spacer(1));
+  return container;
+}
+
+/**
+ * Terminal-safe width for a confirm-dialog body line. Base pi renders a dialog
+ * body line-for-line and its top-level doRender THROWS (uncaughtException, pi
+ * exits) if any rendered line exceeds the terminal width, so every body line
+ * must be clamped to fit. The margin covers the dialog box's own chrome/indent.
+ */
+export function safeDialogWidth(columns: number | undefined = process.stdout.columns): number {
+  return Math.max(24, (columns ?? 80) - 8);
+}
+
+/**
+ * Truncate each line of a plain-text dialog body to `maxWidth` visible columns
+ * (unicode-aware, ellipsized), so no single line can overflow the terminal and
+ * crash the renderer. Replaces the old fixed 200-char command cap, which
+ * ignored the terminal width and the "Command: " prefix and so still produced
+ * ~209-wide lines that crashed on any terminal narrower than that.
+ */
+export function clampBodyLines(body: string, maxWidth: number): string {
+  return body
+    .split("\n")
+    .map((line) => {
+      const chars = Array.from(line);
+      return chars.length > maxWidth ? chars.slice(0, Math.max(1, maxWidth - 1)).join("") + "…" : line;
+    })
+    .join("\n");
 }
 
 /**
@@ -217,17 +309,22 @@ export function formatDiagnosticLine(data: Record<string, unknown> | undefined):
  * printing "Unavailable"); a tool with neither a path nor a command says
  * "no file target" plainly. The permanently-unavailable "Model's stated reason"
  * line is gone - a field that is never available is noise in every confirm.
+ * Every line is clamped to `maxWidth` so a long command or path can never
+ * overflow the terminal and crash the renderer.
  */
-export function formatConfirmDetail(args: {
-  toolName: string;
-  riskCategory: string;
-  path: string | null;
-  command: string | null;
-  insideRoot: boolean | null;
-  reason: string;
-}): string {
+export function formatConfirmDetail(
+  args: {
+    toolName: string;
+    riskCategory: string;
+    path: string | null;
+    command: string | null;
+    insideRoot: boolean | null;
+    reason: string;
+  },
+  maxWidth: number = safeDialogWidth(),
+): string {
   const { toolName, riskCategory, path, command, insideRoot, reason } = args;
-  return [
+  const body = [
     `Tool: ${toolName}`,
     `Risk: ${riskCategory}`,
     path !== null
@@ -235,13 +332,14 @@ export function formatConfirmDetail(args: {
       : command === null
         ? "Target: no file target"
         : null,
-    command !== null ? `Command: ${command.length > 200 ? command.slice(0, 200) + "…" : command}` : null,
+    command !== null ? `Command: ${command}` : null,
     insideRoot !== null ? `Inside project root: ${insideRoot ? "yes" : "no"}` : null,
     "",
     reason,
   ]
     .filter((line): line is string => line !== null)
     .join("\n");
+  return clampBodyLines(body, maxWidth);
 }
 
 export default async function controlPlaneExtension(pi: ExtensionAPI) {
@@ -250,8 +348,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // resolve; outside, the affected features degrade explicitly (skill toggles
   // report as not applied, entry renderers render nothing).
   let formatSkillsForPrompt: ((skills: { name: string; description: string }[]) => string) | null = null;
-  let Box: (new (px?: number, py?: number) => { addChild(c: unknown): void }) | null = null;
-  let Text: (new (text: string, px?: number, py?: number) => unknown) | null = null;
+  let Box: DiagnosticEntryComponents["Box"] | null = null;
+  let Text: DiagnosticEntryComponents["Text"] | null = null;
+  let Container: DiagnosticEntryComponents["Container"] | null = null;
+  let Spacer: DiagnosticEntryComponents["Spacer"] | null = null;
   let matchesKey: ((data: string, keyId: string) => boolean) | null = null;
   let visibleWidth: ((text: string) => number) | null = null;
   let truncateToWidth: ((text: string, width: number, ellipsis?: string) => string) | null = null;
@@ -286,6 +386,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     const tui = (await import("@earendil-works/pi-tui")) as unknown as {
       Box: typeof Box;
       Text: typeof Text;
+      Container: typeof Container;
+      Spacer: typeof Spacer;
       matchesKey: (data: string, keyId: string) => boolean;
       visibleWidth: (text: string) => number;
       truncateToWidth: (text: string, width: number, ellipsis?: string) => string;
@@ -293,6 +395,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     };
     Box = tui.Box;
     Text = tui.Text;
+    Container = tui.Container;
+    Spacer = tui.Spacer;
     matchesKey = tui.matchesKey;
     visibleWidth = tui.visibleWidth;
     truncateToWidth = tui.truncateToWidth;
@@ -300,11 +404,23 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   } catch {
     Box = null;
     Text = null;
+    Container = null;
+    Spacer = null;
     matchesKey = null;
     visibleWidth = null;
     truncateToWidth = null;
     SelectListCtor = null;
   }
+  // Width invariant: base pi's doRender throws (and pi exits) on any rendered
+  // line wider than the terminal, so every render(width) below returns lines
+  // that went through clipLine/clipLines. Cell-aware inside Pi; plain
+  // character fallback under the unit-test harness.
+  const measureWidth = (text: string): number =>
+    visibleWidth !== null ? visibleWidth(text) : Array.from(text).length;
+  const clipLine = (text: string, max: number, ellipsis = "…"): string =>
+    truncateToWidth !== null ? truncateToWidth(text, max, ellipsis) : Array.from(text).slice(0, max).join("");
+  const clipLines = (lines: string[], width: number): string[] =>
+    width <= 0 ? [] : lines.map((line) => clipLine(line, width));
   // TypeBox backs pi.registerTool()'s parameter schema. Same
   // dynamic-import-with-fallback pattern as the two imports above: if it
   // cannot be resolved (e.g. under the unit-test harness, outside Pi), the
@@ -344,27 +460,17 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let projectRoot: string | null = null;
   let widgetVisible = false;
   let hotkeysModalOpen = false;
-  // Guards against a stale agent_end from a previous turn being mistaken for
-  // the interpretation turn: only an agent turn that started while the guard
-  // was active may complete the interpretation.
-  let interpretTurnStarted = false;
   // Context-editor state (memory only; raw context is never persisted).
   let lastContextMessages: MessageLike[] | null = null;
   /** Length of the live (unmerged) conversation at the last context event. */
   let lastIncomingCount = 0;
   let lastBaseSystemPrompt: string | null = null;
   let contextOverlay: Overlay | null = null;
-  // Paths recorded as written/edited this session (memory only). Feeds the
-  // /verify completion-criteria pass; never persisted, so it is cleared by
-  // a restart — /verify then falls back to on-disk existence checks.
-  const writtenFiles = new Set<string>();
-  // In-memory audit of allowed mutating/risk calls this session (memory only,
-  // never persisted). Feeds the /verify completion-criteria match on toolName,
-  // targetPath and command; cleared by a restart like writtenFiles.
-  const sessionAudit: VerifyAuditEntry[] = [];
   // Read-before-edit read-set (memory only, never persisted): resolved absolute
   // paths this session has actually read via the `read` tool, each mapped to the
-  // file's mtimeMs at read time. A restart clears it, so a fresh session must
+  // file's mtimeMs at read time. The stamp is refreshed when this session's own
+  // edit/write completes (see refreshReadCredit), so the model's own edits never
+  // look like external staleness. A restart clears it, so a fresh session must
   // re-read before it may modify — the safe direction. This set is per
   // control-plane activation: a separate session (e.g. an isolated delegate)
   // starts empty and inherits no read credit from any other session.
@@ -372,12 +478,12 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // Advisor-consult budget (soft policy, memory-only). A read-only advisor
   // (harness_delegate kind:"advisor") is a cloud model - each consult costs
   // quota and latency, and a tool-eager coordinator consults freely during
-  // routine work. This caps consults per accepted task (or per session when no
-  // task is accepted): the first ADVISOR_CONSULTS_PER_TASK are silent, further
-  // consults hit the attended Yes/No/Always gate. "Always" lifts the cap for
-  // the rest of the session. A restart resets it (the safe direction). It only
-  // ever downgrades the attended per-call path for advisor consults and never
-  // loosens a hard block (phase/restricted/unattended/guard).
+  // routine work. This caps consults per session: the first
+  // ADVISOR_CONSULTS_PER_TASK are silent, further consults hit the attended
+  // Yes/No/Always gate. "Always" lifts the cap for the rest of the session. A
+  // restart resets it (the safe direction). It only ever downgrades the
+  // attended per-call path for advisor consults and never loosens a hard
+  // block (phase/restricted/unattended).
   const ADVISOR_CONSULTS_PER_TASK = 1;
   let advisorConsultsThisTask = 0;
   let advisorBudgetTaskKey: string | null = null;
@@ -556,6 +662,29 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     if (mtime !== null) readSet.set(canonical, mtime);
   };
 
+  /**
+   * Refresh read credit for the `edit`/`write` tools: a successful tool_result
+   * for a MUTATE-class call means this session itself changed the file — the
+   * model authored the change, so the content is still "seen". Restamping the
+   * recorded mtime keeps the NEXT edit of the same file from tripping the
+   * stale branch ("changed on disk since read") when the only change was the
+   * model's own permitted edit. Only files that already carry read credit are
+   * restamped — a completed write grants no new credit. A FAILED edit is not
+   * restamped: it may have half-applied on disk, so a re-read is the safe
+   * direction. True external modifications (anything other than this session's
+   * own tool calls) still change the mtime without a restamp and stay caught.
+   */
+  const refreshReadCredit = (event: ToolResultEvent, ctx: ExtensionContext): void => {
+    if (classifyTool(event.toolName) !== "mutate") return;
+    if (event.isError) return;
+    const rawPath = (event.input as Record<string, unknown>).path;
+    if (typeof rawPath !== "string" || rawPath.trim().length === 0) return;
+    const canonical = canonicalizePath(rawPath, ctx.cwd, pathOps);
+    if (canonical === null || !readSet.has(canonical)) return;
+    const mtime = mtimeOf(canonical);
+    if (mtime !== null) readSet.set(canonical, mtime);
+  };
+
   // Per-control-plane-activation backup identity: a tag for naming and a
   // resolved root directory. One (tag, root) pair per activation means a file
   // edited N times in one session yields ONE backup (the pre-first-edit state),
@@ -623,13 +752,17 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         error: msg,
         at: new Date().toISOString(),
       });
-      return {
-        block: true,
-        reason:
-          `[control plane] Blocked tool "${event.toolName}" (backup-before-edit). ` +
-          `Could not snapshot "${canonical}" before modifying it (${msg}). ` +
-          `Failing closed: the mutation did not run. Fix the backup path/disk and retry.`,
-      };
+      // Warn-and-proceed: a failed pre-image snapshot no longer blocks the
+      // edit. In a git repo the working tree already carries the pre-image, so
+      // failing closed here mostly duplicated git while interrupting flow. The
+      // failure is still recorded (diagnostic above) and surfaced to the user;
+      // outside version control the warning is the signal to check the disk.
+      ctx.ui.notify(
+        `[control plane] backup-before-edit could not snapshot "${canonical}" (${msg}); ` +
+          `proceeding without a pre-image. Rely on git/undo, or fix the backup path/disk.`,
+        "warning",
+      );
+      return undefined;
     }
   };
 
@@ -637,7 +770,9 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
    * Read-before-edit hard rule: an edit/write-class call targeting an EXISTING
    * file must have read that exact file this session, and the file must not have
    * changed on disk since (mtime match) — an external modification requires a
-   * re-read. Returns the violation (with the canonical target) or null.
+   * re-read. The session's own successful edit/write refreshes the stamp (see
+   * refreshReadCredit), so only changes made outside this session's tool calls
+   * count as stale. Returns the violation (with the canonical target) or null.
    *
    * Scope is exactly read-before-mutate: shell (bash) is not covered (the peer
    * scoped this to edit/write-class tools; shell mutation is out of scope),
@@ -790,7 +925,59 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // extension cannot observe (e.g. the auto-compact toggle) are omitted, not
   // guessed.
   let footerInstalled = false;
+  let detailedUI = false;
+  let credits: CreditBalance | null = null;
+  let promptStarted = 0;
+  let firstTextMs: number | null = null;
+  let lastTiming = "No completed prompt measured.";
+  // Nonblocking: session_start constructs the balance poller and queues its
+  // first lookup without awaiting network I/O. The footer therefore starts at
+  // "loading" and resolves to the real balance without requiring a prompt.
+  // before_agent_start calls ensureCredits defensively, then queues the prompt
+  // baseline. Missing credentials or request failures become "unavailable".
+  let creditsInit = false;
+  const ensureCredits = (ctx: ExtensionContext): void => {
+    if (creditsInit) return;
+    creditsInit = true;
+    credits = new CreditBalance(
+      async () => {
+        const key =
+          process.env.OPENROUTER_MANAGEMENT_KEY ??
+          process.env.OPENROUTER_API_KEY ??
+          (await ctx.modelRegistry?.getApiKeyForProvider?.("openrouter"));
+        if (!key) throw new Error("No OpenRouter credential");
+        return readOpenRouterBalance(key);
+      },
+      // A refresh can resolve after a session replacement; a stale ctx makes
+      // updateStatus throw. Guard it so a late poll never crashes the session.
+      () => {
+        try {
+          updateStatus(ctx);
+        } catch {
+          /* ctx stale after session replacement */
+        }
+      },
+    );
+    void credits.refresh("idle");
+  };
+  pi.on("message_update", (event) => {
+    if (promptStarted && firstTextMs === null && event.assistantMessageEvent?.type === "text_delta") {
+      firstTextMs = Date.now() - promptStarted;
+    }
+  });
 
+  /** Cyberpunk footer accents ("footerYellow"/"footerPurple") are optional
+   * custom theme tokens; themes without them (dark, light) fall back to
+   * "muted" so the footer stays readable on stock themes. */
+  const footerPaint = (theme: { fg(color: string, text: string): string }, token: string, text: string): string => {
+    try {
+      return theme.fg(token, text);
+    } catch {
+      return theme.fg("muted", text);
+    }
+  };
+
+  // Compact footer uses one status row plus a contextual row only when needed.
   const installFooter = (ctx: ExtensionContext) => {
     if (footerInstalled) return;
     const ui = ctx.ui as unknown as {
@@ -807,12 +994,102 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       ) => void;
     };
     if (typeof ui.setFooter !== "function") return;
-    const width = (text: string) => (visibleWidth !== null ? visibleWidth(text) : text.length);
-    const clip = (text: string, max: number, ellipsis: string) =>
-      truncateToWidth !== null ? truncateToWidth(text, max, ellipsis) : text.slice(0, max);
+    const width = measureWidth;
+    const clip = clipLine;
     footerInstalled = true;
     ui.setFooter((_tui, theme, footerData) => ({
       render: (cols: number): string[] => {
+        if (!detailedUI) {
+          if (cols <= 0) return [];
+          const usage = ctx.getContextUsage();
+          const exact = lastTokenCount !== null && lastTokenCount.model === ctx.model?.id;
+          const window = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+          const percent = exact && window > 0
+            ? (lastTokenCount!.tokens / window) * 100 : usage?.percent ?? null;
+          const view = compactFooterState(state, policy !== null, percent, exact && window > 0);
+          const lines: string[] = [];
+          // Attention rows sit on the shared left grid (1-space pad) when room allows.
+          const pad = cols >= 2 ? PAD : "";
+          // Wrap attention text instead of clipping away the reason or action.
+          const wrap = (text: string): string[] => {
+            const rows: string[] = [];
+            let row = "";
+            const max = cols - pad.length;
+            for (const char of text) {
+              if (width(row + char) > max) {
+                if (row) rows.push(row);
+                row = "";
+              }
+              if (width(char) <= max) row += char;
+            }
+            if (row) rows.push(row);
+            return rows;
+          };
+          for (const message of view.attention) {
+            lines.push(...wrap(message.text).map((line) => pad + theme.fg(message.color, line)));
+          }
+          const home = process.env.HOME ?? "";
+          let cwd = ctx.sessionManager.getCwd();
+          if (home !== "" && (cwd === home || cwd.startsWith(`${home}/`))) {
+            cwd = cwd === home ? "~" : `~${cwd.slice(home.length)}`;
+          }
+          const model = ctx.model?.id ?? "No model";
+          const statusWidth = cols;
+          // Absolute usage against the loaded model's window ("ctx ~42k/1.0M")
+          // rather than a bare percent, so the window size is always visible.
+          // `percent` is still computed above and drives the warning colour.
+          const usedTokens = exact && window > 0 ? lastTokenCount!.tokens : usage?.tokens ?? null;
+          const contextValue =
+            usedTokens === null
+              ? "?"
+              : window > 0
+                ? `${exact ? "" : "~"}${formatTokenCount(usedTokens)}/${formatTokenCount(window)}`
+                : `${exact ? "" : "~"}${formatTokenCount(usedTokens)}`;
+          const level = percent === null ? null : contextWarningLevel(percent);
+          const contextPainted =
+            level === "urgent" ? theme.fg("error", `ctx ${contextValue}`)
+              : level === "warn" ? theme.fg("warning", `ctx ${contextValue}`)
+                : theme.fg("muted", `ctx ${contextValue}`);
+          // Natural-width status line. Preserve cwd and model whenever the terminal has room.
+          // Anchor-accent palette: a quiet muted/dim baseline carrying exactly
+          // one bright accent per element — cyan mode, neon-yellow model +
+          // thinking level, purple balance + Δ. ctx keeps its semantic
+          // warn/error colours under pressure.
+          const separator = theme.fg("dim", "  ·  ");
+          const creditsText = credits?.compact() ?? "OpenRouter loading";
+          const creditsGap = creditsText.indexOf(" ");
+          const creditsPainted = creditsGap === -1
+            ? theme.fg("muted", creditsText)
+            : theme.fg("muted", creditsText.slice(0, creditsGap)) +
+              footerPaint(theme, "footerPurple", creditsText.slice(creditsGap));
+          let modelPainted = footerPaint(theme, "footerYellow", model);
+          if ((ctx.model as { reasoning?: boolean } | undefined)?.reasoning === true) {
+            let thinking = "off";
+            try {
+              thinking = pi.getThinkingLevel();
+            } catch {
+              thinking = "off";
+            }
+            modelPainted += theme.fg("dim", " · ") +
+              theme.fg("muted", "thinking ") + footerPaint(theme, "footerYellow", thinking);
+          }
+          const status =
+            PAD + theme.fg("muted", cwd) + separator +
+            theme.fg("accent", view.mode) + separator +
+            contextPainted + separator + creditsPainted +
+            separator + modelPainted + separator + theme.fg("dim", "alt+h help");
+          lines.push(clip(status, statusWidth, "…"));
+          const contextual = [describeSandbox(sandbox), contextOverlay !== null ? "Context edited" : ""];
+          for (const [key, text] of footerData.getExtensionStatuses()) {
+            // Known idle status adds no action; detailed view retains it verbatim.
+            const plain = text.replace(/\x1b\[[0-9;:]*m/g, "").trim();
+            if (key !== STATUS_KEY && plain && !/^LSP Inactive$/i.test(plain)) contextual.push(text);
+          }
+          // Preserve third-party status colors; omit the row when no context needs attention.
+          const statuses = contextual.filter(Boolean).map((text) => text.replace(/[\r\n\t]/g, " "));
+          if (statuses.length) lines.push(clip(PAD + statuses.join("  "), statusWidth, "…"));
+          return lines;
+        }
         // Cumulative token usage across the whole session, like pi's footer.
         let input = 0;
         let output = 0;
@@ -874,30 +1151,33 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         if (branch !== null) cwd = `${cwd} (${branch})`;
         const sessionName = ctx.sessionManager.getSessionName();
         if (sessionName !== undefined && sessionName !== "") cwd = `${cwd} • ${sessionName}`;
+        const lineWidth = cols;
         const pwdLine = clip(
-          theme.fg("dim", cwd),
-          cols,
-          theme.fg("dim", "..."),
+          theme.fg("muted", cwd),
+          lineWidth,
+          theme.fg("muted", "..."),
         );
 
-        // Line 2: stats left, model right.
+        // Line 2: stats left, model right — same anchor-accent palette as the
+        // compact footer: muted/dim baseline, neon-yellow model + thinking
+        // level, purple balance, semantic warn/error on ctx under pressure.
         const leftPlain = stats.length > 0 ? `${stats} · ${context}` : context;
         const pct =
           exactTokens !== null && contextWindow > 0
             ? (exactTokens / contextWindow) * 100
             : (contextPercent ?? 0);
         const contextColored =
-          pct > 90 ? theme.fg("error", context) : pct > 70 ? theme.fg("warning", context) : null;
+          contextWarningLevel(pct) === "urgent" ? theme.fg("error", context) : contextWarningLevel(pct) === "warn" ? theme.fg("warning", context) : null;
         let left =
           contextColored !== null
-            ? (stats.length > 0 ? theme.fg("dim", `${stats} · `) : "") + contextColored
-            : theme.fg("dim", leftPlain);
+            ? (stats.length > 0 ? theme.fg("muted", `${stats} · `) : "") + contextColored
+            : theme.fg("muted", leftPlain);
         let leftWidth = width(leftPlain);
-        if (leftWidth > cols) {
-          left = clip(theme.fg("dim", leftPlain), cols, theme.fg("dim", "..."));
-          leftWidth = cols;
+        if (leftWidth > lineWidth) {
+          left = clip(left, lineWidth, theme.fg("muted", "..."));
+          leftWidth = lineWidth;
         }
-        let right = model?.id ?? "no-model";
+        let right = footerPaint(theme, "footerYellow", model?.id ?? "no-model");
         if (model?.reasoning === true) {
           let level = "off";
           try {
@@ -905,31 +1185,64 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           } catch {
             level = "off";
           }
-          right = `${right} · thinking ${level}`;
+          right += theme.fg("dim", " · ") +
+            theme.fg("muted", "thinking ") + footerPaint(theme, "footerYellow", level);
         }
         if (footerData.getAvailableProviderCount() > 1 && model?.provider !== undefined) {
-          const withProvider = `(${model.provider}) ${right}`;
-          if (leftWidth + 2 + width(withProvider) <= cols) right = withProvider;
+          const withProvider = theme.fg("muted", `(${model.provider}) `) + right;
+          if (leftWidth + 2 + width(withProvider) <= lineWidth) right = withProvider;
         }
         let statsLine: string;
-        if (leftWidth + 2 + width(right) <= cols) {
-          const padding = " ".repeat(cols - leftWidth - width(right));
-          statsLine = left + theme.fg("dim", padding + right);
+        if (leftWidth + 2 + width(right) <= lineWidth) {
+          const padding = " ".repeat(lineWidth - leftWidth - width(right));
+          statsLine = left + theme.fg("muted", padding) + right;
         } else {
           statsLine = left;
         }
 
         // Line 3: extension statuses (includes our own status segment).
-        const lines = [pwdLine, statsLine];
+        // Credits line carries the same anchor accents: "OpenRouter" label
+        // muted, the balance + Δ value purple.
+        const creditsDetail = credits?.text() ?? "OpenRouter loading";
+        const creditsDetailGap = creditsDetail.indexOf(" ");
+        const creditsDetailPainted = creditsDetailGap === -1
+          ? theme.fg("muted", creditsDetail)
+          : theme.fg("muted", creditsDetail.slice(0, creditsDetailGap)) +
+            footerPaint(theme, "footerPurple", creditsDetail.slice(creditsDetailGap));
+        const lines = [pwdLine, statsLine, clip(creditsDetailPainted, lineWidth, "…")];
         const statuses = Array.from(footerData.getExtensionStatuses().entries())
           .sort(([a], [b]) => a.localeCompare(b))
           .map(([, text]) => text.replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim());
         if (statuses.length > 0) {
-          lines.push(clip(statuses.join(" "), cols, theme.fg("dim", "...")));
+          lines.push(clip(statuses.join(" "), lineWidth, theme.fg("muted", "...")));
         }
-        return lines;
+        return clipLines(lines, cols);
       },
     }));
+  };
+
+  // Native header stays in document flow: no overlay over conversation or approvals.
+  let toolsHeaderInstalled = false;
+  const installToolsHeader = (ctx: ExtensionContext) => {
+    if (toolsHeaderInstalled || typeof ctx.ui.setHeader !== "function") return;
+    ctx.ui.setHeader((_tui, theme) => ({
+      invalidate() {},
+      render: (width: number): string[] =>
+        clipLines(
+          renderActiveTools(
+            pi.getActiveTools(),
+            width,
+            measureWidth,
+            currentProfileForActiveTools(
+              profilesConfig,
+              pi.getAllTools().map((tool) => tool.name),
+              pi.getActiveTools(),
+            ) ?? "custom",
+          ).map((line) => theme.fg("text", line)),
+          width,
+        ),
+    }));
+    toolsHeaderInstalled = true;
   };
 
   // ---- draft token counter (bottom-right, under the input box) ----
@@ -956,6 +1269,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       "control-plane-draft-counter",
       (_tui, theme) => ({
         render: (width: number): string[] => {
+          if (!detailedUI || width <= 0) return [];
           let draft = "";
           try {
             draft = ui.getEditorText?.() ?? "";
@@ -980,8 +1294,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
             if (typeof tokens === "number" && tokens > 0) added = tokens;
           }
           return [
-            theme.fg("dim", formatDraftCounter(draft, width)),
-            theme.fg("dim", formatAddedContext(added, exact, width)),
+            theme.fg("muted", truncateToWidth?.(formatDraftCounter(draft, width), width) ?? formatDraftCounter(draft, width).slice(0, width)),
+            theme.fg("muted", truncateToWidth?.(formatAddedContext(added, exact, width), width) ?? formatAddedContext(added, exact, width).slice(0, width)),
           ];
         },
       }),
@@ -1095,7 +1409,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       providerPayload: lastPayloadMeta,
       phase: state.phase,
       autonomy: state.autonomy,
-      hasAcceptedTask: state.acceptedTask !== null,
     });
   };
 
@@ -1118,26 +1431,15 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     if (sandboxAlias) {
       ctx.ui.notify(SANDBOX_ALIAS_WARNING, "warning");
     }
-    if ((mode === "execute-restricted" || mode === "execute-unattended") && policy === null) {
+    if (mode === "auto" && policy === null) {
       ctx.ui.notify(
-        `${mode === "execute-restricted" ? "Execute (restricted)" : "Execute (unattended)"} selected but the policy failed to load/validate — enforcement falls back to read-only.`,
-        "warning",
-      );
-      return;
-    }
-    if (mode === "execute-unattended" && state.acceptedTask === null) {
-      ctx.ui.notify(
-        "Execute (unattended) selected but no task brief is accepted yet — every mutating call will be blocked until you run /interpret + /task accept, or /task set <text>.",
+        "Auto selected but the policy failed to load/validate — enforcement falls back to read-only.",
         "warning",
       );
       return;
     }
     const note =
-      phase === "execute"
-        ? state.acceptedTask === null
-          ? " (note: no accepted task brief — consider /interpret or /task set)"
-          : ""
-        : " (mutating tools are blocked in this mode)";
+      phase === "execute" ? "" : " (mutating tools are blocked in this mode)";
     ctx.ui.notify(`Mode: ${displayMode(phase, autonomy, policy !== null)}${note}`, "info");
   };
 
@@ -1178,9 +1480,15 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
    * can never come back just by switching profiles. Individually toggling
    * that exact tool back on via /context toggle afterward still works - this
    * only guards bulk profile application, not the explicit single-tool
-   * escape hatch. Notifies on success and failure.
+   * escape hatch. Manual applications notify; fresh-session defaults are
+   * already visible in the persistent header and skip duplicate transcript UI.
    */
-  const applyNamedProfile = (ctx: ExtensionContext, name: string): boolean => {
+  const applyNamedProfile = (
+    ctx: ExtensionContext,
+    name: string,
+    options: { notify?: boolean } = {},
+  ): boolean => {
+    const shouldNotify = options.notify !== false;
     const allTools = pi.getAllTools().map((t) => t.name);
     const alwaysDisabledTools = profilesConfig?.alwaysDisabledTools ?? [];
     if (name === ALL_PROFILE) {
@@ -1193,10 +1501,12 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         forced.newlyDisabled.length > 0
           ? ` (${forced.newlyDisabled.join(", ")} kept off - see policy/profiles.json alwaysDisabledTools)`
           : "";
-      ctx.ui.notify(
-        `Profile "all": ${allTools.length - forced.newlyDisabled.length} tool(s) enabled.${forcedNote}`,
-        "info",
-      );
+      if (shouldNotify) {
+        ctx.ui.notify(
+          `Profile "all": ${allTools.length - forced.newlyDisabled.length} tool(s) enabled.${forcedNote}`,
+          "info",
+        );
+      }
       void refreshProspectiveCount(ctx);
       return true;
     }
@@ -1222,10 +1532,12 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       forced.newlyDisabled.length > 0
         ? ` (${forced.newlyDisabled.join(", ")} kept off - see policy/profiles.json alwaysDisabledTools)`
         : "";
-    ctx.ui.notify(
-      `Profile "${name}": ${enabledCount} tool(s) enabled, ${disabledCount} disabled.${forcedNote}${missingNote}`,
-      "info",
-    );
+    if (shouldNotify) {
+      ctx.ui.notify(
+        `Profile "${name}": ${enabledCount} tool(s) enabled, ${disabledCount} disabled.${forcedNote}${missingNote}`,
+        "info",
+      );
+    }
     void refreshProspectiveCount(ctx);
     return true;
   };
@@ -1280,8 +1592,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   pi.registerEntryRenderer<Record<string, unknown>>(
     DIAGNOSTIC_ENTRY_TYPE,
     (entry, _options, theme) => {
-      if (Text === null) return undefined;
-      return new Text(theme.fg("dim", formatDiagnosticLine(entry.data)), 0, 0) as never;
+      if (Box === null || Text === null || Container === null || Spacer === null) return undefined;
+      return buildDiagnosticEntry(entry.data, theme, { Box, Text, Container, Spacer }) as never;
     },
   );
 
@@ -1293,7 +1605,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     state = result.state;
     if (result.ignoredMalformed > 0) {
       ctx.ui.notify(
-        `Control plane: ignored ${result.ignoredMalformed} malformed state entr${result.ignoredMalformed === 1 ? "y" : "ies"}; ${result.restored ? "restored an earlier valid state" : "using safe defaults (Discuss + Read-only)"}.`,
+        `Control plane: ignored ${result.ignoredMalformed} malformed state entr${result.ignoredMalformed === 1 ? "y" : "ies"}; ${result.restored ? "restored an earlier valid state" : "using safe defaults (Plan / read-only)"}.`,
         "warning",
       );
     }
@@ -1335,7 +1647,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     // profile, if one is configured. Restored sessions keep their own toggles.
     const defaultProfile = profilesConfig?.defaultProfile ?? null;
     if (!result.restored && defaultProfile !== null && defaultProfile !== ALL_PROFILE) {
-      applyNamedProfile(ctx, defaultProfile);
+      applyNamedProfile(ctx, defaultProfile, { notify: false });
     } else if (!result.restored && (profilesConfig?.alwaysDisabledTools.length ?? 0) > 0) {
       // No named default profile ran above (none configured, or the default
       // is literally "all") - apply the always-disabled overlay on its own
@@ -1353,8 +1665,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         );
       }
     }
+    ctx.ui.setToolsExpanded?.(false);
+    installToolsHeader(ctx);
     installFooter(ctx);
     installDraftCounter(ctx);
+    ensureCredits(ctx);
     // Editor state is process/session scoped; a new or resumed session starts clean.
     contextOverlay = null;
     lastContextMessages = null;
@@ -1416,6 +1731,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // ---- per-turn injection + source toggles ----
 
   pi.on("before_agent_start", (event, ctx) => {
+    promptStarted = Date.now();
+    firstTextMs = null;
+    ensureCredits(ctx); // defensive if an embedding skips session_start
+    void credits?.refresh("start");
     // The context editor can override the base system prompt; toggles and the
     // control-plane block still apply on top of the override.
     let prompt = contextOverlay?.systemPrompt ?? event.systemPrompt;
@@ -1465,45 +1784,9 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     prompt += "\n\n" + buildInjectionBlock(state, policy !== null);
     const scratchpadBlock = renderScratchpadBlock(scratchpad, LIMITS.injectionTotal);
     if (scratchpadBlock !== null) prompt += "\n\n" + scratchpadBlock;
-    if (state.interpretGuard?.active) {
-      interpretTurnStarted = true;
-      prompt +=
-        "\n\nINTERPRETATION TURN: every tool is disabled for this turn. Produce only the required interpretation sections. Do not attempt tool calls.";
-    }
     updateStatus(ctx);
     return { systemPrompt: prompt };
   });
-
-  // ---- interpretation completion ----
-
-  // Read-only completion-criteria seam (Task 1 /verify). Observes the accepted
-  // brief against what the session actually changed; never a model-judged
-  // verdict. Shared by the agent_end seam and the /verify command.
-  const runVerification = (ctx: ExtensionContext | ExtensionCommandContext): void => {
-    const brief = state.acceptedTask;
-    if (brief === null) return;
-    const report: VerificationReport = verifyCompletion({
-      brief,
-      writtenFiles: Array.from(writtenFiles),
-      auditEntries: sessionAudit,
-      fileExists: (p) => fs.existsSync(p),
-    });
-    const lines = [
-      `deliverables ${report.satisfiedDeliverables}/${report.totalDeliverables}`,
-      `criteria    ${report.satisfiedCriteria}/${report.totalCriteria}`,
-      ...report.deliverables.map((d) => `${d.satisfied ? "OK   " : "MISS"} ${d.deliverable} — ${d.evidence}`),
-      ...report.completionCriteria.map((c) => `${c.satisfied ? "OK   " : "MISS"} ${c.criterion} — ${c.evidence}`),
-    ];
-    emit("verify", lines);
-    const allMet =
-      report.satisfiedDeliverables === report.totalDeliverables &&
-      report.satisfiedCriteria === report.totalCriteria;
-    ctx.ui.notify(
-      `verify: ${report.satisfiedDeliverables}/${report.totalDeliverables} deliverables, ` +
-        `${report.satisfiedCriteria}/${report.totalCriteria} criteria satisfied`,
-      allMet ? "success" : "warning",
-    );
-  };
 
   pi.on("agent_end", (event, ctx) => {
     // For the forward-looking count: the turn's final assistant reply is the
@@ -1512,48 +1795,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     if (tail?.role === "assistant") {
       messagesSinceLastRequest.push(serializeForCounting(tail));
     }
-    // Read-only completion-criteria seam: observe what this turn changed against
-    // the accepted brief (no-op unless a task is accepted).
-    runVerification(ctx);
-    const guard = state.interpretGuard;
-    if (!guard?.active) return;
-    if (!interpretTurnStarted) return; // stale agent_end from an earlier turn
-    interpretTurnStarted = false;
-    let responseText = "";
-    for (let i = event.messages.length - 1; i >= 0; i--) {
-      const message = event.messages[i] as { role?: string; content?: unknown };
-      if (message.role !== "assistant") continue;
-      if (typeof message.content === "string") {
-        responseText = message.content;
-      } else if (Array.isArray(message.content)) {
-        responseText = message.content
-          .filter((b): b is { type: string; text: string } =>
-            typeof b === "object" && b !== null && (b as { type?: string }).type === "text",
-          )
-          .map((b) => b.text)
-          .join("\n");
-      }
-      break;
+    if (promptStarted) {
+      lastTiming = `First text: ${firstTextMs === null ? "none" : `${(firstTextMs / 1000).toFixed(2)}s`}; total: ${((Date.now() - promptStarted) / 1000).toFixed(2)}s (model, tools and hooks combined).`;
+      promptStarted = 0;
     }
-    const redacted = redactSecrets(responseText).text;
-    const pending = pendingFromResponse(redacted, guard.taskRequest, LIMITS.rawInterpretation);
-    state.pendingInterpretation = pending;
-    state.phase = guard.savedPhase;
-    state.autonomy = guard.savedAutonomy;
-    state.interpretGuard = null;
-    persist();
-    updateStatus(ctx);
-    if (pending.valid) {
-      ctx.ui.notify(
-        "Interpretation ready. Review it above, then run /task accept to adopt it or /task reject to discard it.",
-        "info",
-      );
-    } else {
-      ctx.ui.notify(
-        `Interpretation is INVALID (missing sections: ${pending.missingSections.join(", ")}). /task accept is disabled; re-run /interpret or /task reject.`,
-        "warning",
-      );
-    }
+    void credits?.refresh("end");
   });
 
   // ---- tool authorization ----
@@ -1619,13 +1865,13 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     const choice = await ui.custom<string | null>((_tui, _theme, _kb, done) => {
       if (SelectListCtor === null) {
         done("no");
-        return { render: () => header, handleInput: () => {}, invalidate: () => {} };
+        return { render: (width: number) => clipLines(header, width), handleInput: () => {}, invalidate: () => {} };
       }
       const list = new SelectListCtor(items, items.length, getSelectListThemeFn ? getSelectListThemeFn() : undefined);
       list.onSelect = (item) => done(item.value);
       list.onCancel = () => done("no"); // Escape / ctrl+c = No
       return {
-        render: (width: number) => [...header, ...list.render(width)],
+        render: (width: number) => [...clipLines(header, width), ...list.render(width)],
         handleInput: (data: string) => list.handleInput(data),
         invalidate: () => list.invalidate(),
       };
@@ -1732,7 +1978,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     ctx: ExtensionContext,
     detail: string,
   ): Promise<"once" | "always" | "no"> => {
-    const hasCustom = typeof (ctx.ui as { custom?: unknown }).custom === "function";
+    // Same RPC guard as the attended per-call gate: custom() exists as a
+    // function in RPC mode but returns undefined without prompting, which
+    // would auto-deny without ever asking. Plain yes/no outside the TUI.
+    const hasCustom =
+      ctx.mode === "tui" && typeof (ctx.ui as { custom?: unknown }).custom === "function";
     if (!hasCustom) {
       const ok = await ctx.ui.confirm("Consult the advisor again?", detail);
       return ok ? "once" : "no";
@@ -1753,13 +2003,13 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     const choice = await ui.custom<string | null>((_tui, _theme, _kb, done) => {
       if (SelectListCtor === null) {
         done("no");
-        return { render: () => header, handleInput: () => {}, invalidate: () => {} };
+        return { render: (width: number) => clipLines(header, width), handleInput: () => {}, invalidate: () => {} };
       }
       const list = new SelectListCtor(items, items.length, getSelectListThemeFn ? getSelectListThemeFn() : undefined);
       list.onSelect = (item) => done(item.value);
       list.onCancel = () => done("no"); // Escape / ctrl+c = No
       return {
-        render: (width: number) => [...header, ...list.render(width)],
+        render: (width: number) => [...clipLines(header, width), ...list.render(width)],
         handleInput: (data: string) => list.handleInput(data),
         invalidate: () => list.invalidate(),
       };
@@ -1768,10 +2018,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   };
 
   /**
-   * Enact a policy decision: allow (with /verify bookkeeping + sandbox),
-   * confirm (attended per-call dialog), or block. Factored out so the
-   * phase-switch dialog below can re-dispatch a call through the SAME path
-   * after an attended phase change, rather than duplicating the logic.
+   * Enact a policy decision: allow (with sandbox), confirm (attended per-call
+   * dialog), or block. Factored out so the phase-switch dialog below can
+   * re-dispatch a call through the SAME path after an attended phase change,
+   * rather than duplicating the logic.
    */
   const handleDecision = async (
     event: ToolCallEvent,
@@ -1781,23 +2031,9 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     if (decision.action === "allow") {
       // A permitted read establishes read-before-edit credit for that file.
       recordReadCredit(event, ctx);
-      // Record files written/edited this session so /verify has observable
-      // evidence of what actually changed (independent of autonomy mode).
       const input = event.input as Record<string, unknown>;
       const targetPath = typeof input.path === "string" ? input.path : null;
       const command = typeof input.command === "string" ? input.command : null;
-      if ((event.toolName === "edit" || event.toolName === "write") && targetPath !== null) {
-        writtenFiles.add(targetPath);
-      }
-      // Record every allowed non-read call so /verify can match completion
-      // criteria against what was actually done (tool name / target / command).
-      if (decision.riskCategory !== "read") {
-        sessionAudit.push({
-          toolName: event.toolName,
-          ...(targetPath !== null ? { targetPath } : {}),
-          ...(command !== null ? { command } : {}),
-        });
-      }
       // Unattended mode has nobody watching in real time; every allowed call
       // (not just blocked ones) is logged so there is something to review
       // afterward. Read tools are excluded - the volume would drown out the
@@ -1813,7 +2049,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       }
       // Auto mode, P2 extension: an allow under the auto:in-root-edit rule
       // rests on the same human decision a dialog would have collected — the
-      // user chose /mode auto, a standing "yes" for exactly this class of call
+      // user chose /mode accept, a standing "yes" for exactly this class of call
       // (in-root, non-protected file writes/edits; nothing else earns the
       // rule). Stamp it so the harness layer consumes that answer instead of
       // asking its own section-21 question, in the TUI and headless alike.
@@ -1843,7 +2079,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           reason:
             formatDenial(decision, event.toolName) +
             " No confirmation UI is available in this mode; failing closed." +
-            " To pre-authorize without a dialog: /mode auto (applies in-root file edits without asking)," +
+            " To pre-authorize without a dialog: /mode accept (applies in-root file edits without asking)," +
             " or /harness-rules allow <tool> <path> plus /harness-rules headless on, which applies" +
             " the rules you saved in sessions with no UI.",
         };
@@ -1864,10 +2100,13 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       // rule on the path, a shell command on the exact command, a harness/foreign
       // tool at tool level. "Always" saves that rule and suppresses the prompt
       // next time. The one exception is a sensitive read (rememberTargetFor ->
-      // null), the documented hard boundary, which keeps a plain yes/no. Without
-      // ctx.ui.custom, plain yes/no.
+      // null), the documented hard boundary, which keeps a plain yes/no.
+      // Without a real custom-dialog surface, plain yes/no: in RPC mode
+      // custom() is a function that returns undefined without prompting, so a
+      // typeof-only check silently auto-denies every attended confirm there.
       const remember = rememberTargetFor(event, decision, ctx);
-      const hasCustom = typeof (ctx.ui as { custom?: unknown }).custom === "function";
+      const hasCustom =
+        ctx.mode === "tui" && typeof (ctx.ui as { custom?: unknown }).custom === "function";
       let approved: boolean;
       if (hasCustom && remember !== null) {
         const choice = await promptAttendedChoice(ctx, event.toolName, remember.label, detail);
@@ -1950,28 +2189,27 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     }
 
     // Blocked.
-    if (state.interpretGuard?.active) {
-      pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
-        kind: "blocked-tool-during-interpret",
-        toolName: event.toolName,
-        at: new Date().toISOString(),
-      });
-    }
     return { block: true, reason: formatDenial(decision, event.toolName) };
   };
+
+  // tool_result fires only for calls that actually executed (blocked calls
+  // never reach it), so this restamps read credit exactly once per completed
+  // edit/write — keeping follow-up edits of the same file free of a pointless
+  // "changed on disk" re-read demand.
+  pi.on("tool_result", (event: ToolResultEvent, ctx) => {
+    refreshReadCredit(event, ctx);
+  });
 
   pi.on("tool_call", async (event: ToolCallEvent, ctx) => {
     const decision = evaluateToolCall({
       toolName: event.toolName,
       toolInput: event.input as Record<string, unknown>,
-      guardActive: state.interpretGuard?.active ?? false,
       phase: state.phase,
       autonomy: state.autonomy,
       projectRoot: rootOf(ctx),
       cwd: ctx.cwd,
       policy,
       ops: pathOps,
-      hasAcceptedTask: state.acceptedTask !== null,
     });
 
     // Reads free by default: a read outside the project root would otherwise
@@ -2006,11 +2244,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
     // Advisor-consult budget (soft policy): a read-only advisor consult
     // (harness_delegate kind:"advisor") is a cloud model - each call costs quota
-    // and latency. The first ADVISOR_CONSULTS_PER_TASK consults per accepted
-    // task (or per session when none) are silent; further consults hit the
-    // attended Yes/No/Always gate, where "Always" lifts the cap for the session.
+    // and latency. The first ADVISOR_CONSULTS_PER_TASK consults per session
+    // are silent; further consults hit the attended Yes/No/Always gate, where
+    // "Always" lifts the cap for the session.
     // This only downgrades/gates the ATTENDED path - a consult a hard rule
-    // already blocks (phase/restricted/unattended/read-only/guard) has
+    // already blocks (phase/restricted/unattended/read-only) has
     // decision.action === "block" and is left untouched, so the budget never
     // expands capability. A no-UI session fails closed over budget. Allowed
     // consults are already recorded in the harness tamper-evident chain (AU1);
@@ -2020,10 +2258,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       event.toolName === "harness_delegate" &&
       (event.input as Record<string, unknown>).kind === "advisor";
     if (advisorConsult && decision.action !== "block") {
-      // Per-task identity = the full accepted brief (not just updatedAt, so two
-      // briefs set in the same millisecond still count as different tasks); no
-      // accepted task = one shared per-session budget.
-      const taskKey = state.acceptedTask === null ? "__session__" : JSON.stringify(state.acceptedTask);
+      // One shared per-session budget.
+      const taskKey = "__session__";
       if (taskKey !== advisorBudgetTaskKey) {
         advisorBudgetTaskKey = taskKey;
         advisorConsultsThisTask = 0;
@@ -2194,7 +2430,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     // Attended phase-switch dialog: when a call is blocked SOLELY by the phase
     // rule (a non-Execute phase prohibiting a mutating tool) and a UI is
     // available, offer the human the same transition they could type as
-    // /mode execute — a prose dead end ("type /mode execute") becomes a Yes/No
+    // /mode manual — a prose dead end ("type /mode manual") becomes a Yes/No
     // at the moment of the block. This is user-actor authority (the human
     // answers), identical to the attended confirm and read-out-of-scope gates;
     // it grants no model actor any new capability. Autonomy still gates
@@ -2203,47 +2439,50 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     // escalations into one Yes); if it would only confirm, the retry hits the
     // attended per-call dialog separately below.
     if (decision.action === "block" && decision.rule.startsWith("phase:") && ctx.hasUI) {
-      const exec = stateForMode("execute");
+      const exec = stateForMode("manual");
       const postSwitch = evaluateToolCall({
         toolName: event.toolName,
         toolInput: event.input as Record<string, unknown>,
-        guardActive: state.interpretGuard?.active ?? false,
         phase: exec.phase,
         autonomy: exec.autonomy,
         projectRoot: rootOf(ctx),
         cwd: ctx.cwd,
         policy,
         ops: pathOps,
-        hasAcceptedTask: state.acceptedTask !== null,
       });
       if (postSwitch.action !== "block") {
         const input = event.input as Record<string, unknown>;
         const command = typeof input.command === "string" ? input.command : null;
         const target = typeof input.path === "string" ? input.path : null;
-        const body = [
-          `The current phase (${state.phase}) blocks mutating tool calls.`,
-          `Blocked tool: ${event.toolName}`,
-          target !== null ? `Target: ${target}` : null,
-          command !== null ? `Command: ${command.length > 200 ? command.slice(0, 200) + "…" : command}` : null,
-          "",
-          "Switching to Execute permits mutating tools until you change the phase back.",
-          postSwitch.action === "confirm"
-            ? "After switching, this call still requires a separate per-action confirmation (autonomy is unchanged)."
-            : null,
-        ]
-          .filter((line): line is string => line !== null)
-          .join("\n");
+        // Clamped line-by-line: an over-wide line here crashes the renderer
+        // (see clampBodyLines).
+        const body = clampBodyLines(
+          [
+            `The current phase (${state.phase}) blocks mutating tool calls.`,
+            `Blocked tool: ${event.toolName}`,
+            target !== null ? `Target: ${target}` : null,
+            command !== null ? `Command: ${command}` : null,
+            "",
+            "Switching to Execute permits mutating tools until you change the phase back.",
+            postSwitch.action === "confirm"
+              ? "After switching, this call still requires a separate per-action confirmation (autonomy is unchanged)."
+              : null,
+          ]
+            .filter((line): line is string => line !== null)
+            .join("\n"),
+          safeDialogWidth(),
+        );
         const approved = await ctx.ui.confirm("Switch to Execute phase?", body);
         if (approved) {
           const fromMode = modeOf(state.phase, state.autonomy) ?? state.phase;
-          setMode(ctx, "execute", false);
+          setMode(ctx, "manual", false);
           // Audit the phase change with the dialog as provenance so a
-          // dialog-driven switch is visible to /verify and review, and is
+          // dialog-driven switch is visible to review, and is
           // attributable to the human who answered (user actor).
           pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
             kind: "phase-switch-via-dialog",
             from: fromMode,
-            to: "execute",
+            to: "manual",
             actor: "user",
             provenance: "attended-phase-dialog",
             blockedTool: event.toolName,
@@ -2264,6 +2503,30 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   });
 
   // ---- commands ----
+
+  pi.registerCommand("clear", {
+    description: "Start a fresh session (alias for /new)",
+    handler: async (_args, ctx) => {
+      await ctx.newSession();
+    },
+  });
+
+  pi.registerCommand("control-ui", {
+    description: "Show minimal UI, detailed usage or prompt timing: /control-ui minimal|details|timing",
+    getArgumentCompletions: (prefix) => ["minimal", "details", "timing"]
+      .filter((value) => value.startsWith(prefix))
+      .map((value) => ({ value, label: value })),
+    handler: async (args, ctx) => {
+      const choice = args.trim();
+      if (choice === "timing") { ctx.ui.notify(lastTiming, "info"); return; }
+      if (choice !== "minimal" && choice !== "details") {
+        ctx.ui.notify("Usage: /control-ui minimal|details|timing", "info");
+        return;
+      }
+      detailedUI = choice === "details";
+      updateStatus(ctx);
+    },
+  });
 
   pi.registerCommand("context", {
     description: "Inspect the effective context (summary, diff, full, sources, toggle)",
@@ -2454,102 +2717,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     },
   });
 
-  const taskCommand = {
-    description: "Show, set, accept, reject, or clear the control-plane task brief",
-    getArgumentCompletions: (prefix: string) => {
-      const subs = ["set ", "accept", "reject", "clear"];
-      const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
-      return matches.length > 0 ? matches.map((s) => ({ value: s, label: s.trim() })) : null;
-    },
-    handler: async (args: string, ctx: ExtensionCommandContext) => {
-      const command = parseTaskArgs(args);
-      switch (command.kind) {
-        case "usage":
-          emit("usage", USAGE.task);
-          return;
-        case "show":
-          emit("task", renderTask(state));
-          return;
-        case "set": {
-          state.acceptedTask = directBrief(command.text);
-          persist();
-          updateStatus(ctx);
-          ctx.ui.notify("Task brief set directly from your text (objective only; nothing fabricated).", "info");
-          return;
-        }
-        case "accept": {
-          const pending = state.pendingInterpretation;
-          if (pending === null) {
-            ctx.ui.notify("No pending interpretation to accept. Run /interpret <request> first.", "error");
-            return;
-          }
-          if (!pending.valid || pending.brief === null) {
-            ctx.ui.notify(
-              `The pending interpretation is invalid (missing: ${pending.missingSections.join(", ")}) and cannot be accepted. Re-run /interpret or /task reject.`,
-              "error",
-            );
-            return;
-          }
-          state.acceptedTask = { ...pending.brief, updatedAt: new Date().toISOString() };
-          state.pendingInterpretation = null;
-          persist();
-          updateStatus(ctx);
-          ctx.ui.notify("Interpretation accepted as the active task brief.", "info");
-          return;
-        }
-        case "reject": {
-          if (state.pendingInterpretation === null) {
-            ctx.ui.notify("No pending interpretation to reject.", "info");
-            return;
-          }
-          state.pendingInterpretation = null;
-          persist();
-          updateStatus(ctx);
-          ctx.ui.notify("Pending interpretation discarded. The accepted task (if any) is unchanged.", "info");
-          return;
-        }
-        case "clear": {
-          if (state.acceptedTask === null && state.pendingInterpretation === null) {
-            ctx.ui.notify("Task state is already empty.", "info");
-            return;
-          }
-          let confirmed = command.force;
-          if (!confirmed && ctx.hasUI) {
-            confirmed = await ctx.ui.confirm(
-              "Clear task state?",
-              "This discards the accepted task brief and any pending interpretation.",
-            );
-          } else if (!confirmed) {
-            ctx.ui.notify("No confirmation UI available. Use \"/task clear force\" to clear without a dialog.", "warning");
-            return;
-          }
-          if (!confirmed) {
-            ctx.ui.notify("Clear cancelled.", "info");
-            return;
-          }
-          state.acceptedTask = null;
-          state.pendingInterpretation = null;
-          persist();
-          updateStatus(ctx);
-          ctx.ui.notify("Task state cleared.", "info");
-          return;
-        }
-      }
-    },
-  };
-  pi.registerCommand("task", taskCommand);
-  // Other installed extensions may also register /task (e.g. pi-task), which
-  // makes the bare name ambiguous — pi then routes it unpredictably outside
-  // the TUI's disambiguation menu. /brief is the collision-free alias.
-  pi.registerCommand("brief", {
-    ...taskCommand,
-    description: `${taskCommand.description} (alias of /task)`,
-  });
-
   pi.registerCommand("mode", {
-    description: "Show or set the mode (discuss/plan/execute/execute-restricted/verify)",
+    description: "Show or set the mode (plan/manual/accept/auto)",
     getArgumentCompletions: (prefix) => {
-      const subs = ["discuss", "plan", "execute", "execute-restricted", "execute-unattended", "verify"];
+      const subs = ["plan", "manual", "accept", "auto"];
       const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
       return matches.length > 0 ? matches.map((s) => ({ value: s, label: s })) : null;
     },
@@ -2599,51 +2770,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       emit("effort", [
         `Thinking level set to ${pi.getThinkingLevel()} (requested ${requested}; clamped to model capabilities).`,
       ]);
-    },
-  });
-
-  pi.registerCommand("interpret", {
-    description: "Run a no-tools interpretation of a task request (then /task accept|reject)",
-    handler: async (args, ctx) => {
-      const command = parseInterpretArgs(args);
-      if (command.kind === "usage") {
-        emit("usage", USAGE.interpret);
-        return;
-      }
-      if (state.interpretGuard?.active) {
-        ctx.ui.notify("An interpretation turn is already in progress.", "error");
-        return;
-      }
-      if (!ctx.isIdle()) {
-        ctx.ui.notify("The agent is busy. Wait for the current turn to finish, then run /interpret.", "error");
-        return;
-      }
-      state.interpretGuard = {
-        active: true,
-        savedPhase: state.phase,
-        savedAutonomy: state.autonomy,
-        taskRequest: command.request,
-        startedAt: new Date().toISOString(),
-      };
-      interpretTurnStarted = false;
-      persist();
-      updateStatus(ctx);
-      pi.sendUserMessage(buildInterpretationPrompt(command.request));
-    },
-  });
-
-  pi.registerCommand("verify", {
-    description: "Read-only completion-criteria check against the accepted task brief",
-    handler: async (_args, ctx) => {
-      if (!ctx.isIdle()) {
-        ctx.ui.notify("The agent is busy. Wait for the current turn to finish, then run /verify.", "error");
-        return;
-      }
-      if (state.acceptedTask === null) {
-        ctx.ui.notify("No accepted task brief — run /task accept (or /task set) first.", "warning");
-        return;
-      }
-      runVerification(ctx);
     },
   });
 
@@ -2721,7 +2847,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("bwrap", {
-    description: "Real OS-level sandboxing for bash (bubblewrap), separate from /mode sandboxed",
+    description: "Real OS-level sandboxing for bash (bubblewrap)",
     getArgumentCompletions: (prefix) => {
       const subs = ["status", "on", "off", "network on", "network off"];
       const matches = subs.filter((s) => s.startsWith(prefix.toLowerCase()));
@@ -2742,9 +2868,9 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
             "  /bwrap network on  — allow sandboxed commands to reach the network",
             "  /bwrap network off — unshare networking again (default when sandbox is on)",
             "",
-            "This is real kernel-enforced isolation via bwrap, independent of and stackable",
-            "with /mode execute-restricted's \"sandboxed\" alias, which is Pi-level policy",
-            "only. See docs/SECURITY.md for exactly what bwrap does and does not guarantee.",
+            "This is real kernel-enforced isolation via bwrap, independent of the Pi-level",
+            "tool-policy checks. See docs/SECURITY.md for exactly what bwrap does and does",
+            "not guarantee.",
           ]);
           return;
         case "status": {
@@ -2936,7 +3062,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       name: "local_web_search",
       label: "Local Web Search",
       description:
-        "Search the web via the user's local searxng instance (free, no API key). Read-only: never mutates anything, available in every mode including Discuss/Plan/Verify.",
+        "Search the web via the user's local searxng instance (free, no API key). Read-only: never mutates anything, available in every mode including read-only Plan.",
       promptSnippet: "local_web_search(query) — search the web via local searxng",
       parameters: T.Object({
         query: T.String({ description: "The search query." }),
@@ -3218,7 +3344,11 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       const lines = renderContextSummary(snapshot, { compactHint: false }).map((line) =>
         line.length > 0 ? line : " ",
       );
-      ctx.ui.setWidget(WIDGET_KEY, lines, { placement: "aboveEditor" });
+      (ctx.ui.setWidget as (key: string, factory: unknown, options?: unknown) => void)(
+        WIDGET_KEY,
+        (_tui: unknown) => ({ render: (w: number) => clipLines(lines, w), invalidate() {} }),
+        { placement: "aboveEditor" },
+      );
       widgetVisible = true;
     },
   });
@@ -3248,7 +3378,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
                 const padded = clipped.padEnd(inner);
                 return "│ " + (i === 0 ? theme.fg("accent", padded) : padded) + " │";
               });
-              return [top, ...body, bottom];
+              return clipLines([top, ...body, bottom], width);
             },
             handleInput: () => done(undefined),
           }),
@@ -3256,6 +3386,82 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         );
       } finally {
         hotkeysModalOpen = false;
+      }
+    },
+  });
+
+  // Diagnostics panel. Workspace dimming is NOT available in pi-tui (no
+  // scrim/backdrop primitive; overlays composite over content), so the
+  // terminal-native equivalent is an opaque panel: every line is painted with
+  // customMessageBg after padding to the panel width, so nothing beneath shows
+  // through its region. Hover is not implemented either: pi-tui routes mouse
+  // events only in fullscreen mode, which this extension does not enable;
+  // focus is conveyed by the selected row alone (selectedBg + accent glyph).
+  let diagnosticsModalOpen = false;
+  pi.registerShortcut("alt+i", {
+    description: "Control plane: diagnostics panel (modal)",
+    handler: async (ctx) => {
+      const uiAny = ctx.ui as { custom?: <T>(factory: unknown, options?: unknown) => Promise<T> };
+      const rows = (ctx.sessionManager.getBranch() as unknown as CustomEntryLike[])
+        .filter((e) => e.customType === DIAGNOSTIC_ENTRY_TYPE)
+        .map((e) => describeDiagnostic(e.data as Record<string, unknown> | undefined));
+      if (ctx.mode !== "tui" || typeof uiAny.custom !== "function") {
+        emit(
+          "diagnostics",
+          rows.length
+            ? rows.map((r) => `${r.glyph} ${r.label}${r.subject ? ` ${r.subject}` : ""}${r.at ? `  ${r.at}` : ""}`)
+            : ["(no diagnostics this session)"],
+        );
+        return;
+      }
+      if (diagnosticsModalOpen) return;
+      diagnosticsModalOpen = true;
+      try {
+        await uiAny.custom<void>(
+          (
+            tui: { requestRender(force?: boolean): void },
+            theme: { fg(color: string, text: string): string; bg?(color: string, text: string): string },
+            _kb: unknown,
+            done: (r: void) => void,
+          ) => {
+            let selectedIndex = Math.max(0, rows.length - 1);
+            const bg = (color: string, s: string) => (typeof theme.bg === "function" ? theme.bg(color, s) : s);
+            const paint = {
+              bg: (s: string) => bg("customMessageBg", s),
+              selectedBg: (s: string) => bg("selectedBg", s),
+              fg: (color: string, s: string) => theme.fg(color, s),
+            };
+            return {
+              render: (width: number) => {
+                // Overlay maxHeight is 60% of the terminal; 7 chrome rows.
+                const maxRows = Math.max(1, Math.floor((process.stdout.rows ?? 24) * 0.6) - 7);
+                return clipLines(
+                  renderDiagnosticsPanel(rows, selectedIndex, width, paint, maxRows, measureWidth, clipLine),
+                  width,
+                );
+              },
+              handleInput: (data: string) => {
+                if (keyIs(data, "up", ["\x1b[A", "k"])) {
+                  selectedIndex = Math.max(0, selectedIndex - 1);
+                  tui.requestRender();
+                } else if (keyIs(data, "down", ["\x1b[B", "j"])) {
+                  selectedIndex = Math.min(Math.max(0, rows.length - 1), selectedIndex + 1);
+                  tui.requestRender();
+                } else if (
+                  keyIs(data, "enter", ["\r", "\n"]) ||
+                  keyIs(data, "escape", ["\x1b"]) ||
+                  keyIs(data, "ctrl+c", ["\x03"]) ||
+                  data === "q"
+                ) {
+                  done(undefined);
+                }
+              },
+            };
+          },
+          { overlay: true, overlayOptions: { anchor: "center", width: "70%", minWidth: 40, maxHeight: "60%" } },
+        );
+      } finally {
+        diagnosticsModalOpen = false;
       }
     },
   });
@@ -3301,7 +3507,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           ) => {
             let selectedIndex = Math.max(0, items.findIndex((item) => item.active));
             return {
-              render: (width: number) => renderProfilePicker(items, selectedIndex, Math.min(width, 100)),
+              render: (width: number) =>
+                clipLines(renderProfilePicker(items, selectedIndex, Math.min(width, 100)), width),
               handleInput: (data: string) => {
                 if (keyIs(data, "up", ["\x1b[A", "k"])) {
                   selectedIndex = (selectedIndex + items.length - 1) % items.length;
@@ -3340,8 +3547,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   });
 
   const cycleModeHandler = (ctx: ExtensionContext) => {
-    // Legacy combos (restored old sessions) enter the cycle at discuss.
-    const current = modeOf(state.phase, state.autonomy) ?? "discuss";
+    // Combos with no mode (restored old sessions) enter the cycle at plan.
+    const current = modeOf(state.phase, state.autonomy) ?? "plan";
     setMode(ctx, cycleMode(current), false);
   };
 

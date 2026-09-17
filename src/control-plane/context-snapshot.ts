@@ -36,7 +36,6 @@ export interface SnapshotInputs {
   providerPayload: { length: number; hash: string } | null;
   phase: Phase;
   autonomy: Autonomy;
-  hasAcceptedTask: boolean;
 }
 
 export function buildSnapshot(inputs: SnapshotInputs): ContextSnapshot {
@@ -64,6 +63,5 @@ export function buildSnapshot(inputs: SnapshotInputs): ContextSnapshot {
     providerPayloadHash: inputs.providerPayload?.hash ?? null,
     phase: inputs.phase,
     autonomy: inputs.autonomy,
-    hasAcceptedTask: inputs.hasAcceptedTask,
   };
 }

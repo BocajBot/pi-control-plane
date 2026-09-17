@@ -24,7 +24,6 @@ function baseInputs(overrides: Partial<SnapshotInputs> = {}): SnapshotInputs {
     providerPayload: { length: 100, hash: "abc" },
     phase: "discuss",
     autonomy: "read-only",
-    hasAcceptedTask: false,
     ...overrides,
   };
 }

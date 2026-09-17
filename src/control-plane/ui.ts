@@ -6,7 +6,6 @@
  * runtime could not obtain are printed as "Unavailable", never invented.
  */
 
-import { neutralizeDelimiters } from "./interpretation.ts";
 import type {
   Autonomy,
   ContextSnapshot,
@@ -25,57 +24,27 @@ export const SANDBOX_ALIAS_WARNING =
 
 /** Limits applied to rendered output and injected instructions. */
 export const LIMITS = {
-  injectionField: 700,
   injectionTotal: 6000,
   outputLines: 400,
-  rawInterpretation: 20000,
   fullPromptPreview: 12000,
 };
 
-function displayPhase(phase: Phase): string {
-  return phase.charAt(0).toUpperCase() + phase.slice(1);
-}
-
-function displayAutonomy(autonomy: Autonomy): string {
-  switch (autonomy) {
-    case "read-only":
-      return "Read-only";
-    case "attended":
-      return "Attended";
-    case "auto":
-      return "Auto";
-    case "restricted":
-      return "Restricted";
-    case "unattended":
-      return "Unattended";
-  }
-}
-
-/** One label for the merged mode setting. Legacy combos are shown honestly. */
-export function displayMode(
-  phase: Phase,
-  autonomy: Autonomy,
-  policyValid: boolean,
-  hasAcceptedTask?: boolean,
-): string {
+/**
+ * One capitalized label for the merged mode setting: Plan, Manual, Accept, or
+ * Auto. Any combo without a mode - execute+restricted, execute+read-only, or a
+ * non-execute phase with elevated autonomy - reads honestly as the safe
+ * read-only Plan. Auto (execute + unattended) keeps its gate annotations.
+ */
+export function displayMode(phase: Phase, autonomy: Autonomy, policyValid: boolean): string {
   if (phase === "execute") {
-    if (autonomy === "attended") return "Execute (attended)";
-    if (autonomy === "auto") return "Execute (auto)";
-    if (autonomy === "restricted") {
-      return policyValid
-        ? "Execute (restricted)"
-        : "Execute (restricted — policy invalid, enforcing read-only)";
-    }
+    if (autonomy === "attended") return "Manual";
+    if (autonomy === "auto") return "Accept";
     if (autonomy === "unattended") {
-      if (!policyValid) return "Execute (unattended — policy invalid, enforcing read-only)";
-      return hasAcceptedTask === false
-        ? "Execute (unattended — no accepted task, mutation blocked)"
-        : "Execute (unattended)";
+      if (!policyValid) return "Auto — policy invalid, enforcing read-only";
+      return "Auto";
     }
-    return "Execute (read-only)";
   }
-  const base = displayPhase(phase);
-  return autonomy === "read-only" ? base : `${base} (${displayAutonomy(autonomy)})`;
+  return "Plan";
 }
 
 /** Token counts formatted the way pi's built-in footer formats them. */
@@ -198,18 +167,34 @@ export function formatStatus(
   policyValid: boolean,
   sandboxLabel: string = "",
 ): string {
-  const task =
-    state.acceptedTask !== null
-      ? "Task accepted"
-      : state.pendingInterpretation !== null
-        ? "Task pending review"
-        : "No task";
   const ctx =
     contextPercent !== null ? `Context ${Math.round(contextPercent)}% full` : "Context unknown";
-  const guard = state.interpretGuard?.active ? " | Interpreting (tools disabled)" : "";
   const sandbox = sandboxLabel.length > 0 ? ` | ${sandboxLabel}` : "";
-  const mode = displayMode(state.phase, state.autonomy, policyValid, state.acceptedTask !== null);
-  return `Mode: ${mode} | ${task} | ${ctx}${guard}${sandbox}`;
+  const mode = displayMode(state.phase, state.autonomy, policyValid);
+  return `Mode: ${mode} | ${ctx}${sandbox}`;
+}
+
+/** Minimal presentation only. Authorization still comes from tool-policy.ts. */
+export function compactFooterState(
+  state: ControlPlaneState,
+  policyValid: boolean,
+  contextPercent: number | null,
+  exactContext: boolean,
+): { mode: string; attention: { text: string; color: "accent" | "warning" | "error" }[] } {
+  const attention: { text: string; color: "accent" | "warning" | "error" }[] = [];
+  const invalid = state.phase === "execute" &&
+    (state.autonomy === "restricted" || state.autonomy === "unattended") && !policyValid;
+  if (invalid) attention.push({ text: "Read-only: policy invalid — /mode", color: "error" });
+  if (contextPercent !== null && contextWarningLevel(contextPercent) !== null) {
+    attention.push({
+      text: `Context ${exactContext ? "" : "~"}${Math.round(contextPercent)}%${exactContext ? " at last request" : " estimated"} — /compact`,
+      color: contextWarningLevel(contextPercent) === "urgent" ? "error" : "warning",
+    });
+  }
+  return {
+    mode: invalid ? "Read-only" : displayMode(state.phase, state.autonomy, policyValid),
+    attention,
+  };
 }
 
 function unavailable(value: string | number | null | undefined): string {
@@ -248,8 +233,7 @@ export function renderContextSummary(
   for (const t of templates) lines.push(`  ${t.name}`);
   lines.push(`Active tools (${snapshot.tools.length}): ${snapshot.tools.join(", ") || "Unavailable"}`);
   lines.push("");
-  lines.push(`Mode:            ${displayMode(snapshot.phase, snapshot.autonomy, true, snapshot.hasAcceptedTask)}`);
-  lines.push(`Accepted task:   ${snapshot.hasAcceptedTask ? "yes" : "no"}`);
+  lines.push(`Mode:            ${displayMode(snapshot.phase, snapshot.autonomy, true)}`);
   lines.push("");
   lines.push(
     `System prompt:   ${unavailable(snapshot.systemPromptLength)} chars, sha256 ${shortHash(snapshot.systemPromptHash)} (redacted view)`,
@@ -324,45 +308,6 @@ export function renderSources(snapshot: ContextSnapshot): string[] {
   return lines;
 }
 
-export function renderTask(state: ControlPlaneState): string[] {
-  const lines: string[] = [];
-  const task = state.acceptedTask;
-  if (task === null) {
-    lines.push("No accepted task brief exists.");
-  } else {
-    lines.push(`Accepted task (source: ${task.source}, updated ${task.updatedAt}):`);
-    lines.push("");
-    lines.push(`Objective: ${task.objective || "(empty)"}`);
-    const section = (label: string, items: string[]) => {
-      if (items.length === 0) return;
-      lines.push(`${label}:`);
-      for (const item of items) lines.push(`  - ${item}`);
-    };
-    section("Deliverables", task.deliverables);
-    section("Included scope", task.includedScope);
-    section("Excluded scope", task.excludedScope);
-    section("Constraints", task.constraints);
-    section("Assumptions", task.assumptions);
-    section("Unknowns", task.unknowns);
-    section("Completion criteria", task.completionCriteria);
-    section("Approval boundaries", task.approvalBoundaries);
-  }
-  lines.push("");
-  const pending = state.pendingInterpretation;
-  if (pending === null) {
-    lines.push("No pending interpretation.");
-  } else if (pending.valid) {
-    lines.push(`Pending interpretation from ${pending.createdAt} (valid).`);
-    lines.push("Run /task accept to adopt it, or /task reject to discard it.");
-  } else {
-    lines.push(
-      `Pending interpretation from ${pending.createdAt} is INVALID — missing sections: ${pending.missingSections.join(", ")}.`,
-    );
-    lines.push("It cannot be accepted. Re-run /interpret, or /task reject to discard.");
-  }
-  return lines;
-}
-
 export function formatDenial(decision: ToolDecision, toolName: string): string {
   const parts = [
     `[control plane] Blocked tool "${toolName}" (${decision.riskCategory}).`,
@@ -377,29 +322,21 @@ function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max - 1) + "…" : text;
 }
 
-function truncateField(text: string, max: number): string {
-  return text.length > max ? text.slice(0, max) + " [TRUNCATED]" : text;
-}
-
 /**
  * Build the per-turn control-plane block appended to the system prompt.
  * Ephemeral: recomputed every turn, never persisted, never duplicated.
- * Task text is delimiter-neutralized and size-limited.
  */
 export function buildInjectionBlock(state: ControlPlaneState, policyValid: boolean): string {
   const lines: string[] = [];
-  const hasAcceptedTask = state.acceptedTask !== null;
   lines.push("[PI CONTROL PLANE]");
   lines.push("");
-  lines.push(`Mode: ${displayMode(state.phase, state.autonomy, policyValid, hasAcceptedTask)}`);
+  lines.push(`Mode: ${displayMode(state.phase, state.autonomy, policyValid)}`);
   lines.push(
     state.phase === "execute"
       ? state.autonomy === "restricted" && policyValid
         ? "Mutating tools are policy-enforced: project-root writes only, credential paths and shell blocked."
         : state.autonomy === "unattended" && policyValid
-          ? hasAcceptedTask
-            ? "Mutating tools are policy-enforced (same rules as restricted) with no human reviewing in real time. Stay strictly within the accepted task's scope."
-            : "Mutating tools are blocked: unattended mode requires an accepted task brief first."
+          ? "No human reviews calls in real time: only protected credential-pattern paths are blocked; shell, unknown tools and out-of-root targets are allowed. Every allowed mutating or shell call is logged for later review."
           : state.autonomy === "auto"
             ? "File writes and edits inside the project root apply without asking. Shell, deletion, writes outside the root, protected paths and harness tools still require user confirmation."
             : state.autonomy === "attended"
@@ -407,30 +344,9 @@ export function buildInjectionBlock(state: ControlPlaneState, policyValid: boole
               : "Mutating tools are blocked in this mode."
       : "Mutating tools are blocked in this mode.",
   );
-  const taskStatus =
-    state.acceptedTask !== null ? "Accepted" : state.pendingInterpretation !== null ? "Pending" : "None";
-  lines.push(`Task status: ${taskStatus}`);
-  const task = state.acceptedTask;
-  if (task !== null) {
-    const field = (label: string, value: string | string[]) => {
-      const text = Array.isArray(value) ? value.map((v) => `- ${v}`).join("\n") : value;
-      if (text.trim().length === 0) return;
-      lines.push("");
-      lines.push(`${label}:`);
-      lines.push(truncateField(neutralizeDelimiters(text), LIMITS.injectionField));
-    };
-    field("Accepted objective", task.objective);
-    field("Included scope", task.includedScope);
-    field("Excluded scope", task.excludedScope);
-    field("Constraints", task.constraints);
-    field("Unknowns", task.unknowns);
-    field("Completion criteria", task.completionCriteria);
-    field("Approval boundaries", task.approvalBoundaries);
-  }
   lines.push("");
   lines.push("Behavioral requirements:");
   lines.push("- Obey the active mode's restrictions.");
-  lines.push("- Do not broaden the accepted task.");
   lines.push("- Distinguish observations, inferences, assumptions, and recommendations.");
   lines.push(
     "- Do not claim completion without verification evidence. A queued, pending, or blocked action is not a completed action and must never be described as done.",
@@ -507,8 +423,8 @@ export function renderProfilePicker(
     toolsHeader,
     ...wrapText((selected?.tools ?? []).join(", ") || "(none)", rightWidth - 2).map((l) => "  " + l),
   ];
-  // Right side: two rows — description row, horizontal rule, tools row.
-  const rightLines = [...descLines, "─".repeat(rightWidth), ...toolsLines];
+  // Right side: two rows — description row, blank row, tools row.
+  const rightLines = [...descLines, "", ...toolsLines];
 
   const bodyHeight = Math.max(leftLines.length, rightLines.length);
   const row = (left: string, right: string) =>
@@ -535,8 +451,8 @@ export function renderHotkeyCheatsheet(): string[] {
     "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",
     "  alt+s  send preview: everything the next message will send, editable, incl. your draft",
     "  alt+t  tool-profile picker (enter: apply this session · space: set as default)",
-    "  alt+p / shift+tab  cycle mode: Discuss > Plan > Execute (attended)",
-    "         > Execute (restricted) > Execute (unattended) > Verify",
+    "  alt+p / shift+tab  cycle mode: Plan > Manual > Accept > Auto",
+    "  alt+i  diagnostics panel (session diagnostic log)",
     "  alt+h  this cheat sheet",
     "",
     "Pi essentials:",
@@ -549,7 +465,7 @@ export function renderHotkeyCheatsheet(): string[] {
     "  ctrl+x     copy last assistant message",
     "  escape     interrupt         ctrl+c  clear editor   ctrl+d  exit",
     "",
-    "Commands: /context /task /mode /interpret /hotkeys /compact /new",
+    "Commands: /context /mode /hotkeys /compact /new",
   ];
 }
 
@@ -566,35 +482,132 @@ export const USAGE = {
     "                      (\"all\" re-enables every tool; edit policy/profiles.json to define profiles)",
     "  /context recount  — re-count the last provider request with the model's own tokenizer",
   ],
-  task: [
-    "Usage: /task [set <text>|clear|accept|reject]",
-    "  /task             — show the accepted task and any pending interpretation",
-    "  /task set <text>  — create a task brief directly from your text",
-    "  /task accept      — adopt the pending /interpret result",
-    "  /task reject      — discard the pending /interpret result",
-    "  /task clear       — clear accepted and pending task state (asks to confirm)",
-  ],
   mode: [
-    "Usage: /mode [discuss|plan|execute|auto|execute-restricted|execute-unattended|verify]",
-    "  discuss             — talk only; every mutating tool blocked, reads allowed",
-    "  plan                — same permissions as discuss, framed for planning",
-    "  execute             — changes allowed; risky operations ask for confirmation",
-    "  auto                — edits inside the project root apply without asking;",
-    "                        shell, deletion, writes outside the root, protected",
-    "                        paths and harness tools still confirm (accept-edits)",
-    "  execute-restricted  — changes allowed inside the project root under",
-    "                        policy/default-policy.json; no confirmations, shell blocked",
-    "  execute-unattended  — same policy enforcement as execute-restricted, but requires",
-    "                        an accepted task brief first (/interpret + /task accept, or",
-    "                        /task set) and logs every allowed call as a diagnostic entry",
-    "                        for later review — meant for running with nobody watching",
-    "  verify              — read-only again, framed for checking the work",
-    "  (\"restricted\" means execute-restricted; \"sandboxed\" too, with a warning:",
-    "   it is policy enforcement, not an OS sandbox; \"unattended\" means execute-unattended)",
-  ],
-  interpret: [
-    "Usage: /interpret <task request>",
-    "  Runs a no-tools interpretation turn and produces a pending task brief.",
-    "  Afterwards run /task accept or /task reject.",
+    "Usage: /mode [plan|manual|accept|auto]",
+    "  plan    — read-only: talk and plan; every mutating tool blocked, reads allowed",
+    "  manual  — changes allowed; risky operations ask for confirmation",
+    "  accept  — file edits inside the project root apply without asking; shell,",
+    "            deletion, writes outside the root, protected paths and harness",
+    "            tools still confirm (accept-edits)",
+    "  auto    — full autonomy for running unattended: only protected credential",
+    "            paths are blocked; shell, unknown tools and out-of-root writes run",
+    "            without confirmations, each logged as a diagnostic entry for review",
+    "  (legacy names still work: discuss/verify -> plan, execute -> manual,",
+    "   execute-restricted -> manual, execute-unattended -> auto)",
   ],
 };
+
+
+/** Names shown in the header before collapsing to "+N more · alt+t". */
+const MAX_HEADER_TOOLS = 7;
+
+/** One left-grid header row (never wraps); measure terminal cells at the UI boundary. */
+export function renderActiveTools(
+  tools: readonly string[],
+  width: number,
+  measure: (text: string) => number = (text) => Array.from(text).length,
+  profile = "custom",
+): string[] {
+  if (width <= 0) return [];
+  const names = [...new Set(tools)].sort();
+  const shown = names.slice(0, MAX_HEADER_TOOLS);
+  const extra = names.length - shown.length;
+  const listing = names.length
+    ? shown.join(" · ") + (extra > 0 ? ` · +${extra} more` : "")
+    : "None";
+  const pad = width >= 2 ? " " : "";
+  const contentWidth = Math.max(1, width - pad.length);
+  const text = `PROFILE ${profile}  ·  TOOLS ${names.length}  ${listing}  ·  alt+t`;
+  let row = text;
+  if (measure(text) > contentWidth) {
+    row = "";
+    for (const char of text) {
+      if (measure(row + char + "…") > contentWidth) break;
+      row += char;
+    }
+    row += "…";
+  }
+  return [pad + row];
+}
+
+export interface DiagnosticPanelRow {
+  glyph: string;
+  tone: string;
+  label: string;
+  subject: string;
+  at: string;
+}
+
+export interface DiagnosticPanelPaint {
+  bg(text: string): string;
+  selectedBg(text: string): string;
+  fg(color: string, text: string): string;
+}
+
+/**
+ * alt+i diagnostics panel: an opaque, bordered, shadowed box whose height is
+ * exactly its content (no minimum, no empty middle). The caller passes the
+ * theme-backed paint functions and, inside Pi, cell-aware measure/clip; the
+ * defaults are the plain-character fallbacks used under the test harness.
+ * Every returned line is exactly `width` cells: panel (width - 1) + 1 shadow.
+ */
+export function renderDiagnosticsPanel(
+  rows: readonly DiagnosticPanelRow[],
+  selectedIndex: number,
+  width: number,
+  paint: DiagnosticPanelPaint,
+  maxRows: number = Number.POSITIVE_INFINITY,
+  measure: (text: string) => number = (text) => Array.from(text).length,
+  clip: (text: string, max: number) => string = (text, max) => {
+    const chars = Array.from(text);
+    return chars.length > max ? chars.slice(0, Math.max(0, max - 1)).join("") + "…" : text;
+  },
+): string[] {
+  if (width < 8) return [];
+  const panelWidth = width - 1;
+  const inner = panelWidth - 2;
+  const fit = (text: string) => (measure(text) > inner ? clip(text, inner) : text);
+  const padTo = (text: string) => text + " ".repeat(Math.max(0, inner - measure(text)));
+  const border = (s: string) => paint.fg("border", s);
+  const shadow = paint.fg("dim", "░");
+  const line = (body: string, selected = false) =>
+    paint.bg(border("│")) + (selected ? paint.selectedBg(body) : paint.bg(body)) + paint.bg(border("│")) + shadow;
+  const blank = () => line(" ".repeat(inner));
+
+  // Window of rows around the selection when the log exceeds the overlay cap.
+  const visible = Math.max(1, Math.min(rows.length, maxRows));
+  const start = Math.max(0, Math.min(selectedIndex - Math.floor(visible / 2), rows.length - visible));
+  const window = rows.slice(start, start + visible);
+
+  const lines: string[] = [];
+  lines.push(paint.bg(border("╭" + "─".repeat(inner) + "╮")) + " ");
+  lines.push(line(paint.fg("accent", padTo(fit(` Control plane diagnostics (${rows.length})`)))));
+  lines.push(blank());
+  if (rows.length === 0) {
+    lines.push(line(paint.fg("muted", padTo(fit(" (no diagnostics this session)")))));
+  }
+  window.forEach((row, i) => {
+    const index = start + i;
+    const selected = index === selectedIndex;
+    // Clip in plain text first, then paint each segment (styles never cross lines).
+    const avail = inner - 3; // " " + glyph + " "
+    let text = row.subject ? `${row.label} ${row.subject}` : row.label;
+    if (measure(text) > avail) text = clip(text, avail);
+    let meta = row.at ? `  ${row.at}` : "";
+    const remaining = avail - measure(text);
+    if (remaining < 3) meta = "";
+    else if (measure(meta) > remaining) meta = clip(meta, remaining);
+    const used = 3 + measure(text) + measure(meta);
+    const body =
+      ` ${paint.fg(selected ? "accent" : row.tone, row.glyph)} ` +
+      paint.fg("text", text) +
+      (meta ? paint.fg("muted", meta) : "") +
+      " ".repeat(Math.max(0, inner - used));
+    lines.push(line(body, selected));
+  });
+  lines.push(blank());
+  lines.push(line(paint.fg("dim", padTo(fit(" ↑↓ move · enter/esc close")))));
+  lines.push(paint.bg(border("╰" + "─".repeat(inner) + "╯")) + shadow);
+  lines.push(" " + paint.fg("dim", "░".repeat(panelWidth)));
+  return lines;
+}

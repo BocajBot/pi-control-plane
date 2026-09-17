@@ -1,8 +1,7 @@
 /**
  * Integration tests that load the real extension entry against a fake Pi API.
  * Covers wiring that pure-module tests cannot: attended confirmation flow,
- * interpretation guard lifecycle, command handling, restoration, and the
- * injected system-prompt block.
+ * command handling, restoration, and the injected system-prompt block.
  */
 
 import assert from "node:assert/strict";
@@ -12,11 +11,19 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import controlPlaneExtension, {
+  buildDiagnosticEntry,
+  clampBodyLines,
+  describeDiagnostic,
   formatConfirmDetail,
   formatDiagnosticLine,
+  safeDialogWidth,
 } from "../extensions/control-plane.ts";
-import { REQUIRED_SECTIONS } from "../src/control-plane/interpretation.ts";
 import { STATE_ENTRY_TYPE, DIAGNOSTIC_ENTRY_TYPE } from "../src/control-plane/types.ts";
+
+// Harness must never contact a real billing account inherited from the shell.
+const savedCreditEnv = ["OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_KEY"].map((key) => [key, process.env[key]] as const);
+test.before(() => { for (const [key] of savedCreditEnv) delete process.env[key]; });
+test.after(() => { for (const [key, value] of savedCreditEnv) { if (value !== undefined) process.env[key] = value; } });
 
 type Handler = (event: unknown, ctx: unknown) => unknown;
 
@@ -153,22 +160,9 @@ async function boot(): Promise<FakePi> {
   return pi;
 }
 
-function validInterpretationResponse(): string {
-  return REQUIRED_SECTIONS.map((s) => `## ${s}\ncontent for ${s}`).join("\n\n");
-}
-
-/** The interpretation turn must have started (before_agent_start fired) for agent_end to count. */
-async function startInterpretTurn(pi: FakePi, ctx: unknown) {
-  await pi.emit(
-    "before_agent_start",
-    { type: "before_agent_start", prompt: "p", systemPrompt: "SP", systemPromptOptions: { cwd: "/", contextFiles: [], skills: [] } },
-    ctx,
-  );
-}
-
 test("registers the commands, the local_web_search tool, and the shortcuts", async () => {
   const pi = await boot();
-  for (const name of ["context", "task", "mode", "interpret", "scratchpad", "bwrap", "harness-rules"]) {
+  for (const name of ["clear", "context", "mode", "scratchpad", "bwrap", "harness-rules"]) {
     assert.ok(pi.commands.has(name), `missing /${name}`);
   }
   assert.ok(!pi.commands.has("phase") && !pi.commands.has("autonomy"), "phase/autonomy merged into /mode");
@@ -178,11 +172,30 @@ test("registers the commands, the local_web_search tool, and the shortcuts", asy
   }
 });
 
-test("defaults after session_start: Discuss mode shown in status", async () => {
+test("/clear starts a fresh session as an alias for /new", async () => {
+  const pi = await boot();
+  const ctx = makeCtx();
+  let newSessions = 0;
+  Object.assign(ctx, {
+    newSession: async () => {
+      newSessions++;
+      return { cancelled: false };
+    },
+  });
+
+  await pi.commands.get("clear")!.handler("", ctx);
+
+  assert.equal(newSessions, 1);
+});
+
+test("defaults after session_start: a fresh session opens edit-ready (Execute/auto)", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Discuss \| No task/);
+  // A genuinely fresh session now defaults to Execute + Auto autonomy, which
+  // displays as Accept (accept-edits), so the daily driver works without a mode
+  // switch; read-only is opt-in via /mode plan.
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Accept/);
 });
 
 test("write blocked in Discuss; read allowed", async () => {
@@ -190,13 +203,14 @@ test("write blocked in Discuss; read allowed", async () => {
   const root = tmpRoot();
   const ctx = makeCtx({ cwd: root });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("discuss", ctx);
   const blocked = (await pi.emit(
     "tool_call",
     { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "f.txt", content: "x" } },
     ctx,
   )) as { block?: boolean; reason?: string };
   assert.equal(blocked?.block, true);
-  assert.match(blocked?.reason ?? "", /phase:discuss/);
+  assert.match(blocked?.reason ?? "", /phase:plan/);
   const readResult = await pi.emit(
     "tool_call",
     { type: "tool_call", toolCallId: "2", toolName: "read", input: { path: "f.txt" } },
@@ -268,6 +282,7 @@ test("phase-switch dialog: approve switch + approve call → proceeds, audited a
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("discuss", ctx);
   const titles: string[] = [];
   scriptConfirm(ctx, { "Switch to Execute phase?": true, "Allow write?": true }, titles);
   const result = await pi.emit(
@@ -279,7 +294,7 @@ test("phase-switch dialog: approve switch + approve call → proceeds, audited a
   // Two independent gates fired in order: the phase switch, then the attended
   // per-call confirm — one Yes did not grant the mutation.
   assert.deepEqual(titles, ["Switch to Execute phase?", "Allow write?"]);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Execute/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Manual/);
   const audit = pi.entries.find(
     (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "phase-switch-via-dialog",
   );
@@ -287,16 +302,17 @@ test("phase-switch dialog: approve switch + approve call → proceeds, audited a
   const d = audit!.data as Record<string, unknown>;
   assert.equal(d.actor, "user");
   assert.equal(d.provenance, "attended-phase-dialog");
-  assert.equal(d.from, "discuss");
-  assert.equal(d.to, "execute");
+  assert.equal(d.from, "plan");
+  assert.equal(d.to, "manual");
   assert.equal(d.blockedTool, "write");
-  assert.equal(d.blockedRule, "phase:discuss");
+  assert.equal(d.blockedRule, "phase:plan");
 });
 
 test("phase-switch dialog: decline switch → identical plain block, no phase change", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("discuss", ctx);
   const titles: string[] = [];
   scriptConfirm(ctx, { "Switch to Execute phase?": false }, titles);
   const blocked = (await pi.emit(
@@ -305,9 +321,9 @@ test("phase-switch dialog: decline switch → identical plain block, no phase ch
     ctx,
   )) as { block?: boolean; reason?: string };
   assert.equal(blocked?.block, true);
-  assert.match(blocked?.reason ?? "", /phase:discuss/, "declined switch blocks exactly as today");
+  assert.match(blocked?.reason ?? "", /phase:plan/, "declined switch blocks exactly as today");
   assert.deepEqual(titles, ["Switch to Execute phase?"], "no per-call confirm after a declined switch");
-  assert.match(ctx.statuses["control-plane"] ?? "", /Discuss/, "phase must not change on decline");
+  assert.match(ctx.statuses["control-plane"] ?? "", /Plan/, "phase must not change on decline");
   assert.ok(
     !pi.entries.some(
       (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "phase-switch-via-dialog",
@@ -320,6 +336,7 @@ test("phase-switch dialog: approve switch but decline the call → switched yet 
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("discuss", ctx);
   const titles: string[] = [];
   scriptConfirm(ctx, { "Switch to Execute phase?": true, "Allow write?": false }, titles);
   const blocked = (await pi.emit(
@@ -332,7 +349,7 @@ test("phase-switch dialog: approve switch but decline the call → switched yet 
   assert.deepEqual(titles, ["Switch to Execute phase?", "Allow write?"]);
   // The switch did happen (it is a real phase change), it just did not authorize
   // the mutation — the per-call confirm did that job separately.
-  assert.match(ctx.statuses["control-plane"] ?? "", /Execute/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Manual/);
   assert.ok(
     pi.entries.some(
       (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "phase-switch-via-dialog",
@@ -345,6 +362,7 @@ test("phase-switch dialog: no-UI session gets the plain block, never a dialog", 
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot(), hasUI: false });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("discuss", ctx);
   const titles: string[] = [];
   scriptConfirm(ctx, {}, titles);
   const blocked = (await pi.emit(
@@ -353,13 +371,15 @@ test("phase-switch dialog: no-UI session gets the plain block, never a dialog", 
     ctx,
   )) as { block?: boolean; reason?: string };
   assert.equal(blocked?.block, true);
-  assert.match(blocked?.reason ?? "", /phase:discuss/);
+  assert.match(blocked?.reason ?? "", /phase:plan/);
   assert.deepEqual(titles, [], "no confirmation dialog without a UI");
 });
 
 // ---- read-before-edit (hard rule) ----
 // An edit/write of an EXISTING file must have read that exact file this session
-// (and it must be unchanged on disk since). New files are exempt; the rule
+// (and it must be unchanged on disk since — except by this session's own
+// successful edit/write, which restamps the credit instead of demanding a
+// re-read). New files are exempt; the rule
 // preempts the attended confirm and the phase-switch dialog. Each denial is
 // audited. Read credit is per control-plane activation, so a separate session
 // (an isolated delegate/operator) inherits none.
@@ -442,6 +462,95 @@ test("read-before-edit: an external change after the read forces a re-read", asy
     ctx,
   );
   assert.equal(ok, undefined, "re-reading after the external change lets the edit through");
+});
+
+test("read-before-edit: this session's own completed edit does not demand a re-read", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const file = path.join(root, "data.txt");
+  fs.writeFileSync(file, "original\n");
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "data.txt" } }, ctx);
+  const first = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "data.txt", oldText: "original", newText: "changed" } },
+    ctx,
+  );
+  assert.equal(first, undefined, "edit after reading proceeds");
+  // The permitted edit ran: the file on disk now reflects it (mtime moved).
+  fs.writeFileSync(file, "changed\n");
+  await pi.emit(
+    "tool_result",
+    { type: "tool_result", toolCallId: "2", toolName: "edit", input: { path: "data.txt" }, isError: false, content: [] },
+    ctx,
+  );
+  const second = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "3", toolName: "edit", input: { path: "data.txt", oldText: "changed", newText: "changed again" } },
+    ctx,
+  );
+  assert.equal(second, undefined, "a follow-up edit is not refused: the session's own edit is not staleness");
+  assert.ok(!findRbeAudit(pi), "no read-before-edit denial for the model's own completed edit");
+});
+
+test("read-before-edit: a FAILED edit does not restamp credit — a partially-applied change still forces a re-read", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const file = path.join(root, "data.txt");
+  fs.writeFileSync(file, "original\n");
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "data.txt" } }, ctx);
+  await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "data.txt", oldText: "original", newText: "changed" } },
+    ctx,
+  );
+  // The errored edit managed to touch the disk before failing.
+  fs.writeFileSync(file, "partial\n");
+  await pi.emit(
+    "tool_result",
+    { type: "tool_result", toolCallId: "2", toolName: "edit", input: { path: "data.txt" }, isError: true, content: [] },
+    ctx,
+  );
+  const stale = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "3", toolName: "edit", input: { path: "data.txt", oldText: "partial", newText: "changed" } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(stale?.block, true, "an errored edit's on-disk change is not treated as the session's own");
+  assert.match(stale?.reason ?? "", /Rule: read-before-edit:stale/);
+});
+
+test("read-before-edit: a completed write does not grant read credit for a never-read file", async () => {
+  const pi = await boot();
+  const root = tmpRoot();
+  const ctx = makeCtx({ cwd: root, confirmResult: true });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const first = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "1", toolName: "write", input: { path: "brand-new.txt", content: "hello\n" } },
+    ctx,
+  );
+  assert.equal(first, undefined, "creating a new file is exempt (nothing to read)");
+  // The write executed and completed successfully.
+  fs.writeFileSync(path.join(root, "brand-new.txt"), "hello\n");
+  await pi.emit(
+    "tool_result",
+    { type: "tool_result", toolCallId: "1", toolName: "write", input: { path: "brand-new.txt" }, isError: false, content: [] },
+    ctx,
+  );
+  const blocked = (await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "brand-new.txt", oldText: "hello", newText: "hi" } },
+    ctx,
+  )) as { block?: boolean; reason?: string };
+  assert.equal(blocked?.block, true, "editing a file this session created but never read is still gated");
+  assert.match(blocked?.reason ?? "", /Rule: read-before-edit\b/);
 });
 
 test("read-before-edit: creating a new file needs no prior read", async () => {
@@ -574,7 +683,7 @@ test("backup-before-edit: writing a NEW file is exempt (no backup, no diagnostic
   assert.equal(fs.existsSync(backupRoot) ? fs.readdirSync(backupRoot).length : 0, 0, "no backup written for a new file");
 });
 
-test("backup-before-edit: a failed snapshot blocks the mutation and leaves the target unchanged", async () => {
+test("backup-before-edit: a failed snapshot warns and proceeds (edit not blocked), recording a diagnostic", async () => {
   const { pi, backupRoot } = await bootWithBackupRoot();
   const root = tmpRoot();
   const file = path.join(root, "data.txt");
@@ -589,16 +698,21 @@ test("backup-before-edit: a failed snapshot blocks the mutation and leaves the t
     await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
     await pi.commands.get("mode")!.handler("execute", ctx);
     await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "data.txt" } }, ctx);
-    const blocked = (await pi.emit(
+    const result = (await pi.emit(
       "tool_call",
       { type: "tool_call", toolCallId: "2", toolName: "edit", input: { path: "data.txt", oldText: "keep-me", newText: "nope" } },
       ctx,
-    )) as { block?: boolean; reason?: string };
-    assert.equal(blocked?.block, true, "a failed backup must block the mutation (fail closed)");
-    assert.match(blocked?.reason ?? "", /backup-before-edit/);
+    )) as { block?: boolean; reason?: string } | undefined;
+    // Warn-and-proceed: a failed pre-image snapshot no longer fails closed. In a
+    // git repo the working tree already holds the pre-image; blocking here mostly
+    // duplicated git while interrupting flow.
+    assert.notEqual(result?.block, true, "a failed backup must NOT block the mutation anymore");
     const failed = findBackupFailedAudit(pi);
-    assert.ok(failed, "a backup-before-edit-failed diagnostic must be emitted");
-    assert.equal(fs.readFileSync(file, "utf8"), PRE, "the target file is untouched when the backup fails");
+    assert.ok(failed, "a backup-before-edit-failed diagnostic must still be emitted (audit trail)");
+    assert.ok(
+      ctx.notifications.some((n) => n.type === "warning" && /backup-before-edit/.test(n.message)),
+      "the user must be warned that the pre-image could not be taken",
+    );
   } finally {
     fs.chmodSync(backupRoot, 0o755); // restore so cleanup can remove it
   }
@@ -647,7 +761,6 @@ test("backup-before-edit: an unattended allowed mutation still produces a backup
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
   await pi.commands.get("mode")!.handler("execute-restricted", ctx);
   await pi.commands.get("mode")!.handler("unattended", ctx);
-  await pi.commands.get("task")!.handler("set do the thing", ctx);
   // Unattended read is allowed (reads are not gated); it earns read credit.
   await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "data.txt" } }, ctx);
   const result = (await pi.emit(
@@ -945,23 +1058,23 @@ test("a remembered rule applies without a UI once the user opts in, and only for
   assert.match(blocked?.reason ?? "", /failing closed/i);
 });
 
-test("auto mode stamps its allow for the harness, exactly like a dialog approval", async () => {
-  // /mode auto is the user's standing answer for in-root edits; the stamp is
+test("accept mode stamps its allow for the harness, exactly like a dialog approval", async () => {
+  // /mode accept is the user's standing answer for in-root edits; the stamp is
   // how the harness layer consumes that answer instead of asking its own
   // section-21 question (or failing closed with no UI).
   const pi = await boot();
   const root = tmpRoot();
   const ctx = makeCtx({ cwd: root, hasUI: false });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await pi.commands.get("mode")!.handler("auto", ctx);
+  await pi.commands.get("mode")!.handler("accept", ctx);
 
   const event = { type: "tool_call", toolCallId: "c1", toolName: "write", input: { path: "in-root.txt", content: "x" } };
   const result = await pi.emit("tool_call", event, ctx);
-  assert.equal(result, undefined, "auto mode allows the in-root write with no UI");
+  assert.equal(result, undefined, "accept mode allows the in-root write with no UI");
   const stamp = (event as { __cpUserApproved?: { callId: string | null } }).__cpUserApproved;
   assert.equal(stamp?.callId, "c1", "the allow is stamped per-callId for the harness");
 
-  // A call auto does NOT cover gets no stamp: it confirms (and with no UI,
+  // A call accept does NOT cover gets no stamp: it confirms (and with no UI,
   // blocks) — the stamp never outruns the rule that earns it.
   const shellEvent = { type: "tool_call", toolCallId: "c2", toolName: "bash", input: { command: "echo hi" } };
   const blocked = (await pi.emit("tool_call", shellEvent, ctx)) as { block?: boolean };
@@ -1147,92 +1260,6 @@ test(
   },
 );
 
-test("/interpret guards the turn: all tools blocked, diagnostic recorded, state restored after", async () => {
-  const pi = await boot();
-  const root = tmpRoot();
-  const ctx = makeCtx({ cwd: root });
-  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await pi.commands.get("mode")!.handler("execute", ctx);
-
-  await pi.commands.get("interpret")!.handler("Refactor the loader and encourage tool use", ctx);
-  assert.equal(pi.sentUserMessages.length, 1);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Interpreting \(tools disabled\)/);
-
-  // Even a read is blocked during interpretation, and a diagnostic is recorded.
-  const blocked = (await pi.emit(
-    "tool_call",
-    { type: "tool_call", toolCallId: "1", toolName: "read", input: { path: "f.txt" } },
-    ctx,
-  )) as { block?: boolean; reason?: string };
-  assert.equal(blocked?.block, true);
-  assert.match(blocked?.reason ?? "", /interpretation/i);
-  assert.ok(pi.entries.some((e) => e.customType === DIAGNOSTIC_ENTRY_TYPE));
-
-  // Model responds with a valid interpretation; guard lifts, phase/autonomy restored.
-  await startInterpretTurn(pi, ctx);
-  await pi.emit(
-    "agent_end",
-    {
-      type: "agent_end",
-      messages: [{ role: "assistant", content: [{ type: "text", text: validInterpretationResponse() }] }],
-    },
-    ctx,
-  );
-  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(attended\) \| Task pending review/);
-
-  // Accept adopts the brief.
-  await pi.commands.get("task")!.handler("accept", ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Task accepted/);
-  const write = (await pi.emit(
-    "tool_call",
-    { type: "tool_call", toolCallId: "2", toolName: "read", input: { path: "f.txt" } },
-    ctx,
-  )) as { block?: boolean } | undefined;
-  assert.equal(write, undefined, "guard must be lifted after interpretation completes");
-});
-
-test("invalid interpretation cannot be accepted", async () => {
-  const pi = await boot();
-  const ctx = makeCtx({ cwd: tmpRoot() });
-  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await pi.commands.get("interpret")!.handler("do something", ctx);
-  await startInterpretTurn(pi, ctx);
-  await pi.emit(
-    "agent_end",
-    { type: "agent_end", messages: [{ role: "assistant", content: "## Objective\nonly this" }] },
-    ctx,
-  );
-  await pi.commands.get("task")!.handler("accept", ctx);
-  assert.ok(
-    ctx.notifications.some((n) => /invalid/i.test(n.message) && /cannot be accepted/i.test(n.message)),
-    "accept must be refused for invalid interpretations",
-  );
-  assert.match(ctx.statuses["control-plane"] ?? "", /Task pending review/);
-});
-
-test("a stale agent_end before the interpretation turn starts does not consume the guard", async () => {
-  const pi = await boot();
-  const ctx = makeCtx({ cwd: tmpRoot() });
-  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await pi.commands.get("interpret")!.handler("do something", ctx);
-  // A leftover agent_end from the previous turn arrives before the interpret turn begins.
-  await pi.emit(
-    "agent_end",
-    { type: "agent_end", messages: [{ role: "assistant", content: "stale prior-turn response" }] },
-    ctx,
-  );
-  assert.match(ctx.statuses["control-plane"] ?? "", /Interpreting \(tools disabled\)/, "guard must survive the stale agent_end");
-  // The real interpretation turn then runs and completes normally.
-  await startInterpretTurn(pi, ctx);
-  await pi.emit(
-    "agent_end",
-    { type: "agent_end", messages: [{ role: "assistant", content: validInterpretationResponse() }] },
-    ctx,
-  );
-  assert.doesNotMatch(ctx.statuses["control-plane"] ?? "", /Interpreting \(tools disabled\)/);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Task pending review/);
-});
-
 test("state restores across sessions from persisted entries (phase, autonomy, toggles)", async () => {
   const pi = await boot();
   const root = tmpRoot();
@@ -1260,11 +1287,11 @@ test("malformed persisted state falls back to safe defaults with a warning", asy
     ],
   });
   await pi.emit("session_start", { type: "session_start", reason: "resume" }, ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Discuss/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Plan/);
   assert.ok(ctx.notifications.some((n) => /malformed/i.test(n.message)));
 });
 
-test("sandboxed resolves to Execute (restricted) with the required warning and honest status", async () => {
+test("sandboxed is a deprecated alias: warns and degrades to Plan (never escalates to an edit mode)", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
@@ -1273,7 +1300,9 @@ test("sandboxed resolves to Execute (restricted) with the required warning and h
     ctx.notifications.some((n) => /not a security sandbox/i.test(n.message)),
     "sandbox warning required",
   );
-  assert.match(ctx.statuses["control-plane"] ?? "", /Execute \(restricted\)/i);
+  // The restricted mode it once selected is gone; it must degrade to the safest
+  // mode (Plan / read-only), never escalate into an edit mode.
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Plan/);
   assert.doesNotMatch(ctx.statuses["control-plane"] ?? "", /Sandboxed/);
 });
 
@@ -1285,6 +1314,7 @@ test("injected system prompt carries the control-plane block and applies verifie
     contextFiles: [{ path: `${root}/AGENTS.md`, content: "AGENTS FILE CONTENT" }],
   });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("discuss", ctx);
   await pi.commands.get("context")!.handler(`toggle file:${root}/AGENTS.md`, ctx);
 
   const result = (await pi.emit(
@@ -1298,7 +1328,7 @@ test("injected system prompt carries the control-plane block and applies verifie
     ctx,
   )) as { systemPrompt?: string };
   assert.ok(result?.systemPrompt?.includes("[PI CONTROL PLANE]"));
-  assert.ok(result?.systemPrompt?.includes("Mode: Discuss"));
+  assert.ok(result?.systemPrompt?.includes("Mode: Plan"));
   assert.ok(!result?.systemPrompt?.includes("AGENTS FILE CONTENT"), "disabled file must be excised");
 });
 
@@ -1328,18 +1358,6 @@ test("unknown toggle target produces an actionable error, not a state change", a
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
   await pi.commands.get("context")!.handler("toggle definitely-not-a-source", ctx);
   assert.ok(ctx.notifications.some((n) => /unknown source/i.test(n.message)));
-});
-
-test("/task clear force clears without UI; /task set stores objective only", async () => {
-  const pi = await boot();
-  const ctx = makeCtx({ cwd: tmpRoot(), hasUI: false });
-  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await pi.commands.get("task")!.handler("set build the thing", ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Task accepted/);
-  await pi.commands.get("task")!.handler("clear", ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Task accepted/, "clear without force and without UI must not clear");
-  await pi.commands.get("task")!.handler("clear force", ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /No task/);
 });
 
 test("context overlay: /context restore with no override says so; alt+e registered", async () => {
@@ -1409,26 +1427,19 @@ test("applied profile persists and is restored in a new session", async () => {
   assert.deepEqual([...pi2.activeTools].sort(), ["find", "grep", "ls", "read"], "profile toggles reapplied on restore");
 });
 
-test("mode cycle hotkey advances through all seven modes", async () => {
+test("mode cycle hotkey advances through all four modes", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("plan", ctx);
+  await pi.shortcuts.get("alt+p")!(ctx);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Manual/);
+  await pi.shortcuts.get("alt+p")!(ctx);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Accept/);
+  await pi.shortcuts.get("alt+p")!(ctx);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Auto/);
   await pi.shortcuts.get("alt+p")!(ctx);
   assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Plan/);
-  await pi.shortcuts.get("alt+p")!(ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(attended\)/);
-  await pi.shortcuts.get("alt+p")!(ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(auto\)/);
-  await pi.shortcuts.get("alt+p")!(ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(restricted\)/);
-  await pi.shortcuts.get("alt+p")!(ctx);
-  // No task brief accepted in this test, so unattended correctly reports its
-  // mutation gate rather than a bare "Unattended" label.
-  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Execute \(unattended — no accepted task, mutation blocked\)/);
-  await pi.shortcuts.get("alt+p")!(ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Verify/);
-  await pi.shortcuts.get("alt+p")!(ctx);
-  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Discuss/);
 });
 
 test("/scratchpad: add, list, remove, clear round-trip and persist across a session restore", async () => {
@@ -1519,42 +1530,28 @@ test("transcribe_audio tool: registered sequentially and returns Pi-native conte
   assert.match(result.content[0]?.text ?? "", /Transcription failed: audio file not found/);
 });
 
-test("Unattended: tool_call is blocked without an accepted task, and logs every allowed call once a task exists", async () => {
+test("Unattended (Auto): mutating calls run without a precondition and are logged for audit; reads are not", async () => {
   const pi = await boot();
   const root = tmpRoot();
   const ctx = makeCtx({ cwd: root });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await pi.commands.get("mode")!.handler("execute-restricted", ctx);
-  await pi.commands.get("mode")!.handler("unattended", ctx);
-  assert.ok(
-    ctx.notifications.some((n) => /no task brief is accepted/i.test(n.message)),
-    "must warn that mutation is gated without an accepted task",
-  );
+  await pi.commands.get("mode")!.handler("auto", ctx); // Auto = unattended
 
-  const blocked = (await pi.emit(
-    "tool_call",
-    { type: "tool_call", toolName: "write", input: { path: "f.txt", content: "" } },
-    ctx,
-  )) as { block?: boolean; reason?: string } | undefined;
-  assert.equal(blocked?.block, true);
-  assert.match(blocked?.reason ?? "", /accepted task brief/i);
-
-  // Accept a task, then a mutating call in-root should be allowed AND logged
-  // as a diagnostic entry (the audit trail nobody-is-watching requires).
-  await pi.commands.get("task")!.handler("set do the thing", ctx);
+  // A mutating call in-root is allowed with no precondition AND still logged
+  // as a diagnostic entry (nobody is watching in real time, so the audit
+  // trail is the review mechanism).
   const entriesBefore = pi.entries.length;
   const allowed = (await pi.emit(
     "tool_call",
     { type: "tool_call", toolName: "write", input: { path: path.join(root, "f.txt"), content: "" } },
     ctx,
   )) as { block?: boolean } | undefined;
-  assert.equal(allowed?.block, undefined, "allowed calls return undefined, same contract as every other mode");
+  assert.equal(allowed?.block, undefined, "unattended mutations run without a precondition");
   const diagnostic = pi.entries.slice(entriesBefore).find((e) => e.customType === DIAGNOSTIC_ENTRY_TYPE);
   assert.ok(diagnostic, "an allowed unattended mutation must be logged for later review");
   assert.equal((diagnostic!.data as { kind: string }).kind, "unattended-call-allowed");
 
-  // Reads are not logged (would drown out the signal) and are unaffected by
-  // the task-brief gate either way.
+  // Reads are not logged (would drown out the signal).
   const entriesBeforeRead = pi.entries.length;
   await pi.emit("tool_call", { type: "tool_call", toolName: "read", input: { path: path.join(root, "f.txt") } }, ctx);
   assert.equal(pi.entries.length, entriesBeforeRead, "reads must not add an audit entry");
@@ -1562,9 +1559,9 @@ test("Unattended: tool_call is blocked without an accepted task, and logs every 
 
 // ---- Advisor-consult budget (soft policy) --------------------------------
 // harness_delegate kind:"advisor" is the cloud advisor. The first consult per
-// accepted task (or per session when none) is silent; further consults hit the
-// attended Yes/No/Always gate; "Always" lifts the cap for the session. It only
-// downgrades/gates the attended path and never loosens a hard block.
+// session is silent; further consults hit the attended Yes/No/Always gate;
+// "Always" lifts the cap for the session. It only downgrades/gates the
+// attended path and never loosens a hard block.
 const advisorConsultEntries = (pi: FakePi) =>
   pi.entries.filter(
     (e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string })?.kind === "advisor-consult",
@@ -1636,19 +1633,6 @@ test("advisor budget: No (and Escape) block the over-budget consult", async () =
   }
 });
 
-test("advisor budget: a new task resets the per-task budget", async () => {
-  const pi = await boot();
-  const ctx = makeCtx({ cwd: tmpRoot(), withCustom: true, customChoice: "no" });
-  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  await pi.commands.get("mode")!.handler("execute", ctx);
-  await pi.commands.get("task")!.handler("set brief A", ctx);
-  await pi.emit("tool_call", consult("1"), ctx); // free under task A
-  await pi.commands.get("task")!.handler("set brief B", ctx);
-  const r = await pi.emit("tool_call", consult("2"), ctx); // first under task B
-  assert.equal(r, undefined, "the first consult under a new task is free again");
-  assert.deepEqual(ctx.customCalls, [], "no gate on the first consult of the new task");
-});
-
 test("advisor budget: over budget with no UI fails closed", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot(), hasUI: false });
@@ -1663,8 +1647,9 @@ test("advisor budget: over budget with no UI fails closed", async () => {
 
 test("advisor budget: never loosens a hard block (Discuss phase)", async () => {
   const pi = await boot();
-  const ctx = makeCtx({ cwd: tmpRoot() }); // Discuss default; the phase-switch dialog is declined (confirm=false)
+  const ctx = makeCtx({ cwd: tmpRoot() }); // Discuss set explicitly below; the phase-switch dialog is declined (confirm=false)
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.commands.get("mode")!.handler("discuss", ctx);
   const blocked = (await pi.emit("tool_call", consult("1"), ctx)) as { block?: boolean };
   assert.equal(blocked?.block, true, "a phase-blocked consult stays blocked");
   assert.equal(advisorConsultEntries(pi).length, 0, "the budget never counted or allowed a hard-blocked consult");
@@ -1758,24 +1743,19 @@ test("ro-shell: without bwrap a read-mode command falls to the gate, never a sil
 
 // ---- Diagnostic + confirm text: no bare "?" or permanent "Unavailable" -----
 
-test("diagnostic line: interpretation block keeps the real tool name; other kinds render their kind, never a bare ?", () => {
-  const interpret = formatDiagnosticLine({ kind: "blocked-tool-during-interpret", toolName: "write", at: "T" });
-  assert.match(interpret, /blocked tool "write" during interpretation \(T\)/);
-
-  // The bug: a diagnostic with no toolName used to render as `blocked tool "?"
-  // during interpretation`. It must now render its real kind + subject, and
-  // never claim "during interpretation" for an unrelated kind.
+test("diagnostic line: every kind renders its kind and subject, never a bare ?", () => {
+  // The bug: a diagnostic with no toolName used to render with a bare "?"
+  // placeholder. It must render its real kind + subject.
   const denied = formatDiagnosticLine({ kind: "read-out-of-scope-denied", target: "/etc/hostname", at: "T" });
   assert.ok(!denied.includes('"?"'), "no bare ? placeholder");
-  assert.ok(!denied.includes("during interpretation"), "an unrelated kind is not mislabelled");
   assert.match(denied, /read-out-of-scope-denied \/etc\/hostname \(T\)/);
 
   const consult = formatDiagnosticLine({ kind: "advisor-consult", at: "T" });
   assert.ok(!consult.includes('"?"'));
   assert.match(consult, /advisor-consult \(T\)/);
 
-  // An interpret block that genuinely has no name shows no "?" either.
-  assert.ok(!formatDiagnosticLine({ kind: "blocked-tool-during-interpret", at: "T" }).includes('"?"'));
+  // A kind with no name shows no "?" either.
+  assert.ok(!formatDiagnosticLine({ kind: "backup-before-edit-failed", at: "T" }).includes('"?"'));
 });
 
 test("confirm detail: no permanent 'Unavailable' lines; pathless tools say so plainly", () => {
@@ -1808,6 +1788,40 @@ test("confirm detail: no permanent 'Unavailable' lines; pathless tools say so pl
   assert.match(shell, /Command: touch f/);
   assert.ok(!shell.includes("no file target"), "a command is not 'no file target'");
   assert.match(shell, /Inside project root: yes/);
+});
+
+test("confirm detail: every body line is clamped to the terminal width (regression: over-wide Command line crashed the renderer)", () => {
+  // Reproduces the 2026-09-16 crash: terminal width 191, a long bash command.
+  // The old fixed 200-char cap + "Command: " prefix rendered a 210-wide line and
+  // base pi's doRender threw "Rendered line exceeds terminal width", exiting pi.
+  const columns = 191;
+  const maxWidth = safeDialogWidth(columns);
+  assert.ok(maxWidth < columns, "safe width must leave margin under the terminal width");
+  const longCommand = "identify ~/Downloads/pi-man.png; montage ~/Downloads/pi-man.png -tile 3x1 -geometry +2+2 ~/pi-man-frames.png && echo ok; ls ~/.pi/agent/extensions 2>/dev/null; echo ---; ls ~/.pi/agent/npm/node_modules/pi-subagents 2>/dev/null | head; ".repeat(2);
+  assert.ok(Array.from(longCommand).length > 200, "fixture must exceed the old 200-char cap");
+  const detail = formatConfirmDetail(
+    { toolName: "bash", riskCategory: "shell", path: null, command: longCommand, insideRoot: true, reason: "why" },
+    maxWidth,
+  );
+  for (const line of detail.split("\n")) {
+    assert.ok(Array.from(line).length <= maxWidth, `line overflows safe width (${Array.from(line).length} > ${maxWidth}): ${line}`);
+  }
+  assert.match(detail, /^Command: identify ~\/Downloads\/pi-man\.png/m, "the command is still shown, just clamped");
+  assert.match(detail, /…$/m, "the clamped command is ellipsized");
+  // A long Target path is clamped too (the whole body is line-clamped, not just Command).
+  const longPath = "/" + "d/".repeat(200) + "f.txt";
+  const pathDetail = formatConfirmDetail(
+    { toolName: "write", riskCategory: "file-write", path: longPath, command: null, insideRoot: true, reason: "why" },
+    maxWidth,
+  );
+  for (const line of pathDetail.split("\n")) {
+    assert.ok(Array.from(line).length <= maxWidth, `path line overflows safe width: ${line}`);
+  }
+  // clampBodyLines itself: short lines untouched, long lines ellipsized to exactly maxWidth.
+  assert.equal(clampBodyLines("short\nline", 40), "short\nline");
+  const clamped = clampBodyLines("x".repeat(100), 40);
+  assert.equal(Array.from(clamped).length, 40);
+  assert.ok(clamped.endsWith("…"));
 });
 
 test("ro-shell: a write-mode pi_harness_bash command still gates and is rememberable", async () => {
@@ -1880,4 +1894,264 @@ test("P2: a declined call is never stamped (a denial cannot satisfy the second l
   const r = (await pi.emit("tool_call", event, ctx)) as { block?: boolean };
   assert.equal(r?.block, true, "declined -> blocked here");
   assert.equal((event as { __cpUserApproved?: unknown }).__cpUserApproved, undefined, "no stamp on a denial");
+});
+
+
+test("minimal UI renders one row, hides counters, and details remains available", async () => {
+  const pi = new FakePi();
+  await controlPlaneExtension(pi as never);
+  const ctx = makeCtx();
+  Object.assign(ctx.sessionManager, {
+    getEntries: () => [], getCwd: () => "/work/project", getSessionName: () => undefined,
+  });
+  let footer: { render: (width: number) => string[] } | undefined;
+  let counter: { render: (width: number) => string[] } | undefined;
+  const colors: { color: string; text: string }[] = [];
+  const theme = { fg: (color: string, text: string) => {
+    colors.push({ color, text });
+    return text;
+  } };
+  ctx.ui.setFooter = (factory: Function) => {
+    footer = factory({}, theme, {
+      getGitBranch: () => "main", getAvailableProviderCount: () => 1,
+      getExtensionStatuses: () => new Map(Object.entries(ctx.statuses).filter(([, value]) => value !== undefined)),
+    });
+  };
+  ctx.ui.getEditorText = () => "draft";
+  ctx.ui.setWidget = (key: string, factory: unknown) => {
+    if (key === "control-plane-draft-counter" && typeof factory === "function") counter = factory({}, theme);
+  };
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  assert.ok(footer);
+  assert.ok(counter);
+  // One natural-width status row. No reserved blank rows or 100-column cap.
+  const initial = footer.render(140);
+  assert.deepEqual(initial, [
+    // Fresh session opens edit-ready (Execute + auto = "Accept"); see state.ts freshState().
+    // Context reads as used/window (fixture: 100 of 1000), not a bare percent,
+    // so the loaded model's context size is always on screen.
+    " /work/project  ·  Accept  ·  ctx ~100/1.0k  ·  OpenRouter loading  ·  test-model  ·  alt+h help",
+  ]);
+  assert.match(initial[0], /ctx ~100\/1\.0k  ·  OpenRouter loading  ·  test-model/);
+  assert.equal(footer.render(80).length, 1);
+  assert.ok(colors.some((c) => c.color === "accent" && c.text === "Accept"));
+  assert.deepEqual(counter.render(80), []);
+  assert.ok(colors.some((item) => item.color === "accent" && item.text === "Accept"));
+  assert.ok(colors.some((item) => item.color === "muted" && item.text.includes("project")),
+    "cwd sits in the quiet muted baseline");
+  for (const width of [0, 1, 12, 24, 40, 80, 120]) {
+    assert.ok(footer.render(width).every((line) => line.length <= width));
+  }
+  assert.deepEqual(footer.render(200), initial);
+  ctx.statuses.lsp = "\x1b[90mLSP Inactive\x1b[0m";
+  assert.equal(footer.render(80).length, 1, "idle status does not reserve a row");
+  ctx.statuses.lsp = "LSP Error: server disconnected";
+  assert.equal(footer.render(120).length, 2);
+  assert.match(footer.render(80).join("\n"), /LSP Error/);
+  ctx.statuses.lsp = "LSP Inactive";
+  ctx.statuses.other = "External operation running";
+  assert.match(footer.render(80).join("\n"), /External operation running/);
+  await pi.commands.get("control-ui")!.handler("details", ctx);
+  assert.match(footer.render(80).join("\n"), /context/);
+  assert.match(footer.render(80).join("\n"), /LSP Inactive/);
+  assert.match(footer.render(80).join("\n"), /OpenRouter/);
+  assert.equal(counter.render(80).length, 2);
+  assert.ok(counter.render(8).every((line) => line.length <= 8));
+  await pi.commands.get("control-ui")!.handler("minimal", ctx);
+  assert.deepEqual(counter.render(80), []);
+  ctx.getContextUsage = () => ({ tokens: 950, contextWindow: 1000, percent: 95 });
+  colors.length = 0;
+  footer.render(80);
+  assert.ok(colors.some((item) => item.color === "error" && item.text.includes("95%")));
+  assert.ok(colors.some((item) => item.color === "accent" && item.text === "Accept"));
+  const narrow = footer.render(12);
+  assert.ok(narrow.every((line) => line.length <= 12));
+  // Every attention row carries the 1-column grid pad; final row is status.
+  assert.ok(narrow.slice(0, -1).every((line) => line.startsWith(" ")), "attention rows sit on the grid");
+  assert.match(narrow.map((line) => line.replace(/^ /, "")).join(""), /Context ~95% estimated — \/compact/);
+});
+
+
+test("top-right context tools header reads active registry on every render", async () => {
+  const pi = new FakePi();
+  await controlPlaneExtension(pi as never);
+  const ctx = makeCtx();
+  let header: { render: (width: number) => string[] } | undefined;
+  ctx.ui.setHeader = (factory: Function) => {
+    header = factory({}, { fg: (_color: string, text: string) => text });
+  };
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  assert.ok(header);
+  assert.ok(
+    !ctx.notifications.some((notification) => /Profile "minimal"/.test(notification.message)),
+    "fresh-session profile confirmation stays in the persistent header",
+  );
+  assert.equal(header.render(80).length, 1, "header is one line");
+  assert.ok(header.render(80)[0].startsWith(" PROFILE minimal"), "profile and left grid");
+  pi.setActiveTools(["read", "custom_tool"]);
+  assert.match(header.render(80).join("\n"), /PROFILE custom/);
+  assert.match(header.render(80).join("\n"), /custom_tool · read/);
+  assert.doesNotMatch(header.render(80).join("\n"), /bash/);
+  await pi.commands.get("context")!.handler("toggle tool:read", ctx);
+  assert.match(header.render(80).join("\n"), /TOOLS 1/);
+  assert.doesNotMatch(header.render(80).join("\n"), /read/);
+  await pi.commands.get("context")!.handler("profile reading", ctx);
+  const rendered = header.render(120).join("\n");
+  for (const tool of pi.getActiveTools()) assert.ok(rendered.includes(tool));
+  pi.setActiveTools(pi.allToolNames);
+  assert.match(header.render(120)[0], /\+3 more  ·  alt\+t/, "10 tools collapse to 7 + more");
+  for (const width of [1, 12, 40, 80]) assert.ok(header.render(width).every((line) => line.length <= width));
+});
+
+test("describeDiagnostic: glyph/tone/label per kind, unknown kind pending", () => {
+  assert.deepEqual(describeDiagnostic({ kind: "blocked-read-before-edit", toolName: "write", at: "T" }), {
+    glyph: "✗", tone: "error", label: "Blocked: read before edit", subject: '"write"', at: "T",
+  });
+  assert.deepEqual(describeDiagnostic({ kind: "backup-before-edit", target: "/p/f", at: "T" }), {
+    glyph: "✓", tone: "success", label: "Backup before edit", subject: "/p/f", at: "T",
+  });
+  const consult = describeDiagnostic({ kind: "advisor-consult" });
+  assert.equal(consult.glyph, "◐");
+  assert.equal(consult.tone, "warning");
+  assert.deepEqual(describeDiagnostic({ kind: "something-new" }), {
+    glyph: "○", tone: "dim", label: "something-new", subject: "", at: "",
+  });
+  for (const data of [{ kind: "something-new" }, { kind: "read-out-of-scope-denied" }, undefined]) {
+    const row = describeDiagnostic(data);
+    assert.ok(!JSON.stringify(row).includes("?"), "no bare ? anywhere");
+  }
+});
+
+test("diagnostic entry renderer paints an opaque background and spacing", () => {
+  const themeCalls: string[] = [];
+  const theme = {
+    fg: (color: string, text: string) => { themeCalls.push(`fg:${color}`); return text; },
+    bg: (color: string, text: string) => { themeCalls.push(`bg:${color}`); return `[${color}]${text}`; },
+  };
+  class FakeBox { args: unknown[]; children: unknown[] = []; constructor(...args: unknown[]) { this.args = args; } addChild(c: unknown) { this.children.push(c); } }
+  class FakeText { text: string; px?: number; py?: number; constructor(text: string, px?: number, py?: number) { this.text = text; this.px = px; this.py = py; } }
+  class FakeContainer { children: unknown[] = []; addChild(c: unknown) { this.children.push(c); } }
+  class FakeSpacer { lines?: number; constructor(lines?: number) { this.lines = lines; } }
+  const entry = buildDiagnosticEntry(
+    { kind: "blocked-read-before-edit", toolName: "write", at: "T" },
+    theme,
+    { Box: FakeBox as never, Text: FakeText as never, Container: FakeContainer as never, Spacer: FakeSpacer as never },
+  ) as FakeContainer;
+  assert.equal(entry.children.length, 2);
+  const [box, spacer] = entry.children as [FakeBox, FakeSpacer];
+  assert.ok(box instanceof FakeBox && spacer instanceof FakeSpacer);
+  assert.equal(spacer.lines, 1);
+  assert.deepEqual(box.args.slice(0, 2), [1, 0]);
+  const bgFn = box.args[2] as (s: string) => string;
+  assert.equal(bgFn("x"), "[customMessageBg]x", "Box background paints customMessageBg");
+  const text = box.children[0] as FakeText;
+  assert.ok(text.text.includes("✗") && text.text.includes("Blocked: read before edit") && text.text.includes('"write"'));
+  assert.ok(themeCalls.includes("fg:error") && themeCalls.includes("fg:text") && themeCalls.includes("fg:muted"));
+  assert.ok(!themeCalls.includes("fg:accent"), "diagnostic rows never use accent");
+  // A theme without bg() (older pi) still renders, just without the background fill.
+  const plain = buildDiagnosticEntry({ kind: "advisor-consult" }, { fg: (_c, t) => t }, {
+    Box: FakeBox as never, Text: FakeText as never, Container: FakeContainer as never, Spacer: FakeSpacer as never,
+  }) as FakeContainer;
+  assert.equal((plain.children[0] as FakeBox).args[2], undefined);
+});
+
+test("alt+i registered without shadowing Pi's alt+d editor binding", async () => {
+  const pi = await boot();
+  const branchEntries = [
+    { type: "custom", customType: DIAGNOSTIC_ENTRY_TYPE, data: { kind: "advisor-consult", at: "T1" } },
+    { type: "message", message: { role: "user" } },
+    { type: "custom", customType: DIAGNOSTIC_ENTRY_TYPE, data: { kind: "read-out-of-scope-denied", target: "/etc/x", at: "T2" } },
+  ];
+  const ctx = makeCtx({ cwd: tmpRoot(), branchEntries });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  assert.ok(pi.shortcuts.has("alt+i"));
+  assert.ok(!pi.shortcuts.has("alt+d"));
+  await pi.shortcuts.get("alt+i")!(ctx);
+  const output = pi.entries.filter((e) => e.customType === "pi-control-plane-output").at(-1);
+  assert.ok(output, "diagnostics emitted as chat entry when no modal UI exists");
+  const data = output!.data as { title: string; lines: string[] };
+  assert.equal(data.title, "diagnostics");
+  assert.deepEqual(data.lines, ["◐ Advisor consult  T1", "✗ Read out of scope /etc/x  T2"]);
+});
+
+test("custom render paths never exceed the given width", async () => {
+  const stripAnsi = (line: string) => line.replace(/\x1b\[[0-9;:]*m/g, "");
+  const widths = [0, 1, 12, 24, 40, 80, 120];
+  const check = (label: string, render: (w: number) => string[]) => {
+    for (const w of widths) {
+      for (const line of render(w)) {
+        assert.ok(Array.from(stripAnsi(line)).length <= w, `${label} overflows at ${w}: ${line}`);
+      }
+    }
+  };
+  const theme = {
+    fg: (_c: string, t: string) => t,
+    bg: (_c: string, t: string) => t,
+  };
+  const tui = { requestRender() {}, stop() {}, start() {} };
+  type Factory = (tui: unknown, theme: unknown, kb: unknown, done: (v: unknown) => void) => { render: (w: number) => string[] };
+
+  const pi = await boot();
+  const root = tmpRoot();
+  const diagnostics = Array.from({ length: 3 }, (_, i) => ({
+    type: "custom", customType: DIAGNOSTIC_ENTRY_TYPE,
+    data: { kind: "backup-before-edit", target: `/${"long/".repeat(30)}f${i}.txt`, at: "2026-09-16T00:00:00.000Z" },
+  }));
+  const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "no", branchEntries: diagnostics });
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+
+  for (const key of ["alt+h", "alt+t", "alt+i"]) {
+    const before = ctx.customCalls.length;
+    await pi.shortcuts.get(key)!(ctx);
+    assert.equal(ctx.customCalls.length, before + 1, `${key} opened a modal`);
+    const component = (ctx.customCalls.at(-1) as Factory)(tui, theme, {}, () => {});
+    check(key, component.render);
+  }
+
+  // Attended confirm with a 300-char command: header lines clipped at render time
+  // on top of the existing safeDialogWidth clamp.
+  await pi.commands.get("mode")!.handler("execute", ctx);
+  const before = ctx.customCalls.length;
+  await pi.emit("tool_call", { type: "tool_call", toolCallId: "1", toolName: "bash", input: { command: "x".repeat(300) } }, ctx);
+  assert.equal(ctx.customCalls.length, before + 1, "the attended dialog was shown");
+  const dialog = (ctx.customCalls.at(-1) as Factory)(tui, theme, {}, () => {});
+  check("attended confirm", dialog.render);
+});
+
+
+test("prompt lifecycle refreshes credits without blocking and exposes timing", async () => {
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return new Response(JSON.stringify({ data: { total_credits: 10, total_usage: requests / 100 } }));
+  };
+  try {
+    const pi = new FakePi();
+    await controlPlaneExtension(pi as never);
+    const ctx = makeCtx();
+    Object.assign(ctx.sessionManager, {
+      getCwd: () => "/work/project", getSessionName: () => undefined,
+    });
+    let footer: { render: (width: number) => string[] } | undefined;
+    ctx.ui.setFooter = (factory: Function) => {
+      footer = factory({}, { fg: (_color: string, text: string) => text }, {
+        getGitBranch: () => undefined,
+        getAvailableProviderCount: () => 1,
+        getExtensionStatuses: () => new Map(),
+      });
+    };
+    Object.assign(ctx, { modelRegistry: { getApiKeyForProvider: async () => "test-key" } });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(requests, 1, "session startup fetches the initial balance without waiting for a prompt");
+    assert.match(footer!.render(140).join("\n"), /OpenRouter · \$9\.99/);
+    await pi.emit("before_agent_start", { systemPrompt: "", systemPromptOptions: {} }, ctx);
+    await pi.emit("message_update", { assistantMessageEvent: { type: "text_delta" } }, ctx);
+    await pi.emit("agent_end", { messages: [] }, ctx);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(requests, 3);
+    await pi.commands.get("control-ui")!.handler("timing", ctx);
+    assert.match(ctx.notifications.at(-1)!.message, /First text: [0-9.]+s; total:/);
+  } finally { globalThis.fetch = originalFetch; }
 });

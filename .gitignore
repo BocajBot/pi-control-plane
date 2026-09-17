@@ -4,3 +4,5 @@ node_modules/
 *.bak.*
 rpc-smoke-*.txt
 interp-test.txt
+.pi/tasks/
+.startup-validation/

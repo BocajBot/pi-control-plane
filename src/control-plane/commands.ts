@@ -1,5 +1,5 @@
 /**
- * Pure argument parsing for the five control-plane commands. Parsing is
+ * Pure argument parsing for the control-plane commands. Parsing is
  * separated from execution so invalid-argument handling is unit-testable.
  */
 
@@ -41,36 +41,6 @@ export function parseContextArgs(args: string): ContextCommand {
   }
 }
 
-export type TaskCommand =
-  | { kind: "show" }
-  | { kind: "set"; text: string }
-  | { kind: "clear"; force: boolean }
-  | { kind: "accept" }
-  | { kind: "reject" }
-  | { kind: "usage" };
-
-export function parseTaskArgs(args: string): TaskCommand {
-  const trimmed = args.trim();
-  if (trimmed.length === 0) return { kind: "show" };
-  const [sub, ...rest] = trimmed.split(/\s+/);
-  switch (sub.toLowerCase()) {
-    case "set": {
-      const text = trimmed.slice(sub.length).trim();
-      return text.length > 0 ? { kind: "set", text } : { kind: "usage" };
-    }
-    case "clear":
-      if (rest.length === 0) return { kind: "clear", force: false };
-      if (rest.length === 1 && rest[0].toLowerCase() === "force") return { kind: "clear", force: true };
-      return { kind: "usage" };
-    case "accept":
-      return rest.length === 0 ? { kind: "accept" } : { kind: "usage" };
-    case "reject":
-      return rest.length === 0 ? { kind: "reject" } : { kind: "usage" };
-    default:
-      return { kind: "usage" };
-  }
-}
-
 export type ModeCommand =
   | { kind: "show" }
   | { kind: "set"; mode: Mode; sandboxAlias: boolean }
@@ -79,37 +49,39 @@ export type ModeCommand =
 export function parseModeArgs(args: string): ModeCommand {
   const trimmed = args.trim().toLowerCase();
   if (trimmed.length === 0) return { kind: "show" };
-  // Aliases: attended is the plain "execute"; "restricted" alone means
-  // execute-restricted; "sandboxed" keeps its honesty warning.
-  if (trimmed === "execute-attended" || trimmed === "attended") {
-    return { kind: "set", mode: "execute", sandboxAlias: false };
+  // Back-compat aliases: the seven-mode vocabulary collapsed to four
+  // (plan/manual/accept/auto), so old names keep working. NOTE the collision:
+  // bare "auto" is now the NEW canonical full-autonomy mode (execute +
+  // unattended), NOT the old accept-edits level - that level is "accept"
+  // (aliases: accept-edits, execute-auto, auto-accept).
+  if (trimmed === "discuss" || trimmed === "verify") {
+    return { kind: "set", mode: "plan", sandboxAlias: false };
   }
-  if (trimmed === "restricted") {
-    return { kind: "set", mode: "execute-restricted", sandboxAlias: false };
+  if (
+    trimmed === "execute" ||
+    trimmed === "execute-attended" ||
+    trimmed === "attended" ||
+    trimmed === "restricted" ||
+    trimmed === "execute-restricted"
+  ) {
+    return { kind: "set", mode: "manual", sandboxAlias: false };
   }
+  // "sandboxed" kept its honesty warning; the restricted mode it once selected
+  // is gone. It degrades to the SAFEST mode (Plan / read-only), never to an
+  // edit mode - a request to lock down must never escalate into edit power.
   if (trimmed === "sandboxed" || trimmed === "execute-sandboxed") {
-    return { kind: "set", mode: "execute-restricted", sandboxAlias: true };
+    return { kind: "set", mode: "plan", sandboxAlias: true };
   }
-  // "execute-auto" and "accept-edits" both name the same level: the first is
-  // consistent with the other execute-* names, the second is what people
-  // arriving from other agents call it.
   if (trimmed === "execute-auto" || trimmed === "accept-edits" || trimmed === "auto-accept") {
-    return { kind: "set", mode: "auto", sandboxAlias: false };
+    return { kind: "set", mode: "accept", sandboxAlias: false };
   }
-  if (trimmed === "unattended") {
-    return { kind: "set", mode: "execute-unattended", sandboxAlias: false };
+  if (trimmed === "unattended" || trimmed === "execute-unattended") {
+    return { kind: "set", mode: "auto", sandboxAlias: false };
   }
   if ((MODES as readonly string[]).includes(trimmed)) {
     return { kind: "set", mode: trimmed as Mode, sandboxAlias: false };
   }
   return { kind: "usage", attempted: args.trim() };
-}
-
-export type InterpretCommand = { kind: "run"; request: string } | { kind: "usage" };
-
-export function parseInterpretArgs(args: string): InterpretCommand {
-  const trimmed = args.trim();
-  return trimmed.length > 0 ? { kind: "run", request: trimmed } : { kind: "usage" };
 }
 
 export type ScratchpadCommand =

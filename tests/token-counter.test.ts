@@ -135,3 +135,14 @@ test("bad response shapes return null", async () => {
     null,
   );
 });
+
+
+test("OpenRouter never receives llama-swap token-count requests", async () => {
+  let calls = 0;
+  const result = await countPayloadTokens("https://openrouter.ai/api/v1", "test", { messages: [] }, async () => {
+    calls++;
+    throw new Error("Unexpected request");
+  });
+  assert.equal(result, null);
+  assert.equal(calls, 0);
+});

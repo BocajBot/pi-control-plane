@@ -79,6 +79,8 @@ export async function countPayloadTokens(
 ): Promise<TokenCountResult | null> {
   const origin = providerOrigin(baseUrl);
   if (origin === null || model.length === 0) return null;
+  // These are llama-swap-specific endpoints, not OpenRouter APIs.
+  if (new URL(origin).hostname === "openrouter.ai") return null;
   const format = detectPayloadFormat(payload);
   const countedAt = new Date().toISOString();
   try {

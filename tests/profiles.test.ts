@@ -5,6 +5,7 @@ import {
   applyAlwaysDisabled,
   applyProfile,
   clearToolToggles,
+  currentProfileForActiveTools,
   currentProfileName,
   validateProfiles,
 } from "../src/control-plane/profiles.ts";
@@ -163,13 +164,16 @@ test("profile picker layout: 1/5 left column, two right rows, selection marker",
   const bodyRow = lines[3];
   assert.equal(bodyRow[0], "│");
   assert.equal(bodyRow[leftWidth + 1], "│", "left column is 1/5 of the modal");
-  // Separator between description row and tools row on the right side (body
-  // lines only — skip the top/bottom borders and header separator).
+  // visual contract changed: the description and tools rows on the right side
+  // are grouped by one blank row, not a full-width rule (TUI.md 'Diagnostics
+  // panel and grouping'). Body lines only — skip the borders and header rule.
   const bodyLines = lines.slice(3, -1);
-  assert.ok(
-    bodyLines.some((l) => /─{10,}/.test(l.slice(leftWidth + 2))),
-    "right side has a row separator between description and tools",
-  );
+  const rightSide = bodyLines.map((l) => l.slice(leftWidth + 2, -1));
+  const descRow = rightSide.findIndex((r) => r.startsWith("Description"));
+  const toolsRow = rightSide.findIndex((r) => r.startsWith("Tools ("));
+  assert.ok(descRow >= 0 && toolsRow > descRow + 1, "description row precedes the tools row");
+  assert.equal(rightSide[toolsRow - 1].trim(), "", "one blank row groups description and tools");
+  assert.ok(!rightSide.some((r) => /─{10,}/.test(r)), "no interior rule on the right side");
   // Selection marker and active star in the left column.
   assert.ok(lines.some((l) => l.includes("> *minimal") || l.includes(">*minimal") || l.includes("> *min")));
   // Default profile is labeled in the left column and explained when selected.
@@ -194,6 +198,8 @@ test("currentProfileName matches all, named profiles, and custom states", () => 
   assert.equal(currentProfileName(config, allTools, applied.toggles), "minimal");
   assert.equal(currentProfileName(config, allTools, { "tool:read": false }), null);
   assert.equal(currentProfileName(null, allTools, { "tool:read": false }), null);
+  assert.equal(currentProfileForActiveTools(config, allTools, ["read", "bash", "edit", "write"]), "minimal");
+  assert.equal(currentProfileForActiveTools(config, allTools, ["read", "custom_tool"]), null);
 });
 
 test("currentProfileName: 'all' still matches once alwaysDisabledTools are forced off (that IS what 'all' produces now)", () => {

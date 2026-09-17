@@ -1,6 +1,6 @@
 // Headless live smoke of the Pi Control Plane via pi's RPC mode.
 // Drives a real pi session against llama-swap and checks enforcement,
-// confirmation flow, interpretation, persistence, and restoration.
+// confirmation flow, persistence, and restoration.
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 
@@ -89,15 +89,21 @@ async function main() {
   };
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // Wait for startup (session_start status set).
+  // Wait for startup (session_start status set), and learn this child's own
+  // session file from get_state (never the newest-mtime guess - another pi
+  // session writing in this repo concurrently would win that race).
+  pi.send({ id: "g0", type: "get_state" });
+  const stateMsg = await pi.waitFor((m) => m.type === "response" && m.id === "g0", 30000, "get_state");
+  const sessionFile = stateMsg.data?.sessionFile;
   await pi.waitFor((m) => m.type === "extension_ui_request" && m.method === "setStatus", 30000, "startup status");
-  pass("startup: control-plane status set", statuses.some((s) => /Mode: Discuss \| No task/.test(s)), statuses.at(-1));
+  pass("startup: control-plane status set", typeof sessionFile === "string" && statuses.some((s) => /Mode: Accept/.test(s)), statuses.at(-1));
 
-  // Mode command (merged phase+autonomy).
-  pi.send({ id: "c1", type: "prompt", message: "/mode execute" });
+  // Mode command (merged phase+autonomy). Fresh sessions open edit-ready as
+  // Accept; switch to Manual for the attended-dialog turns.
+  pi.send({ id: "c1", type: "prompt", message: "/mode manual" });
   await pi.waitFor((m) => m.type === "response" && m.id === "c1", 20000, "/mode response");
   await sleep(300);
-  pass("commands: status shows Execute (attended)", statuses.some((s) => /Mode: Execute \(attended\)/.test(s)), statuses.at(-1));
+  pass("commands: status shows Manual", statuses.some((s) => /Mode: Manual/.test(s)), statuses.at(-1));
 
   // Attended write, DENIED.
   confirmAnswer = false;
@@ -114,6 +120,8 @@ async function main() {
   await idle();
   await sleep(500);
   pass("attended: approval lets the write through", fs.existsSync(`${REPO}/rpc-smoke-approved.txt`), `dialogs: ${confirmSeen - before}`);
+  // Reset: later turns must NOT inherit this approval.
+  confirmAnswer = false;
 
   // /context and /context diff produce output entries (checked in session file later).
   pi.send({ id: "c3", type: "prompt", message: "/context" });
@@ -121,65 +129,56 @@ async function main() {
   pi.send({ id: "c4", type: "prompt", message: "/context diff" });
   await pi.waitFor((m) => m.type === "response" && m.id === "c4", 20000, "/context diff response");
 
-  // Interpretation gate: encourage tool use; everything must stay blocked.
-  confirmAnswer = true; // even auto-approval must not matter: guard blocks before confirm
-  const dialogsBeforeInterpret = confirmSeen;
-  pi.send({ id: "c5", type: "prompt", message: "/interpret Create a file named interp-test.txt containing hello. Use the write tool right now to do it." });
-  await pi.waitFor((m) => m.type === "response" && m.id === "c5", 20000, "/interpret response");
-  await idle();
-  await sleep(500);
-  pass("interpret: no confirm dialog during guard (tools blocked before confirm layer)", confirmSeen === dialogsBeforeInterpret);
-  pass("interpret: no file created", !fs.existsSync(`${REPO}/interp-test.txt`));
-  const interpretNote = notifications.find((n) => /Interpretation/i.test(n)) ?? "";
-  pass("interpret: completion notification", /Interpretation (ready|is INVALID)/i.test(interpretNote), interpretNote.slice(0, 90));
-
-  const valid = /Interpretation ready/i.test(interpretNote);
-  if (valid) {
-    pi.send({ id: "c6", type: "prompt", message: "/brief accept" });
-    await pi.waitFor((m) => m.type === "response" && m.id === "c6", 20000, "/task accept response");
-    await sleep(300);
-    pass("task: accept adopts brief (status Task accepted)", statuses.some((s) => /Task accepted/.test(s)), statuses.at(-1));
-  } else {
-    pi.send({ id: "c6", type: "prompt", message: "/brief accept" });
-    await pi.waitFor((m) => m.type === "response" && m.id === "c6", 20000, "/task accept response");
-    await sleep(300);
-    pass("task: invalid interpretation cannot be accepted", notifications.some((n) => /cannot be accepted/i.test(n)));
-  }
-
-  // Back to read-only; write must block with NO dialog.
-  pi.send({ id: "c7", type: "prompt", message: "/mode verify" });
+  // Back to read-only Plan; a write must be blocked with NO file appearing.
+  // The phase-switch dialog IS expected here (the control plane offers the
+  // /mode manual transition at the moment of the block); it must be DENIED
+  // (confirmAnswer stays false) and the file must not exist afterward.
+  pi.send({ id: "c7", type: "prompt", message: "/mode plan" });
   await pi.waitFor((m) => m.type === "response" && m.id === "c7", 20000, "/mode response");
+  await sleep(300);
   const dialogsBeforeRO = confirmSeen;
   pi.send({ id: "p3", type: "prompt", message: "Use the write tool to create ro-blocked.txt containing hi. Report the error if blocked." });
   await idle();
-  pass("verify mode: write blocked without dialog", confirmSeen === dialogsBeforeRO && !fs.existsSync(`${REPO}/ro-blocked.txt`));
+  const phaseDialogs = confirmSeen - dialogsBeforeRO;
+  pass(
+    "plan mode: phase-switch dialog offered, denied, write blocked",
+    phaseDialogs === 1 && /Switch to Execute phase\?/.test(lastConfirmMessage) && !fs.existsSync(`${REPO}/ro-blocked.txt`),
+    `${phaseDialogs} dialogs; file: ${fs.existsSync(`${REPO}/ro-blocked.txt`)}`,
+  );
 
   pi.child.kill();
   await sleep(500);
 
-  // Session file: state persisted, output entries present, no raw prompt in our entries.
-  const dir = fs.readdirSync(`${process.env.HOME}/.pi/agent/sessions`).map((d) => `${process.env.HOME}/.pi/agent/sessions/${d}`);
-  const files = dir.flatMap((d) => (fs.statSync(d).isDirectory() ? fs.readdirSync(d).map((f) => `${d}/${f}`) : [d])).filter((f) => f.endsWith(".jsonl"));
-  const newest = files.map((f) => ({ f, m: fs.statSync(f).mtimeMs })).sort((a, b) => b.m - a.m)[0].f;
-  const lines = fs.readFileSync(newest, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return {}; } });
+  // Session file (this child's own, learned from get_state): state persisted,
+  // output entries present, no raw prompt in our entries.
+  if (typeof sessionFile !== "string" || !fs.existsSync(sessionFile)) {
+    pass("persistence: session file exists", false, String(sessionFile));
+    pi.child.kill();
+    const failed = results.filter((r) => !r.ok);
+    console.log(`\n${results.length - failed.length}/${results.length} smoke checks passed`);
+    process.exit(1);
+  }
+  const lines = fs.readFileSync(sessionFile, "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return {}; } });
   const stateEntries = lines.filter((e) => e.customType === "pi-control-plane-state");
   const outputEntries = lines.filter((e) => e.customType === "pi-control-plane-output");
   pass("persistence: state entries written", stateEntries.length >= 3, `${stateEntries.length} entries`);
   pass("persistence: /context output entries written", outputEntries.length >= 2, `${outputEntries.length} entries`);
   const last = stateEntries.at(-1)?.data ?? {};
-  pass("persistence: last state phase=verify autonomy=read-only", last.phase === "verify" && last.autonomy === "read-only", `${last.phase}/${last.autonomy}`);
+  pass("persistence: last state phase=plan autonomy=read-only", last.phase === "plan" && last.autonomy === "read-only", `${last.phase}/${last.autonomy}`);
   const ourJson = JSON.stringify(stateEntries) + JSON.stringify(outputEntries);
   pass("persistence: no raw provider payload in control-plane entries", !ourJson.includes('"payload"') && !/BEGIN [A-Z]* ?PRIVATE KEY/.test(ourJson));
   const snap = last.previousContextSnapshot;
   pass("snapshot: content-free (hash+length only)", snap && typeof snap.systemPromptHash === "string" && snap.systemPromptLength > 0 && !JSON.stringify(snap).includes("You are"));
 
-  // Restoration: continue the session in a fresh process.
-  const pi2 = startPi(["--continue"]);
+  // Restoration: continue THIS child's session in a fresh process (--session,
+  // never --continue: another concurrent session in the repo could win the
+  // newest-mtime race and be resumed instead).
+  const pi2 = startPi(["--session", sessionFile]);
   const statuses2 = [];
   pi2.onEvery((m) => { if (m.type === "extension_ui_request" && m.method === "setStatus") statuses2.push(m.statusText ?? ""); });
   await pi2.waitFor((m) => m.type === "extension_ui_request" && m.method === "setStatus", 30000, "restore status");
   await sleep(500);
-  pass("restore: mode/task restored after relaunch", statuses2.some((s) => /Mode: Verify \| (Task accepted|Task pending review|No task)/.test(s)), statuses2.at(-1));
+  pass("restore: mode restored after relaunch", statuses2.some((s) => /Mode: Plan/.test(s)), statuses2.at(-1));
   pi2.child.kill();
 
   fs.rmSync(`${REPO}/rpc-smoke-approved.txt`, { force: true });

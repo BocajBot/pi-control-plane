@@ -1,0 +1,217 @@
+# Minimal TUI
+
+## Information hierarchy
+
+Normal interaction needs conversation, active profile/tools, draft, and effective
+permission mode. Full working directory, mode, context, OpenRouter credits and
+model share one status row when width permits.
+Conversation and input should dominate. No new borders, badges, panels or icons.
+
+Blocked writes, invalid policy and context pressure matter when present. Keep
+those messages adjacent to input, with explicit reason and next action. Color
+supplements words: context pressure uses warning; invalid state and blocked
+execution use error. Each message owns its color, so an unrelated urgent
+condition cannot recolor it. Permission mode uses accent text; session identity
+and detailed metrics use muted rather than dim text. Existing Pi theme roles
+adapt to light/dark themes. Narrow detailed footers retain warning/error color
+when clipped.
+
+Full paths, branch, session name, token/cache totals, cost, thinking level and
+draft/context counters are inspectable through `/control-ui details`. Return
+with `/control-ui minimal`. `/context`, `/mode` and `/effort` still work.
+The old idle counters and repeated context labels competed with conversation;
+they no longer occupy the default view. Detailed mode retains the legacy layout.
+
+## Layout: three regions
+
+Pi stacks header, transcript, editor and footer in one viewport, so footer rows
+are reserved in document flow and never overlay the transcript. The extension
+contributes exactly one header row, opaque transcript rows for diagnostics, and
+a compact footer whose contextual second row exists only when needed.
+
+### Left grid
+
+Every extension-owned line starts at column 1: header and footer rows carry a
+literal one-space pad; transcript entries render inside a `Box(1, 0)`. Sub-items
+(`  - `, `  [on] `) nest one indent level under that grid.
+
+### Header
+
+One normal-text row, clipped (never wrapped) to terminal width. It keeps active
+profile, active tool count, names, and the `alt+t` affordance together. At most
+seven tool names are listed; the remainder collapses to `+N more`.
+
+```text
+ PROFILE minimal  ·  TOOLS 8  ask_user_question · bash · edit · find · grep · ls · read · +1 more  ·  alt+t
+```
+
+### Status bar
+
+The compact footer uses one status row, preceded by attention rows when any
+exist. A second row appears only for active contextual extension statuses. Rows
+use available terminal width and clip only at the actual viewport edge.
+
+```text
+ Context ~76% estimated — /compact
+ ~/x/y  ·  Execute (attended)  ·  ctx 1%  ·  OpenRouter · $22.16  ·  model-name  ·  alt+h help
+ LSP Active: typescript
+```
+
+Directory, context/provider/cost and model are muted; mode uses accent;
+the context percentage turns warning/error at 75%/90%. The model sits beside
+the provider metadata rather than at the far right. Attention text wraps on the
+grid, preserving reasons and commands. Other extensions retain their own status.
+The exact idle message `LSP Inactive` is hidden in minimal view and remains
+available in details; active and error statuses stay visible. Detailed mode
+(`/control-ui details`) keeps its legacy rows and uses available terminal width.
+
+### Diagnostic rows
+
+Each control-plane diagnostic is one opaque transcript row (`customMessageBg`)
+followed by one blank line: a state glyph colored by tone, a sentence-case label
+in normal text, the subject, then the timestamp in muted text.
+
+```text
+ ○ pending   ◐ running   ✓ passed   ✗ failed
+ ✗ Blocked: read before edit "write"  2026-09-16T10:00:00.000Z
+```
+
+Unknown kinds render as pending with the kind verbatim. The running glyph is
+static (entry renderers have no timer).
+
+### Diagnostics panel and grouping
+
+`alt+i` opens the session's diagnostic log as a centered modal (70% width,
+minimum 40 columns, at most 60% of the terminal height). The panel is opaque:
+every line is painted with `customMessageBg` after padding to the panel width,
+so nothing beneath shows through. It has a rounded box-drawing border in the
+subdued border color, a one-column dim `░` shadow on the right and bottom, and
+a height equal to its content (no minimum, no empty middle; when the log
+exceeds the cap a window of rows around the selection is shown).
+
+```text
+╭──────────────────────────────────────────╮
+│ Control plane diagnostics (3)            │░
+│                                          │░
+│ ✗ Blocked: read before edit "write"      │░
+│ ◐ Advisor consult  T2                    │░
+│ ✓ Backup before edit /p/f.txt  T3        │░
+│                                          │░
+│ ↑↓ move · enter/esc close                │░
+╰──────────────────────────────────────────╯░
+ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+```
+
+Hierarchy: title brightest (accent), diagnostic label and subject normal text,
+timestamps muted, hint row and pending glyph dim. Accent is used only for the
+title and the selected row's glyph; the selected row is filled with
+`selectedBg`. Rows are grouped by blank lines rather than interior rules (the
+profile picker's description/tools split uses a blank row for the same reason).
+
+Limitations: pi-tui has no scrim or backdrop primitive, so the workspace behind
+the panel is not dimmed; the opaque panel is the terminal-native equivalent.
+Hover states need pi-tui's fullscreen mouse routing, which this extension does
+not enable; focus is keyboard-only. Outside the TUI, `alt+i` emits the rows as
+a chat entry.
+
+### Width invariant
+
+Base Pi throws (and exits) on any rendered line wider than the terminal. Every
+custom `render(width)` in the extension returns lines passed through
+`clipLine`/`clipLines` (pi-tui `truncateToWidth`/`visibleWidth`, with a plain
+character fallback under the test harness): footer, header, context widget,
+the alt+h/alt+t/alt+i modals and the attended/advisor dialog headers. Pure
+formatters in `ui.ts` stay width-unaware except `renderActiveTools` and
+`renderDiagnosticsPanel`, which bound every row by construction.
+
+## Scope and verification
+
+Changes apply to `installFooter`, `installDraftCounter`, `/control-ui` in
+`extensions/control-plane.ts`, and `compactFooterState` in
+`src/control-plane/ui.ts`. Authorization, persistence and provider requests are
+unchanged. Native tool operations, cancellation and approval dialogs remain Pi's
+responsibility. Screenshot review identified competing bright input rails, a
+floating two-row header and redundant idle LSP status. The revised theme uses
+subtle violet thinking borders and one cell of native editor padding; the tool
+header fits one row when possible, and model identity aligns right in the footer.
+Live rendering of these revisions remains unverified.
+
+Node tests exercise the real footer/widget factories, minimal/details switching,
+unknown and estimated context, attention text, external statuses and widths from
+1 to 120 columns. A live Pi terminal still needs visual review for contrast,
+Unicode cell sizing and interaction with the native editor.
+
+## Cyberpunk palette
+
+`pi-cyberpunk` is bundled through `package.json` and selected in this project's
+`.pi/settings.json`. Other projects can select it through Pi's `/settings` theme
+picker once this package is loaded. Reload resources with `/reload` after updates.
+
+Cool white text (`#E6EDF7`), readable slate metadata (`#A5AEC5`), cyan focus
+(`#53F5FF`) and magenta headings/syntax (`#F48CFF`) sit on dark ink surfaces.
+Amber (`#FFD166`) marks warnings; pink-red (`#FF719A`) marks errors; mint
+(`#65F5B5`) marks success. Borders stay subdued. Semantic roles remain unchanged.
+
+Pi does not set the terminal's default background: use a dark background such as
+`#10121F` for unboxed conversation. Theme surfaces and HTML export use matching
+ink tones. This theme is intended for dark terminals; switch themes in `/settings`
+when using a light terminal. Terminal configuration itself is unchanged.
+
+## Context tools header
+
+A left-grid header row lists the active tool names from `pi.getActiveTools()`.
+Names refresh on each render, including profile and individual toggle changes.
+The list shows tools exposed to the model, not tools currently executing or
+permission to execute them. Policy checks and approvals remain separate.
+
+`PROFILE`, profile name, `TOOLS N`, active names, and `alt+t` share one row,
+clipped to terminal width and capped at seven names. The default profile is
+confirmed here on fresh sessions instead of adding a duplicate transcript
+notification; explicit profile changes still notify. The native header stays at the
+top of conversation and scrolls with it; it is not a pinned overlay.
+`installToolsHeader` owns registration; `renderActiveTools` owns formatting.
+
+
+## Directory, credits and diagnostics refinement
+
+The compact status line shows directory, mode, context percentage beside the
+OpenRouter balance (`ctx 1% · OpenRouter · $22.16`, no delta), then the
+model (see "Status bar" above). `~` marks estimated context; an unprefixed value
+uses the last request's tokenizer count. Detailed view retains legacy token/cost
+metrics and the signed credit delta.
+
+`src/control-plane/credits.ts` owns validated account snapshots and serialized,
+nonblocking refreshes. `session_start` reads the initial balance;
+`before_agent_start` queues a baseline; `agent_end` queues the new balance and
+signed delta. The four-second timeout never blocks model execution. Credentials
+resolve from `OPENROUTER_MANAGEMENT_KEY`, `OPENROUTER_API_KEY`, then Pi's
+OpenRouter provider credential. Keys and response bodies are never logged or
+persisted. Failed refreshes show unavailable or explicitly stale balance and no
+delta. Delta is account-wide change between samples, not isolated prompt cost;
+other clients, top-ups and delayed billing can affect it.
+
+Source: [OpenRouter credits API](https://openrouter.ai/docs/api/api-reference/credits/get-credits).
+The API documents a management-key requirement; current existing credential was
+verified against the live endpoint without printing the key or balance.
+
+Tool output starts collapsed and successful/pending tools have transparent
+backgrounds; error surfaces remain distinct. These presentation changes do not
+remove tool results from model context.
+
+`/control-ui timing` reports first streamed text and total prompt duration,
+including model, tools and hooks. No live inference latency measurement was run.
+OpenRouter requests no longer trigger unsupported llama-swap token-count APIs.
+No model, thinking-effort, diagnostic pipeline or permission setting changed.
+
+Installed pi-lens uses `Code diagnostics` above input. This is a narrow vendor
+presentation patch, reproducible with:
+
+```sh
+node bin/style-pi-lens.mjs ~/.pi/agent/npm/node_modules/pi-lens/dist/index.js
+```
+
+The script checks exact source anchors and saves `index.js.control-plane-backup`
+beside the bundle before editing. Package updates can replace the patch; inspect
+and archive the prior backup before reapplying to a new version. Restore the
+backup to undo the patch. Restart Pi to load the changed package reliably.
+Diagnostic contents, tools, language servers and diagnostics logic are unchanged.

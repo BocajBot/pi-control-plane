@@ -13,18 +13,13 @@ import {
   resolveAutonomyInput,
   restoreFromEntries,
   validateState,
-  validateTaskBrief,
 } from "../src/control-plane/state.ts";
-import { directBrief } from "../src/control-plane/interpretation.ts";
 import { STATE_ENTRY_TYPE } from "../src/control-plane/types.ts";
 
-test("safe default initialization is Discuss + Read-only with empty task state", () => {
+test("safe default initialization is Discuss + Read-only", () => {
   const state = defaultState();
   assert.equal(state.phase, "discuss");
   assert.equal(state.autonomy, "read-only");
-  assert.equal(state.acceptedTask, null);
-  assert.equal(state.pendingInterpretation, null);
-  assert.equal(state.interpretGuard, null);
   assert.deepEqual(state.sourceToggles, {});
 });
 
@@ -32,13 +27,11 @@ test("valid state serializes and restores through JSON round-trip", () => {
   const state = defaultState();
   state.phase = "execute";
   state.autonomy = "restricted";
-  state.acceptedTask = directBrief("ship the feature", "2026-07-18T00:00:00.000Z");
   state.sourceToggles["tool:bash"] = false;
   const restored = validateState(JSON.parse(JSON.stringify(state)));
   assert.notEqual(restored, null);
   assert.equal(restored!.phase, "execute");
   assert.equal(restored!.autonomy, "restricted");
-  assert.equal(restored!.acceptedTask!.objective, "ship the feature");
   assert.equal(restored!.sourceToggles["tool:bash"], false);
 });
 
@@ -50,12 +43,12 @@ test("malformed state is rejected", () => {
   assert.equal(validateState({ ...defaultState(), autonomy: "unrestricted" }), null);
   assert.equal(validateState({ ...defaultState(), autonomy: "sandboxed" }), null);
   assert.equal(validateState({ ...defaultState(), sourceToggles: { a: "yes" } }), null);
-  assert.equal(validateState({ ...defaultState(), acceptedTask: { id: "x" } }), null);
 });
 
-test("unknown schema version is rejected", () => {
-  assert.equal(validateState({ ...defaultState(), schemaVersion: 2 }), null);
-  assert.equal(validateState({ ...defaultState(), schemaVersion: "1" }), null);
+test("unknown schema version is rejected, including the pre-task-brief-removal schema (1)", () => {
+  assert.equal(validateState({ ...defaultState(), schemaVersion: 1 }), null);
+  assert.equal(validateState({ ...defaultState(), schemaVersion: 3 }), null);
+  assert.equal(validateState({ ...defaultState(), schemaVersion: "2" }), null);
 });
 
 test("restoration walks backward, skips malformed entries, survives interleaved entry types", () => {
@@ -74,35 +67,25 @@ test("restoration walks backward, skips malformed entries, survives interleaved 
   assert.equal(result.state.phase, "plan");
 });
 
-test("restoration failure falls back to Discuss + Read-only, never Execute/Attended/Restricted", () => {
-  const cases = [
-    [],
+test("corrupted restoration falls back to Read-only; a truly fresh session opens edit-ready", () => {
+  // Malformed/unknown prior state must never silently gain edit power: it falls
+  // back to the safe read-only default (the corruption invariant).
+  const corrupt = [
     [{ type: "custom", customType: STATE_ENTRY_TYPE, data: { schemaVersion: 1, phase: "execute", autonomy: "attended" } }], // malformed (missing fields)
     [{ type: "custom", customType: STATE_ENTRY_TYPE, data: "garbage" }],
   ];
-  for (const entries of cases) {
+  for (const entries of corrupt) {
     const result = restoreFromEntries(entries as never[], STATE_ENTRY_TYPE);
     assert.equal(result.restored, false);
     assert.equal(result.state.phase, "discuss");
     assert.equal(result.state.autonomy, "read-only");
   }
-});
-
-test("an active interpretation guard never survives restoration", () => {
-  const persisted = defaultState();
-  (persisted as { interpretGuard: unknown }).interpretGuard = {
-    active: true,
-    savedPhase: "discuss",
-    savedAutonomy: "read-only",
-    taskRequest: "x",
-    startedAt: "t",
-  };
-  const result = restoreFromEntries(
-    [{ type: "custom", customType: STATE_ENTRY_TYPE, data: JSON.parse(JSON.stringify(persisted)) }],
-    STATE_ENTRY_TYPE,
-  );
-  assert.equal(result.restored, true);
-  assert.equal(result.state.interpretGuard, null);
+  // No prior state at all is a fresh start, not a failure: it opens edit-ready
+  // (Execute + Auto) so the daily driver works without a mode switch.
+  const fresh = restoreFromEntries([] as never[], STATE_ENTRY_TYPE);
+  assert.equal(fresh.restored, false);
+  assert.equal(fresh.state.phase, "execute");
+  assert.equal(fresh.state.autonomy, "auto");
 });
 
 test("source toggles default to enabled (empty map) and persist through restore", () => {
@@ -142,25 +125,12 @@ test("cycle orders: discuss->plan->execute->verify->discuss, read-only->attended
   assert.equal(cycleAutonomy("unattended"), "read-only");
 });
 
-test("task brief validation rejects fabricated shapes", () => {
-  assert.equal(validateTaskBrief({ id: "", objective: "x" }), null);
-  assert.equal(validateTaskBrief({ ...directBrief("x"), source: "guessed" }), null);
-  assert.notEqual(validateTaskBrief(directBrief("x")), null);
-});
-
-test("mode mapping: six modes round-trip; legacy combos are null", () => {
-  assert.deepEqual(stateForMode("discuss"), { phase: "discuss", autonomy: "read-only" });
-  assert.deepEqual(stateForMode("execute"), { phase: "execute", autonomy: "attended" });
-  assert.deepEqual(stateForMode("execute-restricted"), { phase: "execute", autonomy: "restricted" });
-  assert.deepEqual(stateForMode("execute-unattended"), { phase: "execute", autonomy: "unattended" });
-  for (const mode of [
-    "discuss",
-    "plan",
-    "execute",
-    "execute-restricted",
-    "execute-unattended",
-    "verify",
-  ] as const) {
+test("mode mapping: four modes round-trip; combos without a mode are null", () => {
+  assert.deepEqual(stateForMode("plan"), { phase: "plan", autonomy: "read-only" });
+  assert.deepEqual(stateForMode("manual"), { phase: "execute", autonomy: "attended" });
+  assert.deepEqual(stateForMode("accept"), { phase: "execute", autonomy: "auto" });
+  assert.deepEqual(stateForMode("auto"), { phase: "execute", autonomy: "unattended" });
+  for (const mode of ["plan", "manual", "accept", "auto"] as const) {
     const { phase, autonomy } = stateForMode(mode);
     assert.equal(modeOf(phase, autonomy), mode);
   }
@@ -169,23 +139,20 @@ test("mode mapping: six modes round-trip; legacy combos are null", () => {
 });
 
 test("coerceToMode never escalates legacy combos", () => {
-  assert.equal(coerceToMode("execute", "read-only"), "discuss");
+  assert.equal(coerceToMode("execute", "read-only"), "plan");
   assert.equal(coerceToMode("plan", "attended"), "plan");
-  assert.equal(coerceToMode("verify", "restricted"), "verify");
-  assert.equal(coerceToMode("execute", "attended"), "execute");
+  assert.equal(coerceToMode("verify", "restricted"), "plan");
+  assert.equal(coerceToMode("execute", "attended"), "manual");
 });
 
-test("cycleMode walks all seven modes, with auto between execute and execute-restricted", () => {
-  // "auto" is reached one step past plain execute, mirroring where other
-  // agents put accept-edits, and still two steps short of execute-restricted's
-  // confirmation-free policy enforcement.
-  assert.equal(cycleMode("discuss"), "plan");
-  assert.equal(cycleMode("plan"), "execute");
-  assert.equal(cycleMode("execute"), "auto");
-  assert.equal(cycleMode("auto"), "execute-restricted");
-  assert.equal(cycleMode("execute-restricted"), "execute-unattended");
-  assert.equal(cycleMode("execute-unattended"), "verify");
-  assert.equal(cycleMode("verify"), "discuss");
+test("cycleMode walks all four modes: plan -> manual -> accept -> auto -> plan", () => {
+  // "accept" (accept-edits) sits one step past manual, mirroring where other
+  // agents put it, and "auto" (full autonomy) is last, reached only after the
+  // others, never as an accidental single step from read-only Plan.
+  assert.equal(cycleMode("plan"), "manual");
+  assert.equal(cycleMode("manual"), "accept");
+  assert.equal(cycleMode("accept"), "auto");
+  assert.equal(cycleMode("auto"), "plan");
 });
 
 test("sanitizeRestoredState coerces legacy combos without escalation", () => {
