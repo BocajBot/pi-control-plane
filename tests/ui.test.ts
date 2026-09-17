@@ -145,13 +145,13 @@ test("minimal footer exposes only contextual state and preserves restriction rea
 test("context tool list is complete, stable, left-grid aligned and width bounded", () => {
   const lines = renderActiveTools(["write", "read", "read", "bash"], 80, undefined, "minimal");
   assert.deepEqual(lines.map((line) => line.trim()), [
-    "PROFILE minimal  ·  TOOLS 3  bash · read · write  ·  alt+t",
+    "PROFILE minimal  ·  TOOLS 3  bash · read · write  ·  ctrl+alt+t",
   ]);
   assert.ok(lines.every((line) => line.length <= 80));
   assert.ok(lines[0].startsWith(" PROFILE "), "left grid: one leading pad column");
   assert.match(renderActiveTools([], 40)[0].trim(), /^PROFILE custom  ·  TOOLS 0  None/);
   assert.deepEqual(renderActiveTools(["read"], 0), []);
-  // header is a single clipped line now (point 15); full list lives in alt+t / /context full
+  // header is a single clipped line now (point 15); full list lives in ctrl+alt+t / /context full
   for (const width of [1, 12, 40]) {
     const rows = renderActiveTools(["very_long_custom_tool_name", "read"], width);
     assert.equal(rows.length, 1);
@@ -167,9 +167,9 @@ test("renderActiveTools caps the header at 7 names", () => {
   const nine = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9"];
   const rows = renderActiveTools(nine, 120);
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].trim(), "PROFILE custom  ·  TOOLS 9  t1 · t2 · t3 · t4 · t5 · t6 · t7 · +2 more  ·  alt+t");
+  assert.equal(rows[0].trim(), "PROFILE custom  ·  TOOLS 9  t1 · t2 · t3 · t4 · t5 · t6 · t7 · +2 more  ·  ctrl+alt+t");
   const seven = renderActiveTools(nine.slice(0, 7), 120);
-  assert.equal(seven[0].trim(), "PROFILE custom  ·  TOOLS 7  t1 · t2 · t3 · t4 · t5 · t6 · t7  ·  alt+t");
+  assert.equal(seven[0].trim(), "PROFILE custom  ·  TOOLS 7  t1 · t2 · t3 · t4 · t5 · t6 · t7  ·  ctrl+alt+t");
   assert.ok(!seven[0].includes("more"));
 });
 

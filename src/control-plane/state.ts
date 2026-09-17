@@ -4,8 +4,7 @@
  *
  * Posture defaults:
  * - A TRULY FRESH session (no prior control-plane state at all) opens
- *   edit-ready: Execute + Auto (accept-edits), so the daily driver "just goes"
- *   without a mode switch. See freshState().
+ *   in Auto: Execute + Unattended, without confirmations. See freshState().
  * - defaultState() stays the fail-closed safe fallback: Discuss + Read-only.
  *   It is used whenever prior state EXISTED but could not be trusted, so a
  *   corrupted session never silently gains edit power.
@@ -36,15 +35,14 @@ export function defaultState(now: string = new Date().toISOString()): ControlPla
 }
 
 /**
- * The posture a genuinely fresh session opens in: Execute + Auto (accept-edits).
- * Edits inside the project root apply without a confirm from turn one (see
- * tool-policy.ts "auto:in-root-edit"); writes outside the root still prompt.
+ * The posture a genuinely fresh session opens in: Auto (Execute + Unattended).
+ * Tool calls run without confirmation, subject to Auto's policy guards.
  * This is deliberately NOT defaultState(): defaultState stays the read-only
  * fallback for untrusted/corrupted restores, so only a clean fresh start is
  * edit-ready.
  */
 export function freshState(now: string = new Date().toISOString()): ControlPlaneState {
-  return { ...defaultState(now), phase: "execute", autonomy: "auto" };
+  return { ...defaultState(now), phase: "execute", autonomy: "unattended" };
 }
 
 /** Normalize a phase name. Returns null for anything unrecognized. */
@@ -225,7 +223,7 @@ export function restoreFromEntries(
   }
   // No trusted prior state. Distinguish a truly fresh session (nothing was
   // ever persisted) from a corrupted one (entries existed but were malformed):
-  // the former opens edit-ready, the latter falls back to the safe read-only
+  // the former opens in Auto, the latter falls back to the safe read-only
   // default so corruption never silently escalates authority.
   const state = ignoredMalformed === 0 ? freshState(now) : defaultState(now);
   return { state, restored: false, ignoredMalformed };

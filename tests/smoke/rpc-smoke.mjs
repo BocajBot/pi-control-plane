@@ -96,10 +96,10 @@ async function main() {
   const stateMsg = await pi.waitFor((m) => m.type === "response" && m.id === "g0", 30000, "get_state");
   const sessionFile = stateMsg.data?.sessionFile;
   await pi.waitFor((m) => m.type === "extension_ui_request" && m.method === "setStatus", 30000, "startup status");
-  pass("startup: control-plane status set", typeof sessionFile === "string" && statuses.some((s) => /Mode: Accept/.test(s)), statuses.at(-1));
+  pass("startup: control-plane status set", typeof sessionFile === "string" && statuses.some((s) => /Mode: Auto/.test(s)), statuses.at(-1));
 
-  // Mode command (merged phase+autonomy). Fresh sessions open edit-ready as
-  // Accept; switch to Manual for the attended-dialog turns.
+  // Mode command (merged phase+autonomy). Fresh sessions open in Auto;
+  // switch to Manual for the attended-dialog turns.
   pi.send({ id: "c1", type: "prompt", message: "/mode manual" });
   await pi.waitFor((m) => m.type === "response" && m.id === "c1", 20000, "/mode response");
   await sleep(300);

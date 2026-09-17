@@ -10,7 +10,7 @@
  * without Pi. This file is wiring only.
  */
 
-import { CreditBalance, readOpenRouterBalance } from "../src/control-plane/credits.ts";
+import { CreditBalance, openRouterMessageCost, readOpenRouterBalance } from "../src/control-plane/credits.ts";
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -44,6 +44,7 @@ import {
   renderTodoList,
   renderTodoWidget,
   restoreTodoFromEntries,
+  TODO_COMPLETION_ENTRY_TYPE,
   TODO_ENTRY_TYPE,
   type TodoOpResult,
   type TodoState,
@@ -207,6 +208,10 @@ const PAD = " ";
 interface OutputEntryData {
   title: string;
   lines: string[];
+}
+
+interface TodoCompletionEntryData {
+  message: string;
 }
 
 /**
@@ -976,6 +981,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let credits: CreditBalance | null = null;
   let promptStarted = 0;
   let firstTextMs: number | null = null;
+  let creditTurn = 0;
+  let lastCreditRefreshAt = 0;
+  const creditRefreshIntervalMs = 5_000;
+  const creditSettlementDelaysMs = [2_000, 5_000, 10_000, 20_000] as const;
   // Workload ledger: every completed turn (count, total model time, slowest,
   // recent) persisted as its own session entry so resumed sessions keep their
   // totals. Pure logic + rendering live in src/control-plane/turn-timing.ts.
@@ -1014,10 +1023,37 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     );
     void credits.refresh("idle");
   };
-  pi.on("message_update", (event) => {
+  const refreshCredits = (
+    phase: "start" | "live" | "end",
+    ctx: ExtensionContext,
+    force = false,
+  ): void => {
+    ensureCredits(ctx);
+    const now = Date.now();
+    if (phase === "live" && !force && now - lastCreditRefreshAt < creditRefreshIntervalMs) return;
+    lastCreditRefreshAt = now;
+    void credits?.refresh(phase);
+  };
+  const scheduleCreditSettlement = (ctx: ExtensionContext, turn: number): void => {
+    for (const delay of creditSettlementDelaysMs) {
+      const timer = setTimeout(() => {
+        if (creditTurn !== turn || promptStarted !== 0 || !credits?.needsReconciliation()) return;
+        refreshCredits("live", ctx, true);
+      }, delay);
+      timer.unref();
+    }
+  };
+  pi.on("message_update", (event, ctx) => {
     if (promptStarted && firstTextMs === null && event.assistantMessageEvent?.type === "text_delta") {
       firstTextMs = Date.now() - promptStarted;
     }
+    if (promptStarted) refreshCredits("live", ctx);
+  });
+  pi.on("message_end", (event, ctx) => {
+    const cost = openRouterMessageCost(event.message);
+    if (cost === null) return;
+    credits?.recordCost(cost);
+    refreshCredits("live", ctx);
   });
 
   /** Cyberpunk footer accents ("footerYellow"/"footerPurple") are optional
@@ -1287,8 +1323,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     if (toolsHeaderInstalled || typeof ctx.ui.setHeader !== "function") return;
     ctx.ui.setHeader((_tui, theme) => ({
       invalidate() {},
-      render: (width: number): string[] =>
-        clipLines(
+      render: (width: number): string[] => {
+        const lines = clipLines(
           renderActiveTools(
             pi.getActiveTools(),
             width,
@@ -1300,7 +1336,9 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
             ) ?? "custom",
           ).map((line) => theme.fg("text", line)),
           width,
-        ),
+        );
+        return lines;
+      },
     }));
     toolsHeaderInstalled = true;
   };
@@ -1329,7 +1367,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           width: 44,
           margin: { top: 1, right: 1 },
           nonCapturing: true,
-          visible: (width, height) => todo.items.length > 0 && width >= 48 && height >= 8,
+          visible: (width, height) => todo.items.some((item) => !item.done) && width >= 48 && height >= 8,
         });
         return {
           invalidate() {},
@@ -1689,6 +1727,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     return box as never;
   });
 
+  pi.registerEntryRenderer<TodoCompletionEntryData>(
+    TODO_COMPLETION_ENTRY_TYPE,
+    (entry, _options, theme) => {
+      if (Text === null || typeof entry.data?.message !== "string") return undefined;
+      return new Text(theme.fg("success", entry.data.message), 0, 0) as never;
+    },
+  );
+
   pi.registerEntryRenderer<Record<string, unknown>>(
     DIAGNOSTIC_ENTRY_TYPE,
     (entry, _options, theme) => {
@@ -1700,6 +1746,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // ---- session lifecycle ----
 
   pi.on("session_start", (_event, ctx) => {
+    creditTurn++;
     const entries = ctx.sessionManager.getBranch() as unknown as CustomEntryLike[];
     const result = restoreFromEntries(entries, STATE_ENTRY_TYPE);
     state = result.state;
@@ -1815,6 +1862,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   pi.on("agent_settled", (_event, ctx) => {
     updateStatus(ctx);
     void refreshProspectiveCount(ctx);
+    refreshCredits("live", ctx);
   });
   pi.on("model_select", (_event, ctx) => updateStatus(ctx));
 
@@ -1874,8 +1922,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", (event, ctx) => {
     promptStarted = Date.now();
     firstTextMs = null;
-    ensureCredits(ctx); // defensive if an embedding skips session_start
-    void credits?.refresh("start");
+    creditTurn++;
+    refreshCredits("start", ctx, true); // defensive if an embedding skips session_start
     // The context editor can override the base system prompt; toggles and the
     // control-plane block still apply on top of the override.
     let prompt = contextOverlay?.systemPrompt ?? event.systemPrompt;
@@ -1954,7 +2002,9 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       persistTiming();
       promptStarted = 0;
     }
-    void credits?.refresh("end");
+    const completedCreditTurn = creditTurn;
+    refreshCredits("end", ctx, true);
+    scheduleCreditSettlement(ctx, completedCreditTurn);
   });
 
   // ---- tool authorization ----
@@ -2661,6 +2711,30 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
   // ---- commands ----
 
+  pi.registerCommand("control-reload", {
+    description: "Reload Pi resources (same as /reload)",
+    handler: async (_args, ctx) => {
+      if (!ctx.isIdle()) {
+        ctx.ui.notify("Pi is busy; reload when the current turn finishes.", "warning");
+        return;
+      }
+      await ctx.reload();
+      return;
+    },
+  });
+
+  // Shortcut contexts lack reload(); dispatch through a command context.
+  pi.registerShortcut("ctrl+alt+r", {
+    description: "Reload Pi resources (same as /reload, when idle)",
+    handler: (ctx) => {
+      if (!ctx.isIdle()) {
+        ctx.ui.notify("Pi is busy; reload when the current turn finishes.", "warning");
+        return;
+      }
+      pi.sendUserMessage("/control-reload", { expandPromptTemplates: true });
+    },
+  });
+
   pi.registerCommand("clear", {
     description: "Start a fresh session (alias for /new)",
     handler: async (_args, ctx) => {
@@ -3338,7 +3412,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       name: "todo",
       label: "Task List",
       description:
-        "Track the tasks in the current workload. Ops: 'list' (show all), 'add' (text: new task), 'done' (id: mark complete), 'undo' (id: reopen), 'remove' (id: delete), 'clear' (remove completed). The list is shown to the user as a live widget and re-shown in the system prompt every turn, so open tasks survive compaction. Structuring work with this tool is expected for multi-step tasks.",
+        "Track the tasks in the current workload. Ops: 'list' (show open tasks), 'add' (text: new task), 'done' (id: complete and remove), 'undo' (id: reopen a legacy completed task), 'remove' (id: delete), 'clear' (remove legacy completed tasks). Completing a task writes its completion to the conversation and removes it from the live widget and system prompt. Open tasks survive compaction. Structuring work with this tool is expected for multi-step tasks.",
       promptSnippet: "todo(op, id?, text?) — track tasks: list|add|done|undo|remove|clear",
       promptGuidelines: [
         "For multi-step work, use todo to add concrete tasks before execution, mark each task done immediately after completion, and keep unfinished tasks open.",
@@ -3383,6 +3457,9 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         if (result.ok && result.state !== todo) {
           todo = result.state as TodoState;
           persistTodo(ctx);
+          if (op === "done") {
+            pi.appendEntry<TodoCompletionEntryData>(TODO_COMPLETION_ENTRY_TYPE, { message: result.message });
+          }
           refreshTodoWidget();
         }
         const body = result.ok
@@ -3693,7 +3770,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   });
 
   let profileModalOpen = false;
-  pi.registerShortcut("alt+t", {
+  pi.registerShortcut("ctrl+alt+t", {
     description: "Control plane: tool-profile picker (modal)",
     handler: async (ctx) => {
       const uiAny = ctx.ui as { custom?: <T>(factory: unknown, options?: unknown) => Promise<T> };

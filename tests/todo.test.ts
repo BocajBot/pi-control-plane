@@ -25,18 +25,15 @@ import {
 
 const now = "2026-09-17T00:00:00Z";
 
-function withItems(count: number, doneAt: number[] = []): TodoState {
+function withItems(count: number): TodoState {
   let state = emptyTodoState(now);
   for (let i = 1; i <= count; i++) {
     state = addTodo(state, `task ${i}`, now).state;
   }
-  for (const id of doneAt) {
-    state = completeTodo(state, id, now).state;
-  }
   return state;
 }
 
-test("state machine: add assigns monotonic ids; complete/reopen/remove; clear keeps open", () => {
+test("state machine: add assigns monotonic ids; complete removes task; remove keeps ids monotonic", () => {
   let state = emptyTodoState(now);
   const added = addTodo(state, "read config", now);
   assert.equal(added.ok, true);
@@ -50,14 +47,10 @@ test("state machine: add assigns monotonic ids; complete/reopen/remove; clear ke
 
   const done = completeTodo(state, 2, now);
   assert.equal(done.ok, true);
-  assert.equal(done.state.items[1]!.done, true);
-  assert.notEqual(done.state.items[1]!.doneAt, null);
-  assert.equal(done.state.items[0]!.done, false);
-  assert.equal(completeTodo(done.state, 2, now).ok, true, "double-complete is a no-op, not an error");
-
-  const reopened = reopenTodo(done.state, 2, now);
-  assert.equal(reopened.state.items[1]!.done, false);
-  assert.equal(reopened.state.items[1]!.doneAt, null);
+  assert.deepEqual(done.state.items.map((item) => item.id), [1, 3]);
+  assert.equal(done.message, "Task [2] - write tests has completed.");
+  assert.equal(completeTodo(done.state, 2, now).ok, false, "completed task is no longer live");
+  assert.equal(reopenTodo(done.state, 2, now).ok, false, "completed task cannot return to the live list");
 
   const removed = removeTodo(state, 1, now);
   assert.deepEqual(
@@ -71,13 +64,17 @@ test("state machine: add assigns monotonic ids; complete/reopen/remove; clear ke
   assert.equal(removeTodo(state, 99, now).ok, false);
   assert.equal(completeTodo(state, 99, now).ok, false);
 
-  let cleared = withItems(3, [1, 3]);
+  const legacy = withItems(3);
+  let cleared = {
+    ...legacy,
+    items: legacy.items.map((item) => item.id === 1 ? { ...item, done: true, doneAt: now } : item),
+  };
   const clearedResult = clearCompleted(cleared, now);
   assert.equal(clearedResult.ok, true);
   cleared = clearedResult.state;
   assert.deepEqual(
     cleared.items.map((i) => i.id),
-    [2],
+    [2, 3],
   );
   assert.equal(clearCompleted(emptyTodoState(now), now).message, "No completed tasks to clear.");
 });
@@ -89,20 +86,20 @@ test("state machine: rejects empty and oversized text", () => {
   assert.equal(addTodo(state, "x".repeat(500), now).ok, true);
 });
 
-test("renderTodoList and renderTodoBlock: shapes, and empty renders nothing", () => {
-  const state = withItems(3, [2]);
+test("renderTodoList and renderTodoBlock: open tasks only, and empty renders nothing", () => {
+  const state = withItems(3);
   const list = renderTodoList(state);
   assert.deepEqual(list, [
-    "Tasks (1/3 done):",
+    "Tasks (0/3 done):",
     "○ [1] task 1",
-    "● [2] task 2",
+    "○ [2] task 2",
     "○ [3] task 3",
   ]);
   assert.deepEqual(renderTodoList(emptyTodoState(now)), ["No tasks. Use add to create one."]);
 
   const block = renderTodoBlock(state, 1000);
   assert.match(block!, /^\[PI CONTROL PLANE TASKS\]$/m);
-  assert.match(block!, /\[2\] done — task 2/);
+  assert.match(block!, /\[2\] todo — task 2/);
   assert.match(block!, /\[1\] todo — task 1/);
   assert.equal(renderTodoBlock(emptyTodoState(now), 1000), null);
   // Truncation honors the cap, marked.
@@ -111,7 +108,11 @@ test("renderTodoList and renderTodoBlock: shapes, and empty renders nothing", ()
 });
 
 test("validateTodoState: strict — schema, ids, monotonic nextId, done/doneAt consistency", () => {
-  const good = withItems(2, [1]);
+  const base = withItems(2);
+  const good = {
+    ...base,
+    items: base.items.map((item) => item.id === 1 ? { ...item, done: true, doneAt: now } : item),
+  };
   assert.notEqual(validateTodoState(good), null);
   assert.equal(validateTodoState(null), null);
   assert.equal(validateTodoState({ ...good, schemaVersion: 2 }), null);
@@ -139,7 +140,7 @@ test("validateTodoState: strict — schema, ids, monotonic nextId, done/doneAt c
 
 test("restore: newest valid entry wins; malformed counted; none -> empty", () => {
   const older = withItems(1);
-  const newer = withItems(3, [2]);
+  const newer = withItems(3);
   const entry = (data: unknown) => ({ type: "custom", customType: TODO_ENTRY_TYPE, data });
   const restored = restoreTodoFromEntries(
     [entry(older), entry(newer), entry("junk")],
@@ -174,36 +175,41 @@ const markingPaint: TodoPaint = {
   },
 };
 
-test("renderTodoWidget: rounded border, radial bullets, right-aligned, capped", () => {
-  const state = withItems(8, [2, 4]);
+test("renderTodoWidget: rounded border, open bullets, right-aligned, capped", () => {
+  const state = withItems(8);
   const lines = renderTodoWidget(state, 80, markingPaint, { measure: plainMeasure, clip: plainClip });
   assert.equal(lines.length, 1 + 6 + 1 + 1); // top + 6 shown + "+2 more" + bottom
-  assert.match(lines[0]!, /╭─* Tasks 2\/8 ─*╮$/);
+  assert.match(lines[0]!.replace(/\{[^}]*\}/g, ""), /╭─* Tasks 0\/8 ─*╮$/);
   assert.match(lines.at(-1)!, /╰─+╯$/);
   // Right-aligned: every line ends at the right edge (80 cells, markers stripped).
   for (const line of lines) {
     assert.equal(markedMeasure(line), 80);
   }
-  // Radial bullets: done items get ● and success/muted colors; open get ○.
+  // Completed items leave the widget; open-task bullets are yellow.
   const row = (id: number) => lines.find((l) => l.includes(`[${id}]`))!;
-  assert.match(row(2), /●/);
-  assert.match(row(2), /\{success\}●/);
-  assert.match(row(2), /\{muted\}\[2\] task 2/);
   assert.match(row(1), /○/);
   assert.match(row(1), /\{footerYellow\}○/);
   assert.match(row(1), /\{text\}\[1\] task 1/);
   assert.match(lines.find((l) => l.includes("more"))!, /\{dim\}\+2 more/);
-  // Border painted with borderAccent.
-  assert.match(lines[0]!, /\{borderAccent\}╭/);
+  // Border uses To-Do's neon-purple theme token; open-task bullets are yellow; title is blue.
+  assert.match(lines[0]!, /\{todoBorder\}╭/);
+  assert.match(lines[0]!, /\{todoTitle\} Tasks 0\/8 /);
   // Empty state renders nothing.
   assert.deepEqual(renderTodoWidget(emptyTodoState(now), 80, markingPaint, { measure: plainMeasure, clip: plainClip }), []);
-  // Long text is clipped, never wider than the box.
-  const long = addTodo(emptyTodoState(now), "x".repeat(80), now).state;
+  // Long text wraps, never truncates or widens the box.
+  const longText = "x".repeat(80);
+  const long = addTodo(emptyTodoState(now), longText, now).state;
   const longLines = renderTodoWidget(long, 80, markingPaint, { measure: plainMeasure, clip: plainClip });
   for (const line of longLines) {
     assert.equal(markedMeasure(line), 80);
   }
-  assert.match(longLines[1]!, /…/);
+  assert.doesNotMatch(longLines.join("\n"), /…/);
+  assert.ok(longLines.length > 3, "long task needs continuation rows");
+  assert.equal(
+    longLines.join("").replace(/\{[^}]*\}/g, "").match(/x/g)?.length,
+    longText.length,
+    "all task text remains visible",
+  );
 });
 
 test("renderTodoWidget: color fallback when the theme lacks a token", () => {
@@ -215,7 +221,7 @@ test("renderTodoWidget: color fallback when the theme lacks a token", () => {
     },
   };
   const lines = renderTodoWidget(state, 40, fallbackPaint, { measure: plainMeasure, clip: plainClip });
-  // borderAccent, footerYellow, success all fall back without throwing.
+  // todoBorder, footerYellow, success all fall back without throwing.
   assert.match(lines[0]!, /<dim>╭/);
   assert.match(lines[1]!, /<muted>○/);
   assert.equal(lines.length, 3);

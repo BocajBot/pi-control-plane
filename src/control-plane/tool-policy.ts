@@ -189,6 +189,13 @@ export function isAllowedDestination(
   return resolveAllowPrefixes(policy, ops).some((prefix) => isInsideRoot(canonical, prefix));
 }
 
+/** Pi stores user-customizable shortcuts at this one exact path. It contains
+ * no credentials and must remain writable for shortcut configuration, even
+ * when the enclosing agent directory is denylisted. */
+export function isPiKeybindingsTarget(canonical: string, agentDir: string | null | undefined): boolean {
+  return agentDir !== null && agentDir !== undefined && canonical === path.join(agentDir, "keybindings.json");
+}
+
 /** Returns the matching deny rule as a string, or null when nothing matches. */
 export function matchesDenyPatterns(canonical: string, policy: RestrictedPolicy): string | null {
   const segments = canonical.split(path.sep).filter((s) => s.length > 0);
@@ -427,7 +434,7 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
         "Fix policy/default-policy.json, then /reload.",
       );
     }
-    if (canonical !== null) {
+    if (canonical !== null && !isPiKeybindingsTarget(canonical, input.agentDir)) {
       const denied = matchesDenyPatterns(canonical, policy);
       if (denied !== null) {
         return block(
@@ -451,7 +458,7 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
     // The deny patterns still apply. Auto is about not re-asking for routine
     // edits, not about reaching paths a confirmation existed to protect - a
     // credential file inside the root is exactly such a path.
-    if (canonical !== null && policy !== null) {
+    if (canonical !== null && policy !== null && !isPiKeybindingsTarget(canonical, input.agentDir)) {
       const denied = matchesDenyPatterns(canonical, policy);
       if (denied !== null) {
         return confirm(

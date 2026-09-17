@@ -387,7 +387,7 @@ function wrapText(text: string, width: number): string[] {
 }
 
 /**
- * Profile picker modal layout (alt+t). Rectangular; left column = 1/5 of the
+ * Profile picker modal layout (ctrl+alt+t). Rectangular; left column = 1/5 of the
  * modal width listing profile names, right side = two rows (description on
  * top, enabled tools below). Pure: returns plain text lines.
  */
@@ -450,10 +450,11 @@ export function renderHotkeyCheatsheet(): string[] {
     "  alt+c  toggle context-preview widget",
     "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",
     "  alt+s  send preview: everything the next message will send, editable, incl. your draft",
-    "  alt+t  tool-profile picker (enter: apply this session · space: set as default)",
+    "  ctrl+alt+t  tool-profile picker (enter: apply this session · space: set as default)",
     "  alt+p / shift+tab  cycle mode: Plan > Manual > Accept > Auto",
     "  alt+i  diagnostics panel (session diagnostic log)",
     "  alt+h  this cheat sheet",
+    "  ctrl+alt+r  reload Pi resources (when idle)",
     "",
     "Pi essentials:",
     "  ctrl+g     edit prompt in external editor",
@@ -498,7 +499,7 @@ export const USAGE = {
 };
 
 
-/** Names shown in the header before collapsing to "+N more · alt+t". */
+/** Names shown in the header before collapsing to "+N more · ctrl+alt+t". */
 const MAX_HEADER_TOOLS = 7;
 
 /** One left-grid header row (never wraps); measure terminal cells at the UI boundary. */
@@ -517,7 +518,7 @@ export function renderActiveTools(
     : "None";
   const pad = width >= 2 ? " " : "";
   const contentWidth = Math.max(1, width - pad.length);
-  const text = `PROFILE ${profile}  ·  TOOLS ${names.length}  ${listing}  ·  alt+t`;
+  const text = `PROFILE ${profile}  ·  TOOLS ${names.length}  ${listing}  ·  ctrl+alt+t`;
   let row = text;
   if (measure(text) > contentWidth) {
     row = "";

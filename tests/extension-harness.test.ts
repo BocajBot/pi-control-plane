@@ -51,6 +51,7 @@ class FakePi {
   }
   registerTool(tool: { name: string; execute: (...args: unknown[]) => unknown }) {
     this.tools.set(tool.name, tool);
+    if (!this.activeTools.includes(tool.name)) this.activeTools.push(tool.name);
   }
   registerEntryRenderer() {}
   appendEntry(customType: string, data?: unknown) {
@@ -172,6 +173,28 @@ test("registers the commands, the local_web_search tool, and the shortcuts", asy
   }
 });
 
+test("ctrl+alt+r dispatches reload as a command, not a model prompt, and refuses while busy", async () => {
+  const pi = await boot();
+  const ctx = makeCtx({ cwd: tmpRoot() });
+  const sent: { text: string; options: unknown }[] = [];
+  pi.sendUserMessage = (text: string, options?: unknown) => { sent.push({ text, options }); };
+  let reloads = 0;
+  const commandCtx = { ...ctx, reload: async () => { reloads++; } };
+
+  await pi.shortcuts.get("ctrl+alt+r")!(ctx);
+  assert.deepEqual(sent, [{ text: "/control-reload", options: { expandPromptTemplates: true } }]);
+  assert.equal(reloads, 0, "shortcut dispatch is not itself a completed reload");
+  await pi.commands.get(sent[0].text.slice(1))!.handler("", commandCtx);
+  assert.equal(reloads, 1);
+
+  ctx.isIdle = () => false;
+  await pi.shortcuts.get("ctrl+alt+r")!(ctx);
+  assert.equal(sent.length, 1, "busy shortcut must not queue a prompt");
+  await pi.commands.get("control-reload")!.handler("", { ...commandCtx, isIdle: () => false });
+  assert.equal(reloads, 1, "command rechecks idle state");
+  assert.ok(ctx.notifications.some((n) => /busy/.test(n.message)));
+});
+
 test("/clear starts a fresh session as an alias for /new", async () => {
   const pi = await boot();
   const ctx = makeCtx();
@@ -188,14 +211,17 @@ test("/clear starts a fresh session as an alias for /new", async () => {
   assert.equal(newSessions, 1);
 });
 
-test("defaults after session_start: a fresh session opens edit-ready (Execute/auto)", async () => {
+test("defaults after session_start: a fresh session opens in Auto without confirmation", async () => {
   const pi = await boot();
-  const ctx = makeCtx({ cwd: tmpRoot() });
+  const ctx = makeCtx({ cwd: tmpRoot(), confirmResult: false });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  // A genuinely fresh session now defaults to Execute + Auto autonomy, which
-  // displays as Accept (accept-edits), so the daily driver works without a mode
-  // switch; read-only is opt-in via /mode plan.
-  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Accept/);
+  assert.match(ctx.statuses["control-plane"] ?? "", /Mode: Auto/);
+  const result = await pi.emit(
+    "tool_call",
+    { type: "tool_call", toolCallId: "fresh-shell", toolName: "bash", input: { command: "pwd" } },
+    ctx,
+  );
+  assert.equal(result, undefined, "fresh Auto authorizes shell even when confirmation would be denied");
 });
 
 test("write blocked in Discuss; read allowed", async () => {
@@ -1375,7 +1401,8 @@ test("alt+h and alt+s registered; alt+h without modal support falls back to chat
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
   assert.ok(pi.shortcuts.has("alt+h"));
   assert.ok(pi.shortcuts.has("alt+s"));
-  assert.ok(pi.shortcuts.has("alt+t"));
+  assert.ok(pi.shortcuts.has("ctrl+alt+t"));
+  assert.ok(!pi.shortcuts.has("alt+t"), "Alt+T belongs to tmux");
   await pi.shortcuts.get("alt+h")!(ctx);
   const output = pi.entries.find((e) => e.customType === "pi-control-plane-output");
   assert.ok(output, "cheat sheet emitted as chat entry when no modal UI exists");
@@ -1427,12 +1454,9 @@ test("applied profile persists and is restored in a new session", async () => {
   await controlPlaneExtension(pi2 as never);
   const ctx2 = makeCtx({ cwd: root, branchEntries: pi.entries.filter((e) => e.customType === STATE_ENTRY_TYPE) });
   await pi2.emit("session_start", { type: "session_start", reason: "resume" }, ctx2);
-  // The fake's initial active set is its seven core tools; restore only
-  // removes toggled-off tools (re-adding is not its job), so local_web_search
-  // - enabled by the profile but absent from the fake's initial set - does
-  // not reappear here. Real pi starts with every registered tool active, so
-  // the restored session keeps it.
-  assert.deepEqual([...pi2.activeTools].sort(), ["find", "grep", "ls", "read"], "profile toggles reapplied on restore");
+  // Registered extension tools begin active, matching Pi's registry. Restore
+  // removes profile-disabled tools and retains enabled reading tools.
+  assert.deepEqual([...pi2.activeTools].sort(), ["find", "grep", "local_web_search", "ls", "read", "todo"], "profile toggles reapplied on restore");
 });
 
 test("mode cycle hotkey advances through all four modes", async () => {
@@ -1935,16 +1959,16 @@ test("minimal UI renders one row, hides counters, and details remains available"
   // One natural-width status row. No reserved blank rows or 100-column cap.
   const initial = footer.render(140);
   assert.deepEqual(initial, [
-    // Fresh session opens edit-ready (Execute + auto = "Accept"); see state.ts freshState().
+    // Fresh session opens in Auto (Execute + unattended); see state.ts freshState().
     // Context reads as used/window (fixture: 100 of 1000), not a bare percent,
     // so the loaded model's context size is always on screen.
-    " /work/project  ·  Accept  ·  ctx ~100/1.0k  ·  OpenRouter loading  ·  test-model  ·  alt+h help",
+    " /work/project  ·  Auto  ·  ctx ~100/1.0k  ·  OpenRouter loading  ·  test-model  ·  alt+h help",
   ]);
   assert.match(initial[0], /ctx ~100\/1\.0k  ·  OpenRouter loading  ·  test-model/);
   assert.equal(footer.render(80).length, 1);
-  assert.ok(colors.some((c) => c.color === "accent" && c.text === "Accept"));
+  assert.ok(colors.some((c) => c.color === "accent" && c.text === "Auto"));
   assert.deepEqual(counter.render(80), []);
-  assert.ok(colors.some((item) => item.color === "accent" && item.text === "Accept"));
+  assert.ok(colors.some((item) => item.color === "accent" && item.text === "Auto"));
   assert.ok(colors.some((item) => item.color === "muted" && item.text.includes("project")),
     "cwd sits in the quiet muted baseline");
   for (const width of [0, 1, 12, 24, 40, 80, 120]) {
@@ -1971,7 +1995,7 @@ test("minimal UI renders one row, hides counters, and details remains available"
   colors.length = 0;
   footer.render(80);
   assert.ok(colors.some((item) => item.color === "error" && item.text.includes("95%")));
-  assert.ok(colors.some((item) => item.color === "accent" && item.text === "Accept"));
+  assert.ok(colors.some((item) => item.color === "accent" && item.text === "Auto"));
   const narrow = footer.render(12);
   assert.ok(narrow.every((line) => line.length <= 12));
   // Every attention row carries the 1-column grid pad; final row is status.
@@ -2007,7 +2031,7 @@ test("top-right context tools header reads active registry on every render", asy
   const rendered = header.render(120).join("\n");
   for (const tool of pi.getActiveTools()) assert.ok(rendered.includes(tool));
   pi.setActiveTools(pi.allToolNames);
-  assert.match(header.render(120)[0], /\+4 more  ·  alt\+t/, "11 tools collapse to 7 + more");
+  assert.match(header.render(120)[0], /\+4 more  ·  ctrl\+alt\+t/, "11 tools collapse to 7 + more");
   for (const width of [1, 12, 40, 80]) assert.ok(header.render(width).every((line) => line.length <= width));
 });
 
@@ -2080,10 +2104,15 @@ test("todo uses top-right overlay, repaints immediately, and persists across new
 
     const resumedTool = reloaded.tools.get("todo");
     await resumedTool!.execute("todo-2", { op: "done", id: 1 }, undefined, undefined, resumedCtx);
-    assert.match(resumedOverlay!.render(44).join("\n"), /● \[1\] Keep visible/);
+    assert.deepEqual(resumedOverlay!.render(44), [], "completed tasks leave the live widget");
+    assert.deepEqual(
+      reloaded.entries.find((entry) => entry.customType === "pi-control-plane-todo-complete")?.data,
+      { message: "Task [1] - Keep visible has completed." },
+      "completion stays visible in the conversation transcript",
+    );
 
     await reloaded.emit("session_tree", { type: "session_tree" }, makeCtx({ branchEntries: [], cwd: workspace }));
-    assert.match(resumedOverlay!.render(44).join("\n"), /● \[1\] Keep visible/);
+    assert.deepEqual(resumedOverlay!.render(44), []);
     ownerWidget?.dispose?.();
     assert.equal(overlayHides, 1, "session UI cleanup removes overlay");
   } finally {
@@ -2191,7 +2220,7 @@ test("custom render paths never exceed the given width", async () => {
   const ctx = makeCtx({ cwd: root, withCustom: true, customChoice: "no", branchEntries: diagnostics });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
 
-  for (const key of ["alt+h", "alt+t", "alt+i"]) {
+  for (const key of ["alt+h", "ctrl+alt+t", "alt+i"]) {
     const before = ctx.customCalls.length;
     await pi.shortcuts.get(key)!(ctx);
     assert.equal(ctx.customCalls.length, before + 1, `${key} opened a modal`);
@@ -2239,6 +2268,19 @@ test("prompt lifecycle refreshes credits without blocking and exposes timing", a
     assert.match(footer!.render(140).join("\n"), /OpenRouter · \$9\.99/);
     await pi.emit("before_agent_start", { systemPrompt: "", systemPromptOptions: {} }, ctx);
     await pi.emit("message_update", { assistantMessageEvent: { type: "text_delta" } }, ctx);
+    await pi.emit("message_end", {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        provider: "openrouter",
+        usage: { cost: { total: 0.2 } },
+      },
+    }, ctx);
+    assert.match(
+      footer!.render(140).join("\n"),
+      /OpenRouter · ~\$9\.79 · Δ −\$0\.20/,
+      "completed OpenRouter response cost updates the footer before endpoint billing settles",
+    );
     await pi.emit("agent_end", { messages: [] }, ctx);
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(requests, 3);

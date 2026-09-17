@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CreditBalance, readOpenRouterBalance } from "../src/control-plane/credits.ts";
+import { CreditBalance, openRouterMessageCost, readOpenRouterBalance } from "../src/control-plane/credits.ts";
 
 test("credits serialize snapshots and show signed account delta after a prompt", async () => {
   const values = [12, 12, 11.9876, 12, 14];
@@ -31,8 +31,41 @@ test("failed baseline never invents a per-prompt delta; stale balance labelled",
   assert.equal(new CreditBalance(async () => 0, () => {}).compact(), "OpenRouter loading");
   fail = false;
   await credit.refresh("end");
-  assert.equal(credit.delta, null);
-  assert.equal(credit.compact(), "OpenRouter · $10.00", "no delta after a failed baseline — nothing invented");
+  assert.equal(credit.delta, 0);
+  assert.equal(credit.compact(), "OpenRouter · $10.00 · Δ +$0.00");
+});
+
+test("completed response costs update balance immediately, then endpoint reconciles", async () => {
+  const values = [10, 10, 9.75, 9.7];
+  const credit = new CreditBalance(async () => values.shift()!, () => {});
+  await credit.refresh("idle");
+  await credit.refresh("start");
+
+  credit.recordCost(0.3);
+  assert.equal(credit.compact(), "OpenRouter · ~$9.70 · Δ −$0.30");
+
+  await credit.refresh("live");
+  assert.equal(credit.compact(), "OpenRouter · ~$9.70 · Δ −$0.30", "partial settlement cannot raise displayed balance");
+  await credit.refresh("end");
+  assert.equal(credit.compact(), "OpenRouter · $9.70 · Δ −$0.30", "settled endpoint removes projection marker");
+});
+
+test("stale endpoint keeps useful projected cost and labels uncertainty", async () => {
+  let fail = false;
+  const credit = new CreditBalance(async () => { if (fail) throw Error(); return 4; }, () => {});
+  await credit.refresh("idle");
+  await credit.refresh("start");
+  credit.recordCost(0.125);
+  fail = true;
+  await credit.refresh("live");
+  assert.equal(credit.compact(), "OpenRouter · ~$3.88 · Δ −$0.13 (stale)");
+});
+
+test("message cost accepts only completed OpenRouter assistant usage", () => {
+  assert.equal(openRouterMessageCost({ role: "assistant", provider: "openrouter", usage: { cost: { total: 0.125 } } }), 0.125);
+  assert.equal(openRouterMessageCost({ role: "assistant", provider: "other", usage: { cost: { total: 1 } } }), null);
+  assert.equal(openRouterMessageCost({ role: "user", provider: "openrouter", usage: { cost: { total: 1 } } }), null);
+  assert.equal(openRouterMessageCost({ role: "assistant", provider: "openrouter", usage: { cost: { total: Number.NaN } } }), null);
 });
 
 test("credits use fixed official endpoint and reject malformed or denied responses", async () => {

@@ -6,9 +6,10 @@
  * pattern as the scratchpad: excluded from LLM context, untouched by
  * `/compact`, and injected into the system prompt every turn so the model
  * actually sees its open tasks across compaction. The widget shows the same
- * list to the human, top-right, with radial bullets that fill when a task
- * completes (○ -> ●), a rounded border, and theme-painted colors (cyberpunk
- * palette on the shipped theme).
+ * list to the human, top-right, with open-task bullets, a rounded border,
+ * and theme-painted colors (cyberpunk palette on the shipped theme). Completed
+ * tasks are removed from persisted state; their chat entry is owned by the
+ * extension entry point.
  *
  * Pure module: state machine, validation, restoration, and rendering here;
  * the tool registration, pinned-widget wiring and injection live in the entry.
@@ -16,6 +17,7 @@
 
 export const TODO_SCHEMA_VERSION = 1;
 export const TODO_ENTRY_TYPE = "pi-control-plane-todo";
+export const TODO_COMPLETION_ENTRY_TYPE = "pi-control-plane-todo-complete";
 
 /** Widget cap: how many items the pinned box shows before "+N more". */
 export const TODO_WIDGET_MAX_ITEMS = 6;
@@ -85,11 +87,11 @@ function findItem(state: TodoState, id: number): TodoItem | null {
 export function completeTodo(state: TodoState, id: number, now: string): TodoOpResult {
   const item = findItem(state, id);
   if (item === null) return { ok: false, error: `No task [${id}].` };
-  if (item.done) return { ok: true, state, message: `[${id}] is already done.` };
-  const items = state.items.map((i) =>
-    i.id === id ? { ...i, done: true, doneAt: now } : i,
-  );
-  return { ok: true, state: { ...state, items, updatedAt: now }, message: `Done [${id}] ${item.text}` };
+  return {
+    ok: true,
+    state: { ...state, items: state.items.filter((i) => i.id !== id), updatedAt: now },
+    message: `Task [${id}] - ${item.text} has completed.`,
+  };
 }
 
 export function reopenTodo(state: TodoState, id: number, now: string): TodoOpResult {
@@ -123,11 +125,11 @@ export function clearCompleted(state: TodoState, now: string): TodoOpResult {
 
 /** The list as returned to the model after any tool call. */
 export function renderTodoList(state: TodoState): string[] {
-  if (state.items.length === 0) return ["No tasks. Use add to create one."];
-  const done = state.items.filter((i) => i.done).length;
+  const open = state.items.filter((item) => !item.done);
+  if (open.length === 0) return ["No tasks. Use add to create one."];
   return [
-    `Tasks (${done}/${state.items.length} done):`,
-    ...state.items.map((i) => `${i.done ? "●" : "○"} [${i.id}] ${i.text}`),
+    `Tasks (0/${open.length} done):`,
+    ...open.map((i) => `○ [${i.id}] ${i.text}`),
   ];
 }
 
@@ -136,10 +138,11 @@ export function renderTodoList(state: TodoState): string[] {
  * Null when empty — no per-turn noise for a session that tracks nothing.
  */
 export function renderTodoBlock(state: TodoState, maxChars: number): string | null {
-  if (state.items.length === 0) return null;
+  const open = state.items.filter((item) => !item.done);
+  if (open.length === 0) return null;
   const lines = [
     "[PI CONTROL PLANE TASKS]",
-    ...state.items.map((i) => `[${i.id}] ${i.done ? "done" : "todo"} — ${i.text}`),
+    ...open.map((i) => `[${i.id}] todo — ${i.text}`),
   ];
   let block = lines.join("\n");
   if (block.length > maxChars) block = block.slice(0, maxChars) + "\n[TRUNCATED]";
@@ -215,6 +218,46 @@ export interface TodoWidgetMeasure {
   clip: (text: string, max: number) => string;
 }
 
+/** Split task text into display rows without dropping words. A single word
+ * wider than the row is split at cell boundaries, because terminals cannot
+ * wrap it safely inside the widget's fixed-width overlay. */
+function wrapTodoText(text: string, maxWidth: number, measure: (text: string) => number): string[] {
+  if (maxWidth < 1) return [""];
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [""];
+  const lines: string[] = [];
+  let line = "";
+  const pushWord = (word: string) => {
+    const candidate = line.length === 0 ? word : `${line} ${word}`;
+    if (measure(candidate) <= maxWidth) {
+      line = candidate;
+      return;
+    }
+    if (line.length > 0) {
+      lines.push(line);
+      line = "";
+    }
+    let remainder = word;
+    while (measure(remainder) > maxWidth) {
+      let cut = 0;
+      let chunk = "";
+      for (const char of Array.from(remainder)) {
+        if (measure(chunk + char) > maxWidth) break;
+        chunk += char;
+        cut += char.length;
+      }
+      // A width function that cannot fit one character must not loop forever.
+      if (chunk.length === 0) break;
+      lines.push(chunk);
+      remainder = remainder.slice(cut);
+    }
+    line = remainder;
+  };
+  for (const word of words) pushWord(word);
+  if (line.length > 0) lines.push(line);
+  return lines;
+}
+
 /**
  * The top-right widget: rounded border, radial bullets (○ open, ● done),
  * theme-painted. Pure: returns plain lines padded to `width` cells so the
@@ -230,16 +273,16 @@ export function renderTodoWidget(
   paint: TodoPaint,
   opts: TodoWidgetMeasure,
 ): string[] {
-  if (state.items.length === 0 || width < 12) return [];
-  const done = state.items.filter((i) => i.done).length;
-  const shown = state.items.slice(0, TODO_WIDGET_MAX_ITEMS);
-  const hidden = state.items.length - shown.length;
+  const open = state.items.filter((item) => !item.done);
+  if (open.length === 0 || width < 12) return [];
+  const shown = open.slice(0, TODO_WIDGET_MAX_ITEMS);
+  const hidden = open.length - shown.length;
 
   // Box width: the exact width a row needs (leading space + bullet + id +
   // text), or the title, whichever is wider — clamped.
   const contentBudget = shown.reduce(
     (max, i) => Math.max(max, opts.measure(` ${i.done ? "●" : "○"} [${i.id}] ${i.text}`)),
-    opts.measure(` ${"Tasks ${done}/${state.items.length}"}`) + 2,
+    opts.measure(` ${"Tasks 0/" + open.length}`) + 2,
   );
   const inner = Math.max(
     8,
@@ -247,13 +290,12 @@ export function renderTodoWidget(
   );
   const boxWidth = inner + 2;
 
-  const title = ` Tasks ${done}/${state.items.length} `;
+  const title = ` Tasks 0/${open.length} `;
   const titleWidth = opts.measure(title);
   if (inner < titleWidth) return []; // too narrow for the title; no box
   // Title after the corner: "╭─── Tasks 2/5 ─────╮" style.
   const leftRule = Math.max(0, Math.min(3, inner - titleWidth));
   const rightRule = Math.max(0, inner - titleWidth - leftRule);
-  const top = `╭${"─".repeat(leftRule)}${title}${"─".repeat(rightRule)}╮`;
   const bottom = `╰${"─".repeat(inner)}╯`;
 
   // Right-align: left-pad every line so the box hugs the right edge. Paint
@@ -268,28 +310,36 @@ export function renderTodoWidget(
       return paint.fg(fallback, text);
     }
   };
-  const border = (text: string) => paintOr("borderAccent", text, "dim");
+  const border = (text: string) => paintOr("todoBorder", text, "dim");
 
-  const painted: string[] = [padding + border(top)];
+  const titlePaint = (text: string) => paintOr("todoTitle", text, "text");
+  const painted: string[] = [
+    padding + border(`╭${"─".repeat(leftRule)}`) + titlePaint(title) + border(`${"─".repeat(rightRule)}╮`),
+  ];
   for (const item of shown) {
     const bullet = item.done ? "●" : "○";
     const bulletColor = item.done ? "success" : "footerYellow";
     const textColor = item.done ? "muted" : "text";
-    let content = `[${item.id}] ${item.text}`;
-    if (opts.measure(`${bullet} ${content}`) + 1 > inner) {
-      content = opts.clip(content, inner - 5);
-    }
-    const pad = Math.max(0, inner - opts.measure(`${bullet} ${content}`) - 1);
+    const firstBudget = Math.max(1, inner - opts.measure(`${bullet} `) - 1);
+    const continuationIndent = "   ";
+    const continuationBudget = Math.max(1, inner - opts.measure(continuationIndent));
+    const contentLines = wrapTodoText(`[${item.id}] ${item.text}`, firstBudget, opts.measure);
+    const first = contentLines.shift()!;
+    const firstPad = Math.max(0, inner - opts.measure(`${bullet} ${first}`) - 1);
     painted.push(
-      padding +
-        border("│") +
-        " " +
-        paintOr(bulletColor, bullet, "muted") +
-        " " +
-        paintOr(textColor, content, "muted") +
-        " ".repeat(pad) +
-        border("│"),
+      padding + border("│") + " " + paintOr(bulletColor, bullet, "muted") + " " +
+        paintOr(textColor, first, "muted") + " ".repeat(firstPad) + border("│"),
     );
+    for (const content of contentLines) {
+      // Re-wrap continuation text to account for its bullet-aligned indent.
+      for (const row of wrapTodoText(content, continuationBudget, opts.measure)) {
+        const pad = Math.max(0, inner - opts.measure(continuationIndent + row));
+        painted.push(
+          padding + border("│") + continuationIndent + paintOr(textColor, row, "muted") +
+            " ".repeat(pad) + border("│"),
+        );
+      }
+    }
   }
   if (hidden > 0) {
     const more = `+${hidden} more`;

@@ -23,9 +23,10 @@ Verified against pi 0.85.1 (`dist/core/extensions/types.d.ts`):
 | `tool_call` | The enforcement point: allow / confirm / block every tool call |
 | `tool_result` | Read-credit accounting (refreshReadCredit) |
 | `context` | Context-editor overlay merge (alt+e override applied per turn, invalidated on shrink) |
-| `message_update` | Time-to-first-text timing |
-| `agent_end` | Record the workload-timing ledger turn (persisted as its own entry), track timing, refresh credits |
-| `agent_settled`, `model_select` | Refresh the footer status segment |
+| `message_update` | Time-to-first-text timing and throttled live credit refreshes |
+| `message_end` | Immediate OpenRouter response-cost projection and endpoint reconciliation |
+| `agent_end` | Record the workload-timing ledger turn (persisted as its own entry), refresh credits, schedule delayed-billing reconciliation |
+| `agent_settled`, `model_select` | Refresh the footer status segment; settled agents also refresh credits |
 | `session_tree` | Select newest valid branch/workspace task state and repaint the top-right overlay |
 
 ## State model
@@ -33,7 +34,7 @@ Verified against pi 0.85.1 (`dist/core/extensions/types.d.ts`):
 `ControlPlaneState` (schemaVersion 2): phase, autonomy, previousContextSnapshot, sourceToggles, updatedAt.
 
 - Persisted via `pi.appendEntry("pi-control-plane-state", state)` on every change. Custom entries live in the session file but never enter LLM context, and they survive `/compact` (compaction summarizes messages; entries remain on the branch). The same pattern carries the scratchpad, sandbox, remembered rules and the workload-timing ledger, each with its own entry type and schema.
-- Restoration (`state.ts: restoreFromEntries`) walks the branch backward, takes the newest entry that passes strict validation, ignores malformed ones, and falls back to the read-only default (Plan) when prior state existed but was malformed — never to an edit mode. A session with nothing ever persisted opens edit-ready as Accept (`freshState`). An unknown `schemaVersion` is malformed by definition (bumped 1 -> 2 when the task-brief subsystem was removed, so a session saved under the old shape restores read-only rather than partially).
+- Restoration (`state.ts: restoreFromEntries`) walks the branch backward, takes the newest entry that passes strict validation, ignores malformed ones, and falls back to the read-only default (Plan) when prior state existed but was malformed — never to an edit mode. A session with nothing ever persisted opens in Auto (`freshState`). An unknown `schemaVersion` is malformed by definition (bumped 1 -> 2 when the task-brief subsystem was removed, so a session saved under the old shape restores read-only rather than partially).
 - Task state also uses an atomic workspace-keyed JSON file under `~/.pi/agent/state/control-plane/todos/` (or `PI_CONTROL_PLANE_STATE_DIR`). Startup selects the newer valid session or workspace snapshot. This lets separate Pi sessions/windows in the same workspace resume one workload without putting runtime state in the repository.
 
 ## Context snapshot model

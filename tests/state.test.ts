@@ -67,7 +67,7 @@ test("restoration walks backward, skips malformed entries, survives interleaved 
   assert.equal(result.state.phase, "plan");
 });
 
-test("corrupted restoration falls back to Read-only; a truly fresh session opens edit-ready", () => {
+test("corrupted restoration falls back to Read-only; a truly fresh session opens in Auto", () => {
   // Malformed/unknown prior state must never silently gain edit power: it falls
   // back to the safe read-only default (the corruption invariant).
   const corrupt = [
@@ -80,12 +80,24 @@ test("corrupted restoration falls back to Read-only; a truly fresh session opens
     assert.equal(result.state.phase, "discuss");
     assert.equal(result.state.autonomy, "read-only");
   }
-  // No prior state at all is a fresh start, not a failure: it opens edit-ready
-  // (Execute + Auto) so the daily driver works without a mode switch.
+  // No prior state at all opens in Auto (Execute + Unattended).
   const fresh = restoreFromEntries([] as never[], STATE_ENTRY_TYPE);
   assert.equal(fresh.restored, false);
   assert.equal(fresh.state.phase, "execute");
-  assert.equal(fresh.state.autonomy, "auto");
+  assert.equal(fresh.state.autonomy, "unattended");
+  assert.equal(modeOf(fresh.state.phase, fresh.state.autonomy), "auto");
+});
+
+test("saved modes are preserved rather than replaced by the fresh-session default", () => {
+  for (const mode of ["plan", "manual", "accept", "auto"] as const) {
+    const saved = { ...defaultState(), ...stateForMode(mode) };
+    const result = restoreFromEntries(
+      [{ type: "custom", customType: STATE_ENTRY_TYPE, data: saved }],
+      STATE_ENTRY_TYPE,
+    );
+    assert.equal(result.restored, true);
+    assert.equal(modeOf(result.state.phase, result.state.autonomy), mode);
+  }
 });
 
 test("source toggles default to enabled (empty map) and persist through restore", () => {

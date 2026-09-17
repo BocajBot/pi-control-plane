@@ -358,6 +358,45 @@ test("Restricted reads allow Pi package docs but keep agent auth protected", () 
   assert.equal(authRead.rule, "restricted:credential-path");
 });
 
+test("Unattended permits only Pi keybindings configuration inside the protected agent directory", () => {
+  const root = fs.realpathSync(makeTempRoot());
+  const agentDir = path.join(root, ".pi", "agent");
+  fs.mkdirSync(agentDir, { recursive: true });
+  const agentPolicy: RestrictedPolicy = {
+    ...policy,
+    denyPathBasenames: [...policy.denyPathBasenames, "auth.json"],
+    denyPathSubstrings: [...policy.denyPathSubstrings, "/.pi/agent/"],
+  };
+  const base = {
+    phase: "execute" as const,
+    autonomy: "unattended" as const,
+    projectRoot: root,
+    cwd: root,
+    policy: agentPolicy,
+    agentDir,
+  };
+
+  for (const toolName of ["edit", "write"]) {
+    const decision = evaluateToolCall(
+      evalInput({ toolName, ...base, toolInput: { path: path.join(agentDir, "keybindings.json"), content: "{}" } }),
+    );
+    assert.equal(decision.action, "allow");
+    assert.equal(decision.rule, "unattended:mutate");
+  }
+
+  const auth = evaluateToolCall(
+    evalInput({ toolName: "edit", ...base, toolInput: { path: path.join(agentDir, "auth.json"), content: "{}" } }),
+  );
+  assert.equal(auth.action, "block");
+  assert.equal(auth.rule, "unattended:credential-path");
+
+  const otherConfig = evaluateToolCall(
+    evalInput({ toolName: "edit", ...base, toolInput: { path: path.join(agentDir, "settings.json"), content: "{}" } }),
+  );
+  assert.equal(otherConfig.action, "block");
+  assert.equal(otherConfig.rule, "unattended:credential-path");
+});
+
 test("invalid policy falls back to Read-only semantics under Restricted", () => {
   const root = fs.realpathSync(makeTempRoot());
   const base = { phase: "execute" as const, autonomy: "restricted" as const, projectRoot: root, cwd: root, policy: null };

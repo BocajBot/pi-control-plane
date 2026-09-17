@@ -38,11 +38,11 @@ literal one-space pad; transcript entries render inside a `Box(1, 0)`. Sub-items
 ### Header
 
 One normal-text row, clipped (never wrapped) to terminal width. It keeps active
-profile, active tool count, names, and the `alt+t` affordance together. At most
+profile, active tool count, names, and the `ctrl+alt+t` affordance together. At most
 seven tool names are listed; the remainder collapses to `+N more`.
 
 ```text
- PROFILE minimal  ·  TOOLS 8  ask_user_question · bash · edit · find · grep · ls · read · +1 more  ·  alt+t
+ PROFILE minimal  ·  TOOLS 8  ask_user_question · bash · edit · find · grep · ls · read · +1 more  ·  ctrl+alt+t
 ```
 
 ### Status bar
@@ -120,7 +120,7 @@ Base Pi throws (and exits) on any rendered line wider than the terminal. Every
 custom `render(width)` in the extension returns lines passed through
 `clipLine`/`clipLines` (pi-tui `truncateToWidth`/`visibleWidth`, with a plain
 character fallback under the test harness): footer, header, context widget,
-the alt+h/alt+t/alt+i modals and the attended/advisor dialog headers. Pure
+the alt+h/ctrl+alt+t/alt+i modals and the attended/advisor dialog headers. Pure
 formatters in `ui.ts` stay width-unaware except `renderActiveTools` and
 `renderDiagnosticsPanel`, which bound every row by construction.
 
@@ -164,7 +164,7 @@ Names refresh on each render, including profile and individual toggle changes.
 The list shows tools exposed to the model, not tools currently executing or
 permission to execute them. Policy checks and approvals remain separate.
 
-`PROFILE`, profile name, `TOOLS N`, active names, and `alt+t` share one row,
+`PROFILE`, profile name, `TOOLS N`, active names, and `ctrl+alt+t` share one row,
 clipped to terminal width and capped at seven names. The default profile is
 confirmed here on fresh sessions instead of adding a duplicate transcript
 notification; explicit profile changes still notify. The native header stays at the
@@ -175,20 +175,23 @@ top of conversation and scrolls with it; it is not a pinned overlay.
 ## Directory, credits and diagnostics refinement
 
 The compact status line shows directory, mode, context percentage beside the
-OpenRouter balance (`ctx 1% · OpenRouter · $22.16`, no delta), then the
-model (see "Status bar" above). `~` marks estimated context; an unprefixed value
-uses the last request's tokenizer count. Detailed view retains legacy token/cost
-metrics and the signed credit delta.
+OpenRouter balance and current-turn delta (`ctx 1% · OpenRouter · $22.16 · Δ
+−$0.08`), then the model (see "Status bar" above). `~` marks estimated context;
+an unprefixed value uses the last request's tokenizer count. Detailed view
+retains legacy token/cost metrics.
 
 `src/control-plane/credits.ts` owns validated account snapshots and serialized,
 nonblocking refreshes. `session_start` reads the initial balance;
-`before_agent_start` queues a baseline; `agent_end` queues the new balance and
-signed delta. The four-second timeout never blocks model execution. Credentials
-resolve from `OPENROUTER_MANAGEMENT_KEY`, `OPENROUTER_API_KEY`, then Pi's
-OpenRouter provider credential. Keys and response bodies are never logged or
-persisted. Failed refreshes show unavailable or explicitly stale balance and no
-delta. Delta is account-wide change between samples, not isolated prompt cost;
-other clients, top-ups and delayed billing can affect it.
+`before_agent_start` queues a baseline; streaming events throttle live refreshes;
+and each completed OpenRouter assistant message immediately deducts its
+provider-reported `usage.cost.total`. `~$` marks this projected balance until the
+account endpoint catches up. `agent_end` also starts short settlement checks, so
+delayed billing appears without another prompt. The four-second timeout never
+blocks model execution. Credentials resolve from `OPENROUTER_MANAGEMENT_KEY`,
+`OPENROUTER_API_KEY`, then Pi's OpenRouter provider credential. Keys and response
+bodies are never logged or persisted. Failed refreshes show unavailable or
+explicitly stale balance while retaining any useful projection. Endpoint deltas
+remain account-wide; other clients and top-ups can affect them.
 
 Source: [OpenRouter credits API](https://openrouter.ai/docs/api/api-reference/credits/get-credits).
 The API documents a management-key requirement; current existing credential was
@@ -206,10 +209,11 @@ finishes, and leave unfinished tasks open. Session entries plus atomic state in
 Pi's agent state directory preserve the list across reload, branch restoration,
 compaction, and new windows opened in the same workspace. A noncapturing TUI
 overlay anchors the list at the literal top-right, outside transcript flow, so
-it remains visible while tasks exist without taking keyboard focus. Mutations
-request an immediate render. Hollow radial bullets mark open tasks; filled
-bullets mark completed tasks. Rounded borders and theme colors follow the active
-theme. Six tasks display before a `+N more` summary.
+it remains visible while open tasks exist without taking keyboard focus.
+Mutations request an immediate render. Hollow radial bullets mark open tasks.
+Completing a task removes it from the live list and writes `Task [id] -
+description has completed.` into the conversation. Rounded borders and theme
+colors follow the active theme. Six tasks display before a `+N more` summary.
 
 `/control-ui timing` shows the workload ledger: last turn (first streamed text
 + total, including model, tools and hooks), cumulative model time across all
