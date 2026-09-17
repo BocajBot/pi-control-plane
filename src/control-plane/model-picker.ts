@@ -31,8 +31,29 @@ export interface ModelLike {
   id: string;
 }
 
+export interface PricedModelLike extends ModelLike {
+  cost?: {
+    input: number;
+    output: number;
+    tiers?: readonly unknown[];
+  };
+}
+
 export function keyOf(provider: string, id: string): string {
   return `${provider}/${id}`;
+}
+
+/** Match Pi's native OpenRouter price badge: input/output dollars per million
+ * tokens, with `+` when request-size tiers may change the shown base rate. */
+export function modelPriceLabel(model: PricedModelLike): string | null {
+  if (model.provider !== "openrouter" || model.cost === undefined) return null;
+  const formatRate = (rate: number): string => {
+    if (!Number.isFinite(rate)) return "?";
+    if (rate === 0) return "0";
+    return String(Number.parseFloat(rate.toPrecision(3)));
+  };
+  const tierMark = model.cost.tiers?.length ? "+" : "";
+  return `$${formatRate(model.cost.input)}/$${formatRate(model.cost.output)}${tierMark} per Mtok`;
 }
 
 /**

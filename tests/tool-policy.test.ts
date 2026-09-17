@@ -81,6 +81,7 @@ test("tool classification: read tools known, unknown tools never safe", () => {
   assert.equal(classifyTool("fetch_content"), "read");
   assert.equal(classifyTool("get_search_content"), "read");
   assert.equal(classifyTool("source_check"), "read");
+  assert.equal(classifyTool("todo"), "read");
   assert.equal(classifyTool("web_search"), "unknown");
   assert.equal(classifyTool("edit"), "mutate");
   assert.equal(classifyTool("write"), "mutate");
@@ -322,6 +323,39 @@ test("Restricted reads are denied on credential paths too", () => {
   );
   assert.equal(decision.action, "block");
   assert.equal(decision.rule, "restricted:credential-path");
+});
+
+test("Restricted reads allow Pi package docs but keep agent auth protected", () => {
+  const root = fs.realpathSync(makeTempRoot());
+  const agentDir = path.join(root, ".pi", "agent");
+  const packageDir = path.join(agentDir, "npm", "node_modules", "pi-subagents", "skills");
+  fs.mkdirSync(packageDir, { recursive: true });
+  const packageDoc = path.join(packageDir, "management-authoring-rpc.md");
+  const authFile = path.join(agentDir, "auth.json");
+  fs.writeFileSync(packageDoc, "documentation");
+  fs.writeFileSync(authFile, "{}");
+  const agentPolicy: RestrictedPolicy = {
+    ...policy,
+    denyPathBasenames: [...policy.denyPathBasenames, "auth.json"],
+    denyPathSubstrings: [...policy.denyPathSubstrings, "/.pi/agent/"],
+  };
+  const base = {
+    toolName: "read",
+    phase: "discuss" as const,
+    autonomy: "restricted" as const,
+    projectRoot: root,
+    cwd: root,
+    policy: agentPolicy,
+    agentDir,
+  };
+
+  const packageRead = evaluateToolCall(evalInput({ ...base, toolInput: { path: packageDoc } }));
+  assert.equal(packageRead.action, "allow");
+  assert.equal(packageRead.rule, "restricted:read");
+
+  const authRead = evaluateToolCall(evalInput({ ...base, toolInput: { path: authFile } }));
+  assert.equal(authRead.action, "block");
+  assert.equal(authRead.rule, "restricted:credential-path");
 });
 
 test("invalid policy falls back to Read-only semantics under Restricted", () => {

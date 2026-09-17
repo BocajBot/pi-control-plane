@@ -33,6 +33,7 @@ import {
   keyOf,
   loadUsage,
   MAX_VISIBLE,
+  modelPriceLabel,
   pageStep,
   pickerDisabled,
   recordUse,
@@ -63,6 +64,11 @@ const nodeFs: UsageFs = {
 interface PickerModel {
   provider: string;
   id: string;
+  cost?: {
+    input: number;
+    output: number;
+    tiers?: readonly unknown[];
+  };
 }
 
 /** Every provider/id in models.json (for completions, which receive no ctx). */
@@ -218,7 +224,10 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
     const currentKey = current ? keyOf(current.provider, current.id) : null;
     const items = sorted.map((m) => {
       const k = keyOf(m.provider, m.id);
-      return { value: k, label: k, description: k === currentKey ? "current" : undefined };
+      const details = [k === currentKey ? "current" : null, modelPriceLabel(m)].filter(
+        (detail): detail is string => detail !== null,
+      );
+      return { value: k, label: k, description: details.length > 0 ? details.join(" · ") : undefined };
     });
     const ui = ctx.ui as unknown as {
       custom: <T>(

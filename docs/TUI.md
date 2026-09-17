@@ -198,6 +198,19 @@ Tool output starts collapsed and successful/pending tools have transparent
 backgrounds; error surfaces remain distinct. These presentation changes do not
 remove tool results from model context.
 
+## Task-list widget
+
+The `todo` tool owns a workspace-persistent task list. Models receive an explicit
+guideline to create tasks before multi-step work, complete each task as work
+finishes, and leave unfinished tasks open. Session entries plus atomic state in
+Pi's agent state directory preserve the list across reload, branch restoration,
+compaction, and new windows opened in the same workspace. A noncapturing TUI
+overlay anchors the list at the literal top-right, outside transcript flow, so
+it remains visible while tasks exist without taking keyboard focus. Mutations
+request an immediate render. Hollow radial bullets mark open tasks; filled
+bullets mark completed tasks. Rounded borders and theme colors follow the active
+theme. Six tasks display before a `+N more` summary.
+
 `/control-ui timing` shows the workload ledger: last turn (first streamed text
 + total, including model, tools and hooks), cumulative model time across all
 turns (count, total, average, slowest), and recent turn durations. The ledger
@@ -213,7 +226,9 @@ extend the substring filter (rebuilt per keystroke), backspace edits it,
 ↑↓/enter/esc go to the list, and PageUp/PageDown jump a page via
 `setSelectedIndex(±15)` — public component API only, no bundle patching (the
 retired `bin/patch-pi-model-page-nav.mjs` approach is archived under
-`~/.pi/agent/archive/`). At startup the same modal appears once; escape there
+`~/.pi/agent/archive/`). OpenRouter rows show input/output pricing in Pi's
+native `$input/$output per Mtok` format; `+` marks models with request-size
+pricing tiers. At startup the same modal appears once; escape there
 quits pi (guarded by `isIdle` so only a human answering it can). Outside the
 TUI (`ctx.mode !== "tui"`), no modal is attempted — `/models <query>` switches
 directly and `/models` prints the frecency-ordered list.

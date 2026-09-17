@@ -64,7 +64,7 @@ class FakePi {
   // tools) so "minimal" and "all minus alwaysDisabledTools" are never
   // coincidentally the same set here, the way they would be in a toy
   // universe of exactly minimal's own tools + one extra.
-  allToolNames = ["read", "bash", "edit", "write", "grep", "find", "ls", "web_search", "local_web_search", "todo"];
+  allToolNames = ["read", "bash", "edit", "write", "grep", "find", "ls", "web_search", "local_web_search", "transcribe_audio", "todo"];
   getActiveTools() {
     return [...this.activeTools];
   }
@@ -1420,8 +1420,8 @@ test("applied profile persists and is restored in a new session", async () => {
   await pi.commands.get("context")!.handler("profile reading", ctx);
   // The fake registry registers local_web_search but no pi-web-access
   // tools, so the reading profile's active set is its intersection with the
-  // registry: the four core reads plus local_web_search.
-  assert.deepEqual([...pi.activeTools].sort(), ["find", "grep", "local_web_search", "ls", "read"]);
+  // registry: the four core reads plus both registered read-classified tools.
+  assert.deepEqual([...pi.activeTools].sort(), ["find", "grep", "local_web_search", "ls", "read", "todo"]);
 
   const pi2 = new (pi.constructor as new () => FakePi)();
   await controlPlaneExtension(pi2 as never);
@@ -2007,8 +2007,91 @@ test("top-right context tools header reads active registry on every render", asy
   const rendered = header.render(120).join("\n");
   for (const tool of pi.getActiveTools()) assert.ok(rendered.includes(tool));
   pi.setActiveTools(pi.allToolNames);
-  assert.match(header.render(120)[0], /\+3 more  ·  alt\+t/, "10 tools collapse to 7 + more");
+  assert.match(header.render(120)[0], /\+4 more  ·  alt\+t/, "11 tools collapse to 7 + more");
   for (const width of [1, 12, 40, 80]) assert.ok(header.render(width).every((line) => line.length <= width));
+});
+
+test("todo uses top-right overlay, repaints immediately, and persists across new sessions", async () => {
+  const oldStateDirectory = process.env.PI_CONTROL_PLANE_STATE_DIR;
+  const stateDirectory = tmpRoot();
+  const workspace = tmpRoot();
+  process.env.PI_CONTROL_PLANE_STATE_DIR = stateDirectory;
+  try {
+    const pi = await boot();
+    const ctx = makeCtx({ branchEntries: [], cwd: workspace });
+    let overlayWidget: { render(width: number): string[] } | undefined;
+    let overlayOptions: Record<string, unknown> | undefined;
+    let ownerWidget: { render(width: number): string[]; dispose?(): void } | undefined;
+    let renderRequests = 0;
+    let overlayHides = 0;
+    ctx.ui.setWidget = (key: string, factory: unknown) => {
+      if (key !== "control-plane-todo" || typeof factory !== "function") return;
+      ownerWidget = factory(
+        {
+          requestRender: () => { renderRequests++; },
+          showOverlay: (component: { render(width: number): string[] }, options: Record<string, unknown>) => {
+            overlayWidget = component;
+            overlayOptions = options;
+            return { hide: () => { overlayHides++; } };
+          },
+        },
+        { fg: (_color: string, text: string) => text },
+      );
+    };
+
+    await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    assert.equal(overlayOptions?.anchor, "top-right");
+    assert.equal(overlayOptions?.nonCapturing, true);
+    assert.deepEqual(ownerWidget?.render(80), [], "lifecycle widget consumes no document-flow rows");
+    assert.deepEqual(overlayWidget?.render(44), []);
+
+    const tool = pi.tools.get("todo");
+    assert.ok(tool);
+    assert.match(
+      String((tool as unknown as { promptGuidelines?: string[] }).promptGuidelines?.join("\n")),
+      /multi-step work.*mark each task done/i,
+      "tool prompt tells models to maintain task lifecycle",
+    );
+    const beforeAdd = renderRequests;
+    await tool!.execute("todo-1", { op: "add", text: "Keep visible" }, undefined, undefined, ctx);
+    assert.ok(renderRequests > beforeAdd, "task mutation requests an immediate TUI frame");
+    assert.match(overlayWidget!.render(44).join("\n"), /○ \[1\] Keep visible/);
+    assert.match(overlayWidget!.render(44)[0]!, /╭─* Tasks 0\/1 ─*╮$/);
+    assert.ok(pi.entries.some((entry) => entry.customType === "pi-control-plane-todo"));
+
+    const reloaded = await boot();
+    const resumedCtx = makeCtx({ branchEntries: [], cwd: workspace });
+    let resumedOverlay: { render(width: number): string[] } | undefined;
+    resumedCtx.ui.setWidget = (key: string, factory: unknown) => {
+      if (key !== "control-plane-todo" || typeof factory !== "function") return;
+      factory(
+        {
+          requestRender() {},
+          showOverlay: (component: { render(width: number): string[] }) => {
+            resumedOverlay = component;
+            return { hide() {} };
+          },
+        },
+        { fg: (_color: string, text: string) => text },
+      );
+    };
+    await reloaded.emit("session_start", { type: "session_start", reason: "new" }, resumedCtx);
+    assert.match(resumedOverlay!.render(44).join("\n"), /○ \[1\] Keep visible/);
+
+    const resumedTool = reloaded.tools.get("todo");
+    await resumedTool!.execute("todo-2", { op: "done", id: 1 }, undefined, undefined, resumedCtx);
+    assert.match(resumedOverlay!.render(44).join("\n"), /● \[1\] Keep visible/);
+
+    await reloaded.emit("session_tree", { type: "session_tree" }, makeCtx({ branchEntries: [], cwd: workspace }));
+    assert.match(resumedOverlay!.render(44).join("\n"), /● \[1\] Keep visible/);
+    ownerWidget?.dispose?.();
+    assert.equal(overlayHides, 1, "session UI cleanup removes overlay");
+  } finally {
+    if (oldStateDirectory === undefined) delete process.env.PI_CONTROL_PLANE_STATE_DIR;
+    else process.env.PI_CONTROL_PLANE_STATE_DIR = oldStateDirectory;
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("describeDiagnostic: glyph/tone/label per kind, unknown kind pending", () => {

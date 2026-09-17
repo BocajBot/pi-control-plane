@@ -46,6 +46,11 @@ sandbox, edited context and active extension statuses remain visible;
 `LSP Inactive` moves to details. Native Pi tool progress and approval dialogs
 are unchanged.
 
+Multi-step work appears in a noncapturing task overlay at the top-right. Open
+tasks use hollow bullets; completed tasks use filled bullets. Updates repaint
+immediately, and workspace-scoped state lets new Pi sessions and windows resume
+the same unfinished list.
+
 Use `/control-ui details` for full path, branch, session name, model/effort,
 sent/received tokens, cache usage, cost, context counts, live draft counters,
 and the workload timer (`time 4m 12s · 9 turns`).
@@ -120,7 +125,7 @@ What the sandbox binds, every time, freshly resolved per call (see `sandboxOptio
 
 - The project root — read-write. This is the entire point: code the agent may still modify.
 - Standard system directories (`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`, `/opt`) and `$HOME` — read-only, so interpreters, package managers, and toolchains under `$HOME` (nvm, cargo, a user pip install, …) resolve normally.
-- Credential paths from `policy/default-policy.json` (`denyPathSubstrings`, `denyPathBasenames`) — blanked inside `$HOME` (empty `tmpfs` over directories, `/dev/null` over files) so `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.pi/agent`, `~/.docker/config.json`, and friends are unreadable from inside the sandbox even though the rest of `$HOME` is bound in. This deliberately reuses the *same* deny list the `read`/`edit`/`write` tools already enforce rather than maintaining a second one that could drift — see `docs/SECURITY.md` for what this reuse does and does not cover (basename patterns like a stray `.env` are only shadowed at `$HOME`'s top level, not everywhere on disk).
+- Credential paths from `policy/default-policy.json` (`denyPathSubstrings`, `denyPathBasenames`) — blanked inside `$HOME` (empty `tmpfs` over directories, `/dev/null` over files) so `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.pi/agent`, `~/.docker/config.json`, and friends are unreadable from inside the sandbox even though the rest of `$HOME` is bound in. This deliberately reuses the policy deny list rather than maintaining a second one that could drift. Cooperative `read` calls have one narrower exception: Pi may read its own installed package/config files under `~/.pi/agent`, while `auth.json` remains blocked. Sandboxed shell still sees the whole agent directory shadowed. See `docs/SECURITY.md` for remaining limits (basename patterns like a stray `.env` are only shadowed at `$HOME`'s top level, not everywhere on disk).
 
 Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-session, the `bash` call is blocked with an explicit reason rather than silently running unsandboxed.
 
@@ -154,7 +159,7 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 
 ## Model picker (`alt+m` / `/models`)
 
-A typeahead model picker built entirely on public extension APIs — the isolated replacement for the retired `bin/patch-pi-model-page-nav.mjs`, which patched minified anchors inside pi's bundle and broke on every `pi update`. Paged navigation (PageUp/PageDown jump 15 models — the exact feature the patch existed for) is implemented via `SelectList.setSelectedIndex`, so it survives updates by construction.
+A typeahead model picker built entirely on public extension APIs — the isolated replacement for the retired `bin/patch-pi-model-page-nav.mjs`, which patched minified anchors inside pi's bundle and broke on every `pi update`. Paged navigation (PageUp/PageDown jump 15 models — the exact feature the patch existed for) is implemented via `SelectList.setSelectedIndex`, so it survives updates by construction. OpenRouter rows retain Pi's input/output price badge (`$input/$output per Mtok`, with `+` for tiered pricing).
 
 - `alt+m` or `/models` — the picker, on demand. Type to filter (substring), ↑↓ move, PgUp/PgDn page, enter selects, esc closes.
 - At interactive startup the picker also appears (frecency-ordered: most-used-recently first, local models leading while history is cold, usage tracked in `~/.pi/agent/model-usage.json`); esc at launch quits pi — no model chosen, no session. Disable the startup dialog with `"modelPicker": false` in `~/.pi/agent/settings.json` (usage tracking continues either way).

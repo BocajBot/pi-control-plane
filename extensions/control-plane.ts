@@ -33,6 +33,26 @@ import {
   TIMING_ENTRY_TYPE,
   timingFooterSegment,
 } from "../src/control-plane/turn-timing.ts";
+import {
+  addTodo,
+  clearCompleted,
+  completeTodo,
+  emptyTodoState,
+  reopenTodo,
+  removeTodo,
+  renderTodoBlock,
+  renderTodoList,
+  renderTodoWidget,
+  restoreTodoFromEntries,
+  TODO_ENTRY_TYPE,
+  type TodoOpResult,
+  type TodoState,
+} from "../src/control-plane/todo.ts";
+import {
+  newerTodo,
+  readWorkspaceTodo,
+  writeWorkspaceTodo,
+} from "../src/control-plane/todo-store.ts";
 
 import {
   parseBwrapArgs,
@@ -624,17 +644,18 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     exists: (p) => fs.existsSync(p),
   };
 
-  /** Canonical path of the harness agent directory (`<harness-home>/agent`),
+  /** Canonical path of Pi's agent directory,
    * which reads freely (Pi reading its own skills/config is not exfil). Computed
-   * from PI_HARNESS_HOME, else ~/.pi, matching the harness's own path logic.
+   * from PI_CODING_AGENT_DIR, then PI_HARNESS_HOME, else ~/.pi/agent.
    * Cached; null only if it cannot be resolved. */
   let agentDirCache: string | null | undefined;
   const agentDir = (): string | null => {
     if (agentDirCache !== undefined) return agentDirCache;
-    const base = process.env.PI_HARNESS_HOME && process.env.PI_HARNESS_HOME.trim().length > 0
-      ? process.env.PI_HARNESS_HOME
-      : path.join(os.homedir(), ".pi");
-    agentDirCache = canonicalizePath(path.join(base, "agent"), os.homedir(), pathOps);
+    const explicit = process.env.PI_CODING_AGENT_DIR?.trim();
+    const configured = explicit
+      ? explicit
+      : path.join(process.env.PI_HARNESS_HOME?.trim() || path.join(os.homedir(), ".pi"), "agent");
+    agentDirCache = canonicalizePath(configured, os.homedir(), pathOps);
     return agentDirCache;
   };
 
@@ -866,6 +887,18 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     pi.appendEntry(TIMING_ENTRY_TYPE, timing);
   };
 
+  let todoWorkspace: string | null = null;
+  const persistTodo = (ctx?: ExtensionContext) => {
+    todo.updatedAt = new Date().toISOString();
+    pi.appendEntry(TODO_ENTRY_TYPE, todo);
+    if (todoWorkspace !== null) {
+      const error = writeWorkspaceTodo(todoWorkspace, todo);
+      if (error !== null && ctx !== undefined) {
+        ctx.ui.notify(`Control plane: task list could not be saved across sessions (${error}).`, "warning");
+      }
+    }
+  };
+
   const persistSandbox = () => {
     sandbox.updatedAt = new Date().toISOString();
     pi.appendEntry(SANDBOX_ENTRY_TYPE, sandbox);
@@ -947,6 +980,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   // recent) persisted as its own session entry so resumed sessions keep their
   // totals. Pure logic + rendering live in src/control-plane/turn-timing.ts.
   let timing = emptyTimingState();
+  // Task tracking: the model's to-do list (todo tool + top-right widget),
+  // persisted as its own session entry like the scratchpad. Pure logic in
+  // src/control-plane/todo.ts.
+  let todo = emptyTodoState();
   // Nonblocking: session_start constructs the balance poller and queues its
   // first lookup without awaiting network I/O. The footer therefore starts at
   // "loading" and resolves to the real balance without requiring a prompt.
@@ -1267,6 +1304,46 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     }));
     toolsHeaderInstalled = true;
   };
+
+  // Keep open work in a noncapturing top-right overlay. A zero-height widget
+  // owns its lifecycle so Pi removes the overlay during UI/session reset.
+  const TODO_WIDGET_KEY = "control-plane-todo";
+  let todoWidgetTui: { requestRender(force?: boolean): void } | null = null;
+  const installTodoWidget = (ctx: ExtensionContext) => {
+    if (typeof ctx.ui.setWidget !== "function") return;
+    ctx.ui.setWidget(
+      TODO_WIDGET_KEY,
+      (tui, theme) => {
+        todoWidgetTui = tui;
+        const component = {
+          invalidate() {},
+          render: (width: number): string[] => renderTodoWidget(
+            todo,
+            width,
+            { fg: (color, text) => theme.fg(color, text) },
+            { measure: measureWidth, clip: (text, max) => clipLine(text, max) },
+          ),
+        };
+        const overlay = tui.showOverlay(component, {
+          anchor: "top-right",
+          width: 44,
+          margin: { top: 1, right: 1 },
+          nonCapturing: true,
+          visible: (width, height) => todo.items.length > 0 && width >= 48 && height >= 8,
+        });
+        return {
+          invalidate() {},
+          render: (): string[] => [],
+          dispose() {
+            overlay.hide();
+            if (todoWidgetTui === tui) todoWidgetTui = null;
+          },
+        };
+      },
+      { placement: "aboveEditor" },
+    );
+  };
+  const refreshTodoWidget = () => todoWidgetTui?.requestRender(true);
 
   // ---- draft token counter (bottom-right, under the input box) ----
   // A component-factory widget re-renders every TUI frame, so reading the
@@ -1670,6 +1747,25 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         "warning",
       );
     }
+    const todoResult = restoreTodoFromEntries(entries, TODO_ENTRY_TYPE);
+    todoWorkspace = rootOf(ctx);
+    const workspaceTodo = readWorkspaceTodo(todoWorkspace);
+    todo = newerTodo(todoResult.restored ? todoResult.todo : null, workspaceTodo.todo) ?? todoResult.todo;
+    if (todoResult.ignoredMalformed > 0) {
+      const recovery = todoResult.restored
+        ? "restored the newest valid task list"
+        : "starting with an empty task list";
+      ctx.ui.notify(
+        `Control plane: ignored ${todoResult.ignoredMalformed} malformed task entr${todoResult.ignoredMalformed === 1 ? "y" : "ies"}; ${recovery}.`,
+        "warning",
+      );
+    }
+    if (workspaceTodo.malformed) {
+      ctx.ui.notify("Control plane: ignored malformed workspace task state; using session state or an empty list.", "warning");
+    }
+    if (todoResult.restored && todo === todoResult.todo && workspaceTodo.todo !== todo) {
+      writeWorkspaceTodo(todoWorkspace, todo);
+    }
     if (policyLoadError !== null) {
       ctx.ui.notify(`Control plane: ${policyLoadError}`, "warning");
     }
@@ -1698,6 +1794,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     }
     ctx.ui.setToolsExpanded?.(false);
     installToolsHeader(ctx);
+    installTodoWidget(ctx);
+    refreshTodoWidget();
     installFooter(ctx);
     installDraftCounter(ctx);
     ensureCredits(ctx);
@@ -1719,6 +1817,18 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     void refreshProspectiveCount(ctx);
   });
   pi.on("model_select", (_event, ctx) => updateStatus(ctx));
+
+  // Branch navigation may reveal a newer session snapshot, but never discards
+  // newer workspace state shared by other sessions/windows.
+  pi.on("session_tree", (_event, ctx) => {
+    const result = restoreTodoFromEntries(
+      ctx.sessionManager.getBranch() as unknown as CustomEntryLike[],
+      TODO_ENTRY_TYPE,
+    );
+    const workspaceTodo = todoWorkspace === null ? null : readWorkspaceTodo(todoWorkspace).todo;
+    todo = newerTodo(result.restored ? result.todo : null, workspaceTodo) ?? todo;
+    refreshTodoWidget();
+  });
 
   // ---- context capture ----
 
@@ -1815,6 +1925,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     prompt += "\n\n" + buildInjectionBlock(state, policy !== null);
     const scratchpadBlock = renderScratchpadBlock(scratchpad, LIMITS.injectionTotal);
     if (scratchpadBlock !== null) prompt += "\n\n" + scratchpadBlock;
+    const todoBlock = renderTodoBlock(todo, LIMITS.injectionTotal);
+    if (todoBlock !== null) prompt += "\n\n" + todoBlock;
     updateStatus(ctx);
     return { systemPrompt: prompt };
   });
@@ -2253,6 +2365,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       cwd: ctx.cwd,
       policy,
       ops: pathOps,
+      agentDir: agentDir(),
     });
 
     // Reads free by default: a read outside the project root would otherwise
@@ -2492,6 +2605,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         cwd: ctx.cwd,
         policy,
         ops: pathOps,
+        agentDir: agentDir(),
       });
       if (postSwitch.action !== "block") {
         const input = event.input as Record<string, unknown>;
@@ -3209,6 +3323,72 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         return {
           content: [{ type: "text", text: formatTranscript(outcome) }],
         } as never;
+      },
+    });
+
+    // ---- task tracking tool (see todo.ts) ----
+    // Replaces rpiv-todo's same-named tool (that package was removed: it
+    // could not be restyled or repositioned, and two tools named "todo" would
+    // collide silently in Pi's flat last-registered-wins registry). One task
+    // list, owned by this package: the model calls this tool, the user sees
+    // the top-right widget, and the list is re-injected into the system prompt
+    // every turn so open tasks survive compaction. Read-classified: it mutates
+    // only its own state store and session entry.
+    pi.registerTool({
+      name: "todo",
+      label: "Task List",
+      description:
+        "Track the tasks in the current workload. Ops: 'list' (show all), 'add' (text: new task), 'done' (id: mark complete), 'undo' (id: reopen), 'remove' (id: delete), 'clear' (remove completed). The list is shown to the user as a live widget and re-shown in the system prompt every turn, so open tasks survive compaction. Structuring work with this tool is expected for multi-step tasks.",
+      promptSnippet: "todo(op, id?, text?) — track tasks: list|add|done|undo|remove|clear",
+      promptGuidelines: [
+        "For multi-step work, use todo to add concrete tasks before execution, mark each task done immediately after completion, and keep unfinished tasks open.",
+      ],
+      parameters: T.Object({
+        op: T.String({
+          description: "One of: list, add, done, undo, remove, clear.",
+        }),
+        id: T.Optional(
+          T.Number({ description: "Task id (for done, undo, remove)." }),
+        ),
+        text: T.Optional(
+          T.String({ description: "Task text (for add)." }),
+        ),
+      }) as never,
+      execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+        const { op, id, text } = params as { op?: string; id?: number; text?: string };
+        const now = new Date().toISOString();
+        if (op === "list") {
+          return { content: [{ type: "text", text: renderTodoList(todo).join("\n") }] } as never;
+        }
+        let result: TodoOpResult;
+        switch (op) {
+          case "add":
+            result = addTodo(todo, text ?? "", now);
+            break;
+          case "done":
+            result = completeTodo(todo, typeof id === "number" ? id : 0, now);
+            break;
+          case "undo":
+            result = reopenTodo(todo, typeof id === "number" ? id : 0, now);
+            break;
+          case "remove":
+            result = removeTodo(todo, typeof id === "number" ? id : 0, now);
+            break;
+          case "clear":
+            result = clearCompleted(todo, now);
+            break;
+          default:
+            result = { ok: false, error: `Unknown op "${op}". Use list, add, done, undo, remove or clear.` };
+        }
+        if (result.ok && result.state !== todo) {
+          todo = result.state as TodoState;
+          persistTodo(ctx);
+          refreshTodoWidget();
+        }
+        const body = result.ok
+          ? `${result.message}\n\n${renderTodoList(result.state).join("\n")}`
+          : result.error;
+        return { content: [{ type: "text", text: body }] } as never;
       },
     });
   }

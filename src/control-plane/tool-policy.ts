@@ -16,6 +16,7 @@
  */
 
 import * as path from "node:path";
+import { isSensitiveReadTarget } from "./sensitive-paths.ts";
 import {
   type Autonomy,
   type Phase,
@@ -49,6 +50,11 @@ import {
  * targetPathOf treats a scheme-less url as a filesystem path so those reads
  * go through the same canonicalization and credential-deny checks as any
  * other read. */
+/** "todo" (this package's task-tracking tool, see todo.ts): it mutates
+ * only its own session entry — the model's task list — never the filesystem
+ * or anything outside Pi, so it is classified read like transcribe_audio:
+ * available in every mode, including read-only Plan where task tracking is
+ * most useful. (Replaces rpiv-todo's same-named tool, which was removed.) */
 export const READ_TOOLS: ReadonlySet<string> = new Set([
   "read",
   "grep",
@@ -59,6 +65,7 @@ export const READ_TOOLS: ReadonlySet<string> = new Set([
   "fetch_content",
   "get_search_content",
   "source_check",
+  "todo",
 ]);
 export const MUTATING_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
 export const SHELL_TOOLS: ReadonlySet<string> = new Set(["bash"]);
@@ -253,6 +260,9 @@ export interface EvaluateInput {
   /** Null means the Restricted policy failed to load/validate. */
   policy: RestrictedPolicy | null;
   ops: PathOps;
+  /** Canonical Pi agent directory. Package/config reads beneath it are safe;
+   * auth.json remains protected. Null when unavailable. */
+  agentDir?: string | null;
 }
 
 function targetPathOf(toolInput: Record<string, unknown>): string | null {
@@ -342,7 +352,11 @@ export function evaluateToolCall(input: EvaluateInput): ToolDecision {
       }
       if (canonical !== null) {
         const denied = matchesDenyPatterns(canonical, policy);
-        if (denied !== null) {
+        const sensitive = denied !== null && isSensitiveReadTarget(canonical, input.agentDir ?? null, {
+          basenames: policy.denyPathBasenames,
+          pathSubstrings: policy.denyPathSubstrings,
+        });
+        if (denied !== null && sensitive) {
           return block(
             "restricted:credential-path",
             `Reading "${canonical}" is blocked by the Restricted policy (${denied}). This path category is categorically protected.`,

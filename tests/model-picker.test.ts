@@ -11,6 +11,7 @@ import {
   frecency,
   keyOf,
   loadUsage,
+  modelPriceLabel,
   pageStep,
   pickerDisabled,
   recordUse,
@@ -122,6 +123,23 @@ test("pageStep: jumps a page, clamps at both ends", () => {
   assert.equal(pageStep(48, 1, 50), 49);
   assert.equal(pageStep(49, 1, 50), 49);
   assert.equal(pageStep(3, 1, 0), 0);
+});
+
+test("modelPriceLabel: shows OpenRouter input/output rates and tier marker", () => {
+  assert.equal(
+    modelPriceLabel({
+      provider: "openrouter",
+      id: "priced",
+      cost: { input: 0.12345, output: 12.345, tiers: [{}] },
+    }),
+    "$0.123/$12.3+ per Mtok",
+  );
+  assert.equal(
+    modelPriceLabel({ provider: "openrouter", id: "free", cost: { input: 0, output: 0 } }),
+    "$0/$0 per Mtok",
+  );
+  assert.equal(modelPriceLabel({ provider: "llama-swap", id: "local", cost: { input: 0, output: 0 } }), null);
+  assert.equal(modelPriceLabel({ provider: "openrouter", id: "missing" }), null);
 });
 
 test("classifyKey: typeable, backspace, page keys, modifier variants, other", () => {
