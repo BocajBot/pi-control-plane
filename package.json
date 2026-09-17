@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Control plane extension for the Pi coding agent: inspect effective context and enforce workflow-mode tool policies.",
   "pi": {
-    "extensions": ["./extensions/control-plane.ts"],
+    "extensions": ["./extensions/control-plane.ts", "./extensions/model-picker.ts"],
     "skills": ["./skills"],
     "themes": ["./.pi/themes/pi-cyberpunk.json"]
   },

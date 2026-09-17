@@ -24,13 +24,13 @@ No dependencies: Node 22's built-in test runner executes the TypeScript directly
 | `extension-harness.test.ts` | The real entry against a fake Pi API: attended deny-blocks/approve-allows, no-UI fail-closed, cross-"session" restoration incl. tool toggles, sandboxed alias warning, injection block + verified excision + honest failure, hotkey cycling through all four modes, `/scratchpad` end-to-end incl. system-prompt injection, `local_web_search` tool registration, Unattended's per-call audit logging |
 | `backup.test.ts` | Backup-before-edit decision logic: pre-mutation snapshot, fail-closed |
 | `credits.test.ts` | OpenRouter balance parsing and formatting (`CreditBalance`) |
-| `model-page-nav-patch.test.ts` | Model-selector bundle patch: anchor edits, idempotence, fail-closed on unknown bundle |
+| `model-picker.test.ts` | Frecency ordering (recency decay, local-provider boost), usage IO (record, atomic save, tolerant load), substring filtering, page-jump clamping, key classification (printables, backspace, PageUp/PageDown incl. modifier variants), `modelPicker:false` opt-out, `/models` argument resolution |
 | `rules.test.ts` | Remembered-decision soft rules ("Always" confirmations) validation and matching |
 | `sandbox.test.ts` | Bwrap command-line assembly: arg building, credential shadowing, pure (no spawn) |
 | `sensitive-paths.test.ts` | Sensitive read-target denylist matching |
 | `transcription.test.ts` | Audio transcription tool (`transcribe_audio`) logic |
 
-Expected result: `pass 289, skip 1, fail 0`.
+Expected result: `pass 294, skip 1, fail 0`.
 
 ## Testing without exposing credentials
 
@@ -38,7 +38,7 @@ All secrets in tests are fabricated (`sk-FAKE…`, `AKIAIOSFODNN7EXAMPLE`, dummy
 
 ## Loader smoke (headless, already run)
 
-Loading the entry through Pi's real extension loader must produce zero errors and register: commands `context, mode, effort, scratchpad, bwrap, control-ui, clear, harness-rules`; shortcuts `alt+c, alt+e, alt+s, alt+h, alt+i, alt+t, alt+p, shift+tab`; handlers `session_start, before_agent_start, before_provider_request, tool_call, tool_result, agent_end, agent_settled, model_select, context, message_update`; two entry renderers. Reproduce with a small script calling `loadExtensions([...control-plane.ts], repoRoot)` from `@earendil-works/pi-coding-agent`'s loader module.
+Loading both entries through Pi's real extension loader must produce zero errors. `control-plane.ts` registers: commands `context, mode, effort, scratchpad, bwrap, control-ui, clear, harness-rules`; shortcuts `alt+c, alt+e, alt+s, alt+h, alt+i, alt+t, alt+p, shift+tab`; handlers `session_start, before_agent_start, before_provider_request, tool_call, tool_result, agent_end, agent_settled, model_select, context, message_update`; two entry renderers. `model-picker.ts` registers: command `models`; shortcut `alt+m`; handlers `model_select` (usage tracking), `session_start` (startup picker). Reproduce with a small script calling `loadExtensions([...control-plane.ts], repoRoot)` from `@earendil-works/pi-coding-agent`'s loader module.
 
 ## Live smoke suite (headless, automated)
 

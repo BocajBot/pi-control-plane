@@ -199,19 +199,21 @@ backgrounds; error surfaces remain distinct. These presentation changes do not
 remove tool results from model context.
 
 `/control-ui timing` reports first streamed text and total prompt duration,
-including model, tools and hooks. No live inference latency measurement was run.
-OpenRouter requests no longer trigger unsupported llama-swap token-count APIs.
-No model, thinking-effort, diagnostic pipeline or permission setting changed.
+including model, tools and hooks.
 
-Installed pi-lens uses `Code diagnostics` above input. This is a narrow vendor
-presentation patch, reproducible with:
+## Model picker modal (alt+m / /models)
 
-```sh
-node bin/style-pi-lens.mjs ~/.pi/agent/npm/node_modules/pi-lens/dist/index.js
-```
+The model picker is a `ctx.ui.custom` overlay: a one-line keymap header, a
+filter line (`> query`), and pi-tui's `SelectList` (15 visible). Printable keys
+extend the substring filter (rebuilt per keystroke), backspace edits it,
+↑↓/enter/esc go to the list, and PageUp/PageDown jump a page via
+`setSelectedIndex(±15)` — public component API only, no bundle patching (the
+retired `bin/patch-pi-model-page-nav.mjs` approach is archived under
+`~/.pi/agent/archive/`). At startup the same modal appears once; escape there
+quits pi (guarded by `isIdle` so only a human answering it can). Outside the
+TUI (`ctx.mode !== "tui"`), no modal is attempted — `/models <query>` switches
+directly and `/models` prints the frecency-ordered list.
 
-The script checks exact source anchors and saves `index.js.control-plane-backup`
-beside the bundle before editing. Package updates can replace the patch; inspect
-and archive the prior backup before reapplying to a new version. Restore the
-backup to undo the patch. Restart Pi to load the changed package reliably.
-Diagnostic contents, tools, language servers and diagnostics logic are unchanged.
+Historical note: an earlier vendor patch restyled pi-lens ("Code diagnostics"
+above input). pi-lens is no longer installed; the patch script is archived
+alongside the model-nav patch under `~/.pi/agent/archive/`.

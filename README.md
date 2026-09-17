@@ -130,6 +130,7 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 | `alt+t` | Tool-profile picker: modal with profile names in a left column (1/5 width) and, on the right, the selected profile's description over its tool list. ↑/↓ or j/k select, **enter** applies for this session only, **space** also saves it as the default for new sessions (written to `policy/profiles.json` as `defaultProfile`), esc closes; `*` marks the active profile, `(default)` the default one |
 | `alt+p` | Cycle mode: Plan → Manual → Accept → Auto |
 | `shift+tab` | Same cycle as `alt+p` (Claude-Code-style) |
+| `alt+m` | Model picker: typeahead with ↑↓ move, **PgUp/PgDn page**, enter select, esc close (also `/models`; `/models <query>` switches directly) |
 | `alt+i` | Diagnostics panel: a centered modal listing this session's diagnostic entries (declined reads, unattended action logs, verification events) |
 | `alt+h` | Hotkey cheat sheet as a centered modal (any key closes; `/hotkeys` lists everything) |
 
@@ -146,6 +147,17 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 - Malformed edits (broken markers, missing system-prompt section) are rejected whole — nothing half-applies.
 
 **shift+tab:** Pi's default binding for `shift+tab` is cycling the thinking level; that default is unbound in `~/.pi/agent/keybindings.json` (`"app.thinking.cycle": []`) so this extension can claim the key for the mode cycle. Thinking level is set with `/effort` instead.
+
+## Model picker (`alt+m` / `/models`)
+
+A typeahead model picker built entirely on public extension APIs — the isolated replacement for the retired `bin/patch-pi-model-page-nav.mjs`, which patched minified anchors inside pi's bundle and broke on every `pi update`. Paged navigation (PageUp/PageDown jump 15 models — the exact feature the patch existed for) is implemented via `SelectList.setSelectedIndex`, so it survives updates by construction.
+
+- `alt+m` or `/models` — the picker, on demand. Type to filter (substring), ↑↓ move, PgUp/PgDn page, enter selects, esc closes.
+- At interactive startup the picker also appears (frecency-ordered: most-used-recently first, local models leading while history is cold, usage tracked in `~/.pi/agent/model-usage.json`); esc at launch quits pi — no model chosen, no session. Disable the startup dialog with `"modelPicker": false` in `~/.pi/agent/settings.json` (usage tracking continues either way).
+- `/models <query>` (any mode, incl. RPC/print) — switch directly; exact `provider/model` wins, then unique substring match; ambiguous queries list their matches instead of guessing.
+- `pi.setModel` switches; pi itself persists the switched-to model as the default for new sessions.
+
+The native `/model` selector remains untouched and unpatched.
 
 ## Web search (`local_web_search` tool)
 
@@ -185,11 +197,12 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 | `src/control-plane/toggles.ts` | Verified excision of toggled-off sources from the system prompt. |
 | `src/control-plane/scratchpad.ts` | Structured working notes: validation, persistence/restoration, and rendering. Same patterns as `state.ts`, applied to its own entry type. |
 | `src/control-plane/sandbox.ts` | Bwrap command-line assembly and its own persisted on/off + network toggle. Pure: builds a command string, never spawns anything itself. Same patterns as `state.ts`/`scratchpad.ts`. |
+| `src/control-plane/model-picker.ts` | Pure model-picker logic: frecency ordering, usage IO, substring filtering, page-jump math, key classification. Wiring (SelectList modal, startup handler, `/models`, `alt+m`) lives in `extensions/model-picker.ts`. |
 | `src/control-plane/websearch.ts` | Pure searxng client (injected fetch): URL building, response parsing, result formatting. No Pi imports. |
 | `src/control-plane/commands.ts` | Argument parsing for every command (so bad input handling is testable). |
 | `src/control-plane/ui.ts` | All text formatting: status line, summaries, denial messages, the injected state block. |
 | `policy/default-policy.json` | Auto (unattended) policy rules: denied path names/substrings, whether bash is allowed (default: no), out-of-root allowlist prefixes (default: none). Also the credential-path source of truth `/bwrap`'s `$HOME` shadowing reuses. Edit carefully — an invalid or old-schema file makes Auto enforce read-only. |
-| `tests/` | 290 unit and harness tests. Run with `npm test`. |
+| `tests/` | 295 unit and harness tests. Run with `npm test`. |
 | `docs/` | Architecture, security model, and testing guides. |
 | `IMPLEMENTATION-PROMPT.md` | The specification the first milestone was built from. Milestone 2 (unattended autonomy, web search, scratchpad, out-of-root allowlists) is documented in `docs/ARCHITECTURE.md`. |
 
@@ -198,7 +211,7 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 - `/compact` — summarize older context to free the window (the control plane points at this, it does not replace it)
 - `/new` or `/clear` — fresh session (`/clear` is this extension's alias)
 - `/hotkeys` — list active keybindings
-- `/model` — switch models
+- `/model` — pi's native model selector (unpatched); this package's `/models` + `alt+m` are the typeahead alternative with paging
 - `/reload` — reload extensions after editing this repo
 
 ## Current limitations
@@ -215,7 +228,7 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 ## Development
 
 ```bash
-npm test        # 290 tests, no dependencies, uses Node's built-in test runner
+npm test        # 295 tests, no dependencies, uses Node's built-in test runner
 /reload         # inside pi, after editing extension code
 ```
 
