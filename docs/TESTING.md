@@ -11,7 +11,7 @@ No dependencies: Node 22's built-in test runner executes the TypeScript directly
 | File | Covers |
 |---|---|
 | `state.test.ts` | Safe defaults, serialization round-trip, malformed/unknown-schema rejection, compaction-safe restoration, guard-never-restored, cycle orders (all four modes), no fallback above Read-only |
-| `tool-policy.test.ts` | Classification (incl. `local_web_search` as read), canonicalization (traversal, symlink escape, malformed paths — uses real temp dirs and symlinks), deny patterns, policy validation (schema v2, `allowPathPrefixes`), the full phase × autonomy decision matrix incl. Unattended, out-of-root allowlist behavior, invalid-policy fallback |
+| `tool-policy.test.ts` | Classification (incl. `local_web_search` and pi-web-access's `fetch_content`/`get_search_content`/`source_check` as read; remote-vs-local URL targeting), canonicalization (traversal, symlink escape, malformed paths — uses real temp dirs and symlinks), deny patterns, policy validation (schema v2, `allowPathPrefixes`), the full phase × autonomy decision matrix incl. Unattended, out-of-root allowlist behavior, invalid-policy fallback |
 | `redaction.test.ts` | Every redaction category with fabricated credentials; non-secret text preserved; determinism |
 | `context-snapshot.test.ts` | Normalization stability, hash stability, no-raw-secret persistence, all diff categories, deterministic ordering |
 | `context-editor.test.ts` | Context serialization/parsing round-trip, overlay merge/invalidation, edit application |
@@ -30,7 +30,7 @@ No dependencies: Node 22's built-in test runner executes the TypeScript directly
 | `sensitive-paths.test.ts` | Sensitive read-target denylist matching |
 | `transcription.test.ts` | Audio transcription tool (`transcribe_audio`) logic |
 
-Expected result: `pass 288, skip 1, fail 0`.
+Expected result: `pass 289, skip 1, fail 0`.
 
 ## Testing without exposing credentials
 

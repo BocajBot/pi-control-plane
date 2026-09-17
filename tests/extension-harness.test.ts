@@ -1418,12 +1418,20 @@ test("applied profile persists and is restored in a new session", async () => {
   const ctx = makeCtx({ cwd: root });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
   await pi.commands.get("context")!.handler("profile reading", ctx);
-  assert.deepEqual([...pi.activeTools].sort(), ["find", "grep", "ls", "read"]);
+  // The fake registry registers local_web_search but no pi-web-access
+  // tools, so the reading profile's active set is its intersection with the
+  // registry: the four core reads plus local_web_search.
+  assert.deepEqual([...pi.activeTools].sort(), ["find", "grep", "local_web_search", "ls", "read"]);
 
   const pi2 = new (pi.constructor as new () => FakePi)();
   await controlPlaneExtension(pi2 as never);
   const ctx2 = makeCtx({ cwd: root, branchEntries: pi.entries.filter((e) => e.customType === STATE_ENTRY_TYPE) });
   await pi2.emit("session_start", { type: "session_start", reason: "resume" }, ctx2);
+  // The fake's initial active set is its seven core tools; restore only
+  // removes toggled-off tools (re-adding is not its job), so local_web_search
+  // - enabled by the profile but absent from the fake's initial set - does
+  // not reappear here. Real pi starts with every registered tool active, so
+  // the restored session keeps it.
   assert.deepEqual([...pi2.activeTools].sort(), ["find", "grep", "ls", "read"], "profile toggles reapplied on restore");
 });
 

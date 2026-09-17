@@ -75,6 +75,13 @@ test("tool classification: read tools known, unknown tools never safe", () => {
   assert.equal(classifyTool("ls"), "read");
   assert.equal(classifyTool("local_web_search"), "read");
   assert.equal(classifyTool("transcribe_audio"), "read");
+  // pi-web-access's non-search tools are network reads; the duplicate
+  // web_search stays force-disabled via profiles and is NOT read-classified
+  // (treating it as read would defeat the denylist if ever re-enabled).
+  assert.equal(classifyTool("fetch_content"), "read");
+  assert.equal(classifyTool("get_search_content"), "read");
+  assert.equal(classifyTool("source_check"), "read");
+  assert.equal(classifyTool("web_search"), "unknown");
   assert.equal(classifyTool("edit"), "mutate");
   assert.equal(classifyTool("write"), "mutate");
   assert.equal(classifyTool("bash"), "shell");
@@ -86,6 +93,45 @@ test("tool classification: read tools known, unknown tools never safe", () => {
   assert.equal(classifyTool("harness_find_capability"), "harness");
   assert.equal(classifyTool("browser_navigate"), "unknown");
   assert.equal(classifyTool(""), "unknown");
+});
+
+test("fetch_content: remote urls read freely, local-file urls get full path checks", () => {
+  const root = fs.realpathSync(makeTempRoot());
+  // Remote urls (scheme-qualified) are not filesystem paths: allowed in Plan,
+  // no confirmation, no path resolution.
+  const remote = evaluateToolCall(
+    evalInput({ toolName: "fetch_content", phase: "plan", autonomy: "read-only", projectRoot: root, cwd: root, toolInput: { url: "https://example.com/article" } }),
+  );
+  assert.equal(remote.action, "allow");
+  assert.equal(remote.rule, "read-only:read");
+  // A LOCAL url (scheme-less, or file://) IS a filesystem path: the same
+  // canonicalization and credential deny list as the read tool apply, in
+  // every mode that checks reads. Auto (unattended) categorically blocks a
+  // protected path rather than confirming it.
+  const home = process.env.HOME ?? "/home";
+  const localCred = evaluateToolCall(
+    evalInput({
+      toolName: "fetch_content",
+      phase: "execute",
+      autonomy: "unattended",
+      projectRoot: root,
+      cwd: root,
+      toolInput: { url: `file://${home}/.env` },
+    }),
+  );
+  assert.equal(localCred.action, "block");
+  assert.equal(localCred.rule, "restricted:credential-path");
+  // The plain-path form of the same local read is covered identically.
+  const bareCred = evaluateToolCall(
+    evalInput({ toolName: "fetch_content", phase: "execute", autonomy: "unattended", projectRoot: root, cwd: root, toolInput: { url: `${home}/.env` } }),
+  );
+  assert.equal(bareCred.action, "block");
+  assert.equal(bareCred.rule, "restricted:credential-path");
+  // A local url inside the project root is an ordinary read.
+  const localInRoot = evaluateToolCall(
+    evalInput({ toolName: "fetch_content", phase: "execute", autonomy: "unattended", projectRoot: root, cwd: root, toolInput: { url: `${root}/notes/video.mp4` } }),
+  );
+  assert.equal(localInRoot.action, "allow");
 });
 
 test("harness shell: named 'shell' risk, inside-root resolves, and Restricted still blocks (non-loosening)", () => {

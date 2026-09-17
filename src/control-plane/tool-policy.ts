@@ -37,6 +37,18 @@ import {
 /** "transcribe_audio" (see transcription.ts) reads one file the user named
  * and returns text; it writes nothing, so it is a read tool by the same
  * reasoning as local_web_search above. */
+/** pi-web-access's non-search tools are network reads: fetch_content turns
+ * URLs into readable markdown/text, get_search_content retrieves cached
+ * search results, source_check verifies sourcing. They write nothing, so
+ * they are read tools - available in every mode - rather than unknown
+ * tools (blocked in Plan, confirmed or silently allowed in Auto per the
+ * ladder). The search duplicate web_search is NOT here: it stays force-
+ * disabled via policy/profiles.json alwaysDisabledTools in favour of
+ * local_web_search (one tool per job; see the README collision note).
+ * fetch_content's "url" also accepts LOCAL files (e.g. a video to analyze);
+ * targetPathOf treats a scheme-less url as a filesystem path so those reads
+ * go through the same canonicalization and credential-deny checks as any
+ * other read. */
 export const READ_TOOLS: ReadonlySet<string> = new Set([
   "read",
   "grep",
@@ -44,6 +56,9 @@ export const READ_TOOLS: ReadonlySet<string> = new Set([
   "ls",
   "local_web_search",
   "transcribe_audio",
+  "fetch_content",
+  "get_search_content",
+  "source_check",
 ]);
 export const MUTATING_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
 export const SHELL_TOOLS: ReadonlySet<string> = new Set(["bash"]);
@@ -242,7 +257,24 @@ export interface EvaluateInput {
 
 function targetPathOf(toolInput: Record<string, unknown>): string | null {
   const p = toolInput["path"];
-  return typeof p === "string" && p.trim().length > 0 ? p : null;
+  if (typeof p === "string" && p.trim().length > 0) return p;
+  // A scheme-less "url" (or a file:// one) is a LOCAL filesystem path - the
+  // form fetch_content uses for local video/image files. Treat it as the
+  // target so those reads go through canonicalization and the credential
+  // deny list. Scheme-qualified urls (http://, https://, ...) are remote:
+  // not filesystem paths, so they stay null and only the read classification
+  // applies. Misreading a bare remote host as a path can only make the checks
+  // stricter, never looser; the dangerous direction would be missing local
+  // coverage, which this closes.
+  const u = toolInput["url"];
+  if (typeof u === "string" && u.trim().length > 0) {
+    if (u.startsWith("file://")) {
+      const local = u.slice("file://".length);
+      return local.trim().length > 0 ? local : null;
+    }
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(u)) return u;
+  }
+  return null;
 }
 
 function block(

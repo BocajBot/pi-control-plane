@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "profiles": {
     "minimal": {
-      "description": "Core coding tools only \u2014 everything else toggled off",
+      "description": "Core coding tools + web search and URL fetch \u2014 everything else toggled off",
       "tools": [
         "read",
         "bash",
@@ -10,16 +10,20 @@
         "write",
         "grep",
         "find",
-        "ls"
+        "ls",
+        "local_web_search",
+        "fetch_content"
       ]
     },
     "reading": {
-      "description": "Read-oriented tools only (pairs well with Discuss/Plan phases)",
+      "description": "Read-oriented tools only, incl. web search and URL fetch (pairs well with Plan)",
       "tools": [
         "read",
         "grep",
         "find",
-        "ls"
+        "ls",
+        "local_web_search",
+        "fetch_content"
       ]
     },
     "voicemail": {

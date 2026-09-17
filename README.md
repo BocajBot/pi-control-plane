@@ -71,7 +71,7 @@ See [TUI design](docs/TUI.md) for hierarchy, disclosure and state examples.
 - `/context recount` — re-count the last provider request with the model's own tokenizer (via llama-swap) and compare against pi's estimate. The same count feeds the footer's context segment automatically after every request.
 
 The exact count also drives context-fullness warnings: a warning notification at 75% of the window and an error-level one at 90%, each fired once until usage drops back below 75% (e.g. after `/compact`). This matters because pi's built-in auto-compaction watches its own estimate, which can be off by a large margin (46% observed) — the control plane warns from the accurate number so you can `/compact` before the window actually overflows.
-- `/context profile [name]` — tool profiles: named loadouts that enable exactly the listed tools and toggle everything else off (big context savings when many extensions are installed — e.g. `minimal` cut 19 of 26 tools in testing). No argument lists profiles and marks the active one; `all` re-enables everything *except* `policy/profiles.json`'s `alwaysDisabledTools` (see below) — `all` has never meant "literally every tool, no matter what" since that field was added. Ships with `minimal` (core coding tools) and `reading` (read-only tools). Define your own in `policy/profiles.json` — or just ask pi to "create a context profile for X": the bundled `create-context-profile` skill walks it through the schema, validation, and `/reload`. Applied profiles persist with the session like any toggle.
+- `/context profile [name]` — tool profiles: named loadouts that enable exactly the listed tools and toggle everything else off (big context savings when many extensions are installed — e.g. `minimal` cut 19 of 26 tools in testing). No argument lists profiles and marks the active one; `all` re-enables everything *except* `policy/profiles.json`'s `alwaysDisabledTools` (see below) — `all` has never meant "literally every tool, no matter what" since that field was added. Ships with `minimal` (core coding + web search and URL fetch) and `reading` (read tools, including web search and URL fetch). Define your own in `policy/profiles.json` — or just ask pi to "create a context profile for X": the bundled `create-context-profile` skill walks it through the schema, validation, and `/reload`. Applied profiles persist with the session like any toggle.
 - **`alwaysDisabledTools`** (`policy/profiles.json`, top-level, alongside `profiles`/`defaultProfile`): tools forced off every time *any* profile is applied — including `all` — regardless of which one. This is not another profile; it is a hard denylist layered on top of whichever allowlist a profile computes, specifically for when two installed extensions do the same job and you want exactly one of them reachable no matter which profile gets picked later. Ships with `["web_search"]`: `pi-web-access`, if installed, registers a tool of that exact name, and this package's own `local_web_search` (see below) is the local/free alternative — both being active at once means the model has to guess between two tools for one job, and Pi's tool registry has no picker to help it the way command-name collisions get one (see the `local_web_search` section for why that matters). A tool individually re-enabled afterward with `/context toggle tool:<name>` stays that way for the session — this only guards *bulk* profile application, never a deliberate single-tool override. Restored sessions are never touched by it; only fresh ones.
 - `/context toggle <name>` — turn a source on or off for subsequent turns:
   - `tool:<name>` — genuinely removed from the model's tool list.
@@ -153,6 +153,12 @@ Registered directly by this package (no separate extension needed): searches the
 
 **Named `local_web_search`, not the more obvious `web_search`:** if you also have `pi-web-access` (or any other extension shipping a tool literally named `web_search`) installed, Pi's tool registry is a flat last-registered-wins map — there is no collision error and no picker the way colliding *command* names get one. A same-named tool from an extension that loads later in `packages` (`~/.pi/agent/settings.json`) would silently and completely replace this one; the model would never see it again, with no warning anywhere. Check `pi list` and grep for `registerTool` in anything else you install before assuming a new tool this package adds is actually reaching the model.
 
+## Web access (`fetch_content` / `get_search_content` / `source_check`)
+
+pi-web-access's non-search tools provide what `local_web_search` deliberately does not: URL reading. `fetch_content` turns URLs (web pages, GitHub repos/PRs/issues, YouTube, PDFs) into readable markdown or text; `get_search_content` retrieves cached search results; `source_check` verifies sourcing. All three are classified as **read tools** in `tool-policy.ts` — available in every mode, never confirmation-gated, because they write nothing. `minimal` and `reading` ship with `local_web_search` + `fetch_content` enabled; the other two stay off by default (enable with `/context toggle tool:source_check` or a custom profile).
+
+One nuance the classification covers: `fetch_content` also accepts **local files** (a video or image path to analyze). A scheme-less `url` (or a `file://` one) is treated as a filesystem path target, so those reads go through the same canonicalization and credential-deny checks as the `read` tool — `fetch_content` with `url: ~/.env` is blocked in Auto exactly like `read` would be. Scheme-qualified remote URLs are not filesystem paths and get no path checks — fetching a remote page is the whole point.
+
 ## Example workflow
 
 ```text
@@ -183,7 +189,7 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 | `src/control-plane/commands.ts` | Argument parsing for every command (so bad input handling is testable). |
 | `src/control-plane/ui.ts` | All text formatting: status line, summaries, denial messages, the injected state block. |
 | `policy/default-policy.json` | Auto (unattended) policy rules: denied path names/substrings, whether bash is allowed (default: no), out-of-root allowlist prefixes (default: none). Also the credential-path source of truth `/bwrap`'s `$HOME` shadowing reuses. Edit carefully — an invalid or old-schema file makes Auto enforce read-only. |
-| `tests/` | 289 unit and harness tests. Run with `npm test`. |
+| `tests/` | 290 unit and harness tests. Run with `npm test`. |
 | `docs/` | Architecture, security model, and testing guides. |
 | `IMPLEMENTATION-PROMPT.md` | The specification the first milestone was built from. Milestone 2 (unattended autonomy, web search, scratchpad, out-of-root allowlists) is documented in `docs/ARCHITECTURE.md`. |
 
@@ -209,7 +215,7 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 ## Development
 
 ```bash
-npm test        # 289 tests, no dependencies, uses Node's built-in test runner
+npm test        # 290 tests, no dependencies, uses Node's built-in test runner
 /reload         # inside pi, after editing extension code
 ```
 
