@@ -23,7 +23,8 @@ relevant source, tests, and `docs/` before changing Pi behavior.
 - **Persistent work state:** `/scratchpad` survives compaction and remains
   injected. `todo` creates visible tasks. Open tasks stay in a noncapturing
   top-right widget; `done` removes task state and writes `Task [id] -
-  description has completed.` into transcript. `/clear` aliases Pi `/new`.
+  description has completed.` into transcript. `/todo-clear` removes all tasks
+  (including unfinished ones) without completion entries. `/clear` aliases Pi `/new`.
 - **Custom model surface:** `/models` and `alt+m` provide typeahead, frecency,
   direct model references, PageUp/PageDown navigation, and OpenRouter
   input/output price badges. Native `/model` also keeps OpenRouter price badges
@@ -121,7 +122,10 @@ Multi-step work appears in a noncapturing task overlay at the top-right. Open
 tasks use hollow bullets. Completing a task removes it from the live list and
 writes `Task [id] - description has completed.` into the conversation. Updates
 repaint immediately, and workspace-scoped state lets new Pi sessions and
-windows resume the same unfinished list.
+windows resume the same unfinished list. Use `/todo-clear` to remove all tasks
+immediately and persist an empty list, without starting a new session. This is
+separate from the model's `todo clear` operation, which only removes legacy
+completed tasks.
 
 Use `/control-ui details` for full path, branch, session name, model/effort,
 sent/received tokens, cache usage, cost, context counts, live draft counters,

@@ -2711,6 +2711,21 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
   // ---- commands ----
 
+  pi.registerCommand("todo-clear", {
+    description: "Clear all To-Do tasks, including unfinished tasks",
+    handler: async (args, ctx) => {
+      if (args.trim()) {
+        ctx.ui.notify("Usage: /todo-clear (clears all tasks)", "warning");
+        return;
+      }
+      const count = todo.items.length;
+      todo = { ...todo, items: [] };
+      persistTodo(ctx);
+      refreshTodoWidget();
+      ctx.ui.notify(count === 0 ? "No tasks to clear." : `Cleared ${count} task${count === 1 ? "" : "s"}.`, "info");
+    },
+  });
+
   pi.registerCommand("control-reload", {
     description: "Reload Pi resources (same as /reload)",
     handler: async (_args, ctx) => {

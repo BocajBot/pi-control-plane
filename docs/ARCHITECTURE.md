@@ -37,6 +37,11 @@ Verified against pi 0.85.1 (`dist/core/extensions/types.d.ts`):
 - Restoration (`state.ts: restoreFromEntries`) walks the branch backward, takes the newest entry that passes strict validation, ignores malformed ones, and falls back to the read-only default (Plan) when prior state existed but was malformed — never to an edit mode. A session with nothing ever persisted opens in Auto (`freshState`). An unknown `schemaVersion` is malformed by definition (bumped 1 -> 2 when the task-brief subsystem was removed, so a session saved under the old shape restores read-only rather than partially).
 - Task state also uses an atomic workspace-keyed JSON file under `~/.pi/agent/state/control-plane/todos/` (or `PI_CONTROL_PLANE_STATE_DIR`). Startup selects the newer valid session or workspace snapshot. This lets separate Pi sessions/windows in the same workspace resume one workload without putting runtime state in the repository.
 
+`/todo-clear` replaces the in-memory task items with an empty list (preserving
+monotonic task IDs), then uses the same session/workspace persistence and widget
+refresh path as the `todo` tool. It emits no completion entries. The next turn's
+system prompt omits the empty task block; existing transcript entries remain.
+
 ## Context snapshot model
 
 Snapshots are **content-free**: names, paths, counts, lengths, and sha256 hashes of *redacted* text — never raw prompt or message content. Lists are sorted so identical state produces identical snapshots (`context-snapshot.ts`), which makes `/context diff` (`context-diff.ts`) deterministic. The one stored snapshot (`previousContextSnapshot`, the diff baseline) is therefore safe to persist in the session file.

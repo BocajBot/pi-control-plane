@@ -2035,6 +2035,62 @@ test("top-right context tools header reads active registry on every render", asy
   for (const width of [1, 12, 40, 80]) assert.ok(header.render(width).every((line) => line.length <= width));
 });
 
+test("/todo-clear removes unfinished tasks, persists empty state, and refreshes the widget", async () => {
+  const oldStateDirectory = process.env.PI_CONTROL_PLANE_STATE_DIR;
+  const stateDirectory = tmpRoot();
+  const workspace = tmpRoot();
+  process.env.PI_CONTROL_PLANE_STATE_DIR = stateDirectory;
+  try {
+    const pi = await boot();
+    const ctx = makeCtx({ branchEntries: [], cwd: workspace });
+    let renderRequests = 0;
+    let overlay: { render(width: number): string[] } | undefined;
+    ctx.ui.setWidget = (key: string, factory: unknown) => {
+      if (key !== "control-plane-todo" || typeof factory !== "function") return;
+      factory({
+        requestRender: () => { renderRequests++; },
+        showOverlay: (component: { render(width: number): string[] }) => {
+          overlay = component;
+          return { hide() {} };
+        },
+      }, { fg: (_color: string, text: string) => text });
+    };
+    await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    const tool = pi.tools.get("todo")!;
+    await tool.execute("add-1", { op: "add", text: "Unfinished task" }, undefined, undefined, ctx);
+    await tool.execute("add-2", { op: "add", text: "Another unfinished task" }, undefined, undefined, ctx);
+    assert.match(overlay!.render(44).join("\n"), /Unfinished task/);
+    const command = pi.commands.get("todo-clear");
+    assert.ok(command, "/todo-clear is registered");
+    const before = renderRequests;
+    await command.handler("", ctx);
+    assert.ok(renderRequests > before, "clear requests a fresh frame");
+    assert.deepEqual(overlay!.render(44), []);
+    const { readWorkspaceTodo } = await import("../src/control-plane/todo-store.ts");
+    const saved = readWorkspaceTodo(workspace).todo;
+    assert.ok(saved);
+    assert.deepEqual(saved.items, []);
+    assert.equal(saved.nextId, 3, "clearing must not reuse task IDs");
+    assert.deepEqual(pi.entries.filter((entry) => entry.customType === "pi-control-plane-todo").at(-1)?.data, saved);
+    assert.ok(!pi.entries.some((entry) => entry.customType === "pi-control-plane-todo-complete"), "clearing is not completion");
+    const reloaded = await boot();
+    const resumedCtx = makeCtx({ branchEntries: [], cwd: workspace });
+    await reloaded.emit("session_start", { type: "session_start", reason: "new" }, resumedCtx);
+    const listed = await reloaded.tools.get("todo")!.execute("list", { op: "list" }, undefined, undefined, resumedCtx);
+    assert.match(JSON.stringify(listed), /No tasks/);
+    await command.handler("", ctx);
+    assert.ok(ctx.notifications.some((n) => /No tasks to clear/.test(n.message)));
+    await tool.execute("add-3", { op: "add", text: "Preserve on invalid args" }, undefined, undefined, ctx);
+    await command.handler("unexpected", ctx);
+    assert.equal(readWorkspaceTodo(workspace).todo?.items.length, 1);
+  } finally {
+    if (oldStateDirectory === undefined) delete process.env.PI_CONTROL_PLANE_STATE_DIR;
+    else process.env.PI_CONTROL_PLANE_STATE_DIR = oldStateDirectory;
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("todo uses top-right overlay, repaints immediately, and persists across new sessions", async () => {
   const oldStateDirectory = process.env.PI_CONTROL_PLANE_STATE_DIR;
   const stateDirectory = tmpRoot();

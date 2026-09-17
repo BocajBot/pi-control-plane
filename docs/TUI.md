@@ -214,6 +214,9 @@ Mutations request an immediate render. Hollow radial bullets mark open tasks.
 Completing a task removes it from the live list and writes `Task [id] -
 description has completed.` into the conversation. Rounded borders and theme
 colors follow the active theme. Six tasks display before a `+N more` summary.
+`/todo-clear` removes all tasks, including unfinished ones, immediately hides the
+empty overlay, and notifies how many were removed. It saves the empty list across
+sessions without adding task-completion entries.
 
 `/control-ui timing` shows the workload ledger: last turn (first streamed text
 + total, including model, tools and hooks), cumulative model time across all
