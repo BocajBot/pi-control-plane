@@ -34,6 +34,14 @@ relevant source, tests, and `docs/` before changing Pi behavior.
   save the highlighted model as the global default, and OpenRouter
   input/output price badges. Native `/model` also keeps OpenRouter price badges
   for both all and scoped lists.
+- **Temporary model swap:** `/swap <model> until <condition>` (or `for <N>
+  prompts|minutes`) switches the session to another model immediately and
+  reverts to the original when the condition is met — checked at turn
+  boundaries and on a 20s idle timer. Free-text conditions are judged by the
+  saved global default model (the trusted evaluator) fed ground-truth facts
+  measured by the control plane; `/swap status` and `/swap cancel` manage it;
+  a manual model change cancels an active swap; state persists with the
+  session.
 - **Native `/model` patch:** Pi 0.85.1 source and executable bundle under
   `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/` restore
   cached OpenRouter catalog costs after scoped-model refresh. `pi update` can
@@ -61,11 +69,19 @@ relevant source, tests, and `docs/` before changing Pi behavior.
 - Preserve both model pickers: `/models` is extension-owned; `/model` is
   native Pi with installed-runtime price repair. A fix to one does not repair
   the other.
+- Preserve the swap trust boundary: a free-text condition is judged only by
+  the saved global default model from ground-truth facts — never by the
+  swapped-to model, the working session model, or any model-supplied claim.
+  A non-verdict evaluator reply is retried, never guessed. Reverts go only to
+  the captured `originalModel`.
 - Preserve task persistence, wrapping, overlay placement, completion removal,
   and completion transcript entries together. Do not reintroduce completed
   task rows or a duplicate task tool.
 - Preserve live credit updates from completed OpenRouter responses; do not
-  defer balance changes until next prompt.
+  defer balance changes until next prompt. The cost projection floor
+  (`baseline - reportedCost`) assumes balance only falls, so a snapshot above
+  the baseline is treated as an account top-up and rebaselines the projection
+  while a cost is being projected.
 - Preserve user-local configuration and unrelated dirty files. Never print or
   persist OpenRouter keys, provider credentials, or raw sensitive context.
 
@@ -214,6 +230,8 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 
 | Key | Action |
 |---|---|
+| `alt+b` | Toggle a live **bash output** widget above the editor: the tail of the running (or last) bash call, with elapsed time and running/done/failed status. Hidden by default and never written to the transcript; output is captured even while hidden, so pressing `alt+b` mid-command shows what has already printed |
+| `ctrl+alt+b` `ctrl+alt+b` | Move the running bash command to a **background task** (pi-background-tasks). Pi has no per-tool-call detach, so this aborts the foreground call — and with it the agent turn — and **re-runs the command from the beginning** as a task; side effects it already performed happen again. The first press only prints the warning, the second acts. Output then goes to the task log (`/logs <id>`), and the widget shows `background` |
 | `alt+c` | Toggle a context-preview widget above the editor |
 | `alt+e` | Open the session context in **nvim** to view and edit it |
 | `alt+s` | **Send preview**: everything the next message will send — system prompt (with the auto-appended control-plane block shown read-only), full history, and your unsent draft — in nvim, editable |
@@ -250,6 +268,54 @@ A typeahead model picker built entirely on public extension APIs — the isolate
 
 Native `/model` retains its own selector. Its installed-runtime scoped
 OpenRouter pricing repair is documented in the continuity contract above.
+
+## Temporary model swap (`/swap`)
+
+Switch to another model for a while — because a long unattended job should run
+on a cheaper model until a budget threshold trips, or you want a stronger model
+only for the next few prompts — and revert automatically:
+
+- `/swap <model> until <free-text condition>` — the condition is judged by the
+  **trusted evaluator**: the saved global default model (Ctrl+s in `/models`);
+  falls back to the current session model if no default is saved. The evaluator
+  never sees the conversation — it receives only the condition text plus
+  ground-truth facts the control plane measured itself: elapsed time, prompts
+  completed since the swap started, OpenRouter balance now vs. at swap start
+  (from the live credit tracker), and the latest user message. It must answer
+  MET or NOT MET; anything else is discarded and retried at the next check,
+  never guessed. Example: `/swap anthropic/claude-haiku until openrouter
+  balance drops by $5`.
+- `/swap <model> for <N> prompts` — reverts after N user turns. Deterministic:
+  no evaluator call.
+- `/swap <model> for <N> minutes` — reverts after a deadline. Deterministic:
+  no evaluator call. The deadline is checked while idle too, so it fires even
+  if you never send another prompt.
+- `/swap status` — the active swap, its condition, and progress.
+- `/swap cancel` — revert to the original model now.
+
+Checking cadence: at every turn end and on a 20-second timer while idle, so
+the swap happens at the first turn boundary after the condition is met — never
+mid-stream. The swap is applied immediately with `pi.setModel` (session-only,
+exactly like `/models`); the status line gains a `⇄ <model> (<condition>)`
+segment while it is active.
+
+Lifecycle rules:
+
+- State is a session entry (same persistence as `/mode` state), so the swap
+  survives quit/reload: on restore it re-arms, and if the deadline elapsed
+  while the session was closed it reverts immediately.
+- Manually changing the model (`/model`, `/models`, `alt+m`, model cycling)
+  cancels the swap without touching your new choice — you picked a different
+  model on purpose. The extension's own switch/revert does not trigger this.
+- If reverting fails (provider auth gone, model unavailable), the swap is
+  dropped and you are told to switch manually — the state never claims to be
+  active while the model is not swapped.
+- Evaluator failures (unreachable evaluator, no auth) notify once and keep
+  retrying on later checks; the swap stays armed.
+
+The evaluator call is made directly from the extension via the provider's
+`streamSimple` with the registry-resolved API key, so local models
+(llama-swap) work as evaluators without any cloud key.
 
 ## Web search (`local_web_search` tool)
 
@@ -290,12 +356,13 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 | `src/control-plane/scratchpad.ts` | Structured working notes: validation, persistence/restoration, and rendering. Same patterns as `state.ts`, applied to its own entry type. |
 | `src/control-plane/sandbox.ts` | Bwrap command-line assembly and its own persisted on/off + network toggle. Pure: builds a command string, never spawns anything itself. Same patterns as `state.ts`/`scratchpad.ts`. |
 | `src/control-plane/model-picker.ts` | Pure model-picker logic: frecency ordering, usage IO, substring filtering, page-jump math, key classification. Wiring (SelectList modal, startup handler, `/models`, `alt+m`) lives in `extensions/model-picker.ts`. |
+| `src/control-plane/model-swap.ts` | Temporary model swap: `/swap` argument parsing, strict state validation/restoration (sandbox.ts pattern), deterministic condition math (prompts, minutes), the trusted-evaluator prompt/reply contract, and status rendering. Wiring (`pi.setModel`, hooks, timer, evaluator call) lives in `extensions/control-plane.ts`. |
 | `src/control-plane/turn-timing.ts` | Workload timing ledger: per-turn records (TTFT + total), cumulative totals, strict validation, compaction-safe restoration, footer and summary rendering. |
 | `src/control-plane/websearch.ts` | Pure searxng client (injected fetch): URL building, response parsing, result formatting. No Pi imports. |
 | `src/control-plane/commands.ts` | Argument parsing for every command (so bad input handling is testable). |
 | `src/control-plane/ui.ts` | All text formatting: status line, summaries, denial messages, the injected state block. |
 | `policy/default-policy.json` | Auto (unattended) policy rules: denied path names/substrings, whether bash is allowed (default: no), out-of-root allowlist prefixes (default: none). Also the credential-path source of truth `/bwrap`'s `$HOME` shadowing reuses. Edit carefully — an invalid or old-schema file makes Auto enforce read-only. |
-| `tests/` | 301 unit and harness tests. Run with `npm test`. |
+| `tests/` | 356 unit and harness tests. Run with `npm test`. |
 | `docs/` | Architecture, security model, and testing guides. |
 | `IMPLEMENTATION-PROMPT.md` | The specification the first milestone was built from. Milestone 2 (unattended autonomy, web search, scratchpad, out-of-root allowlists) is documented in `docs/ARCHITECTURE.md`. |
 

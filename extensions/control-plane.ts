@@ -11,6 +11,17 @@
  */
 
 import { CreditBalance, openRouterMessageCost, readOpenRouterBalance } from "../src/control-plane/credits.ts";
+import {
+  buildEvaluationPrompt,
+  conditionMet,
+  inactiveSwapEntry,
+  parseEvaluationReply,
+  parseSwapCommand,
+  restoreSwapFromEntries,
+  swapStatusLines,
+  swapStatusSegment,
+} from "../src/control-plane/model-swap.ts";
+import { SWAP_ENTRY_TYPE, SWAP_SCHEMA_VERSION, type SwapState } from "../src/control-plane/types.ts";
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -74,6 +85,7 @@ import {
 } from "../src/control-plane/context-editor.ts";
 import { buildSnapshot, sha256 } from "../src/control-plane/context-snapshot.ts";
 import { redactSecrets } from "../src/control-plane/redaction.ts";
+import { resolveModelArgument } from "../src/control-plane/model-picker.ts";
 import {
   buildSandboxedCommand,
   describeSandbox,
@@ -139,6 +151,17 @@ import {
   restoreRulesFromEntries,
 } from "../src/control-plane/rules.ts";
 import {
+  applyBashOutput,
+  backgroundTaskName,
+  type BashStreamState,
+  endBashStream,
+  extractStreamText,
+  isDoublePress,
+  markBackgrounded,
+  renderBashStream,
+  startBashStream,
+} from "../src/control-plane/bash-stream.ts";
+import {
   buildInjectionBlock,
   contextWarningLevel,
   compactFooterState,
@@ -147,6 +170,7 @@ import {
   formatContextWarning,
   formatDenial,
   formatDraftCounter,
+  formatCacheRates,
   formatFooterStats,
   formatStatus,
   formatTokenCount,
@@ -203,6 +227,14 @@ const TRANSCRIPTION_TIMEOUT_MS = 900_000;
 
 const STATUS_KEY = "control-plane";
 const WIDGET_KEY = "control-plane-context";
+const BASH_STREAM_WIDGET_KEY = "control-plane-bash-stream";
+// pi-background-tasks eventbus v1 (docs/api/eventbus-v1.md in that package).
+const BG_REQUEST_CHANNEL = "pi-background-tasks:request:v1";
+const BG_RESPONSE_CHANNEL = "pi-background-tasks:response:v1";
+const BG_REQUEST_SCHEMA = "pi-background-tasks.extension-request.v1";
+const BG_RESPONSE_SCHEMA = "pi-background-tasks.extension-response.v1";
+/** How long to wait for pi-background-tasks to answer a run request. */
+const BG_RESPONSE_TIMEOUT_MS = 5000;
 /** Shared left grid: every extension-owned footer/header row starts at column 1. */
 const PAD = " ";
 
@@ -259,6 +291,8 @@ const DIAGNOSTIC_LABELS: Record<string, [DiagnosticRow["glyph"], DiagnosticTone,
   "remembered-rule-revoked": ["✓", "success", "Rule revoked"],
   "remembered-rules-cleared": ["✓", "success", "Rules cleared"],
   "phase-switch-via-dialog": ["✓", "success", "Phase switched"],
+  "bash-backgrounded": ["✓", "success", "Bash command re-run in background"],
+  "bash-background-failed": ["✗", "error", "Backgrounding failed"],
 };
 
 /** Visual form of a diagnostic entry (transcript row and alt+i panel). */
@@ -494,6 +528,12 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let lastPayloadMeta: { length: number; hash: string } | null = null;
   let projectRoot: string | null = null;
   let widgetVisible = false;
+  // Live bash output: the current (or last) call's bounded tail, shown only
+  // while the alt+b widget is open. Never written to the transcript.
+  let bashStream: BashStreamState | null = null;
+  let bashStreamVisible = false;
+  /** Timestamp of the last ctrl+alt+b, for the double-press backgrounding gesture. */
+  let lastBackgroundPress: number | null = null;
   let hotkeysModalOpen = false;
   // Context-editor state (memory only; raw context is never persisted).
   let lastContextMessages: MessageLike[] | null = null;
@@ -910,10 +950,235 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     pi.appendEntry(SANDBOX_ENTRY_TYPE, sandbox);
   };
 
+  // ---- temporary model swap (/swap) ----
+  // The session switches to another model now and reverts when a condition is
+  // met. Deterministic conditions (prompts, minutes) are checked locally;
+  // free-text conditions are judged by the trusted evaluator model (the saved
+  // global default) fed ground-truth facts measured here — never by the
+  // swapped-to model or anything the working model claims. State follows the
+  // sandbox.ts persistence pattern (appendEntry + strict validation).
+  let swap: SwapState | null = null;
+  let applyingSwap = false; // guards model_select from self-inflicted cancels
+  let swapEvalInFlight = false;
+  let swapEvalErrorNotified = false;
+  let swapTimer: ReturnType<typeof setInterval> | null = null;
+
+  const persistSwap = () => {
+    if (swap === null) return;
+    swap.updatedAt = new Date().toISOString();
+    pi.appendEntry(SWAP_ENTRY_TYPE, swap);
+  };
+
+  const stopSwapTimer = () => {
+    if (swapTimer !== null) {
+      clearInterval(swapTimer);
+      swapTimer = null;
+    }
+  };
+
+  const findModel = (ctx: ExtensionContext, provider: string, id: string) => {
+    const registry = (ctx as unknown as {
+      modelRegistry?: { getAll?: () => Array<{ provider: string; id: string }> };
+    }).modelRegistry;
+    const all = typeof registry?.getAll === "function" ? registry.getAll() : [];
+    return all.find((m) => m.provider === provider && m.id === id) ?? null;
+  };
+
+  /** Read the saved global default model (Ctrl+s in /models) as the trusted
+   * evaluator; falls back to the session's current model. */
+  const trustedEvaluatorModel = (ctx: ExtensionContext): { provider: string; id: string } | null => {
+    try {
+      const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
+      const parsed: unknown = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+        const provider = (parsed as Record<string, unknown>).defaultProvider;
+        const model = (parsed as Record<string, unknown>).defaultModel;
+        if (typeof provider === "string" && provider.length > 0 && typeof model === "string" && model.length > 0) {
+          return { provider, id: model };
+        }
+      }
+    } catch {
+      // Unreadable settings: fall through to the current session model.
+    }
+    const current = (ctx as unknown as { model?: { provider?: string; id?: string } }).model;
+    return current?.provider && current?.id ? { provider: current.provider, id: current.id } : null;
+  };
+
+  const latestUserMessage = (ctx: ExtensionContext): string | null => {
+    const entries = ctx.sessionManager.getEntries() as unknown as Array<{
+      type?: string;
+      message?: { role?: string; content?: unknown };
+    }>;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const message = entries[i]?.message;
+      if (message?.role !== "user") continue;
+      const text = extractText(message).trim();
+      return text.length === 0 ? null : text;
+    }
+    return null;
+  };
+
+  /** One trusted-evaluator call for a free-text condition. Guarded against
+   * overlap; failures notify once per swap and keep retrying on later ticks. */
+  const evaluateSwapCondition = async (ctx: ExtensionContext): Promise<void> => {
+    if (swap === null || swap.condition.kind !== "free-text" || swapEvalInFlight) return;
+    swapEvalInFlight = true;
+    try {
+      const evaluator = trustedEvaluatorModel(ctx);
+      if (evaluator === null) throw new Error("no evaluator model available");
+      const provider = (ctx as unknown as {
+        modelRegistry?: { getProvider?: (id: string) => unknown };
+      }).modelRegistry?.getProvider?.(evaluator.provider);
+      if (provider === undefined || provider === null) throw new Error(`provider ${evaluator.provider} unavailable`);
+      const evaluatorModel = findModel(ctx, evaluator.provider, evaluator.id);
+      if (evaluatorModel === null) throw new Error(`evaluator model ${evaluator.provider}/${evaluator.id} not found`);
+      const apiKey = await (ctx as unknown as {
+        modelRegistry?: { getApiKeyForProvider?: (id: string) => Promise<string | undefined> };
+      }).modelRegistry?.getApiKeyForProvider?.(evaluator.provider);
+      const facts = {
+        startedAt: swap.startedAt,
+        promptsSeen: swap.promptsSeen,
+        balanceAtStart: swap.balanceAtStart,
+        balanceNow: credits?.balance ?? null,
+        lastUserMessage: latestUserMessage(ctx),
+      };
+      const prompt = buildEvaluationPrompt(swap.condition.text, facts);
+      const stream = (provider as {
+        streamSimple: (
+          model: unknown,
+          context: { messages: Array<{ role: string; content: string }> },
+          options?: { apiKey?: string; signal?: AbortSignal; timeoutMs?: number },
+        ) => { result: () => Promise<{ content?: unknown }> };
+      }).streamSimple(
+        evaluatorModel,
+        { messages: [{ role: "user", content: prompt }] },
+        { apiKey, timeoutMs: 30_000 },
+      );
+      const message = await stream.result();
+      const text = extractText(message as { role?: string; content?: unknown });
+      const verdict = text === null || text.trim().length === 0 ? null : parseEvaluationReply(text);
+      if (verdict === true) {
+        await revertSwap(ctx, "the evaluator judged the condition met");
+      }
+    } catch (error) {
+      if (!swapEvalErrorNotified) {
+        swapEvalErrorNotified = true;
+        try {
+          ctx.ui.notify(`Swap condition evaluation failed (will retry): ${String(error)}`, "warning");
+        } catch {
+          /* ctx stale after session replacement */
+        }
+      }
+    } finally {
+      swapEvalInFlight = false;
+    }
+  };
+
+  const revertSwap = async (ctx: ExtensionContext, reason: string): Promise<void> => {
+    const active = swap;
+    if (active === null) return;
+    swap = null;
+    stopSwapTimer();
+    const original = findModel(ctx, active.originalModel.provider, active.originalModel.id);
+    if (original !== null) {
+      applyingSwap = true;
+      try {
+        await pi.setModel(original as never);
+      } catch {
+        try {
+          ctx.ui.notify(`Swap ended but reverting to ${active.originalModel.provider}/${active.originalModel.id} failed. Switch manually.`, "error");
+        } catch {
+          /* ctx stale */
+        }
+      } finally {
+        applyingSwap = false;
+      }
+    }
+    pi.appendEntry(SWAP_ENTRY_TYPE, inactiveSwapEntry(active, new Date().toISOString()));
+    try {
+      ctx.ui.notify(`Model swap ended (${reason}): back on ${active.originalModel.provider}/${active.originalModel.id}.`, "info");
+      updateStatus(ctx);
+    } catch {
+      /* ctx stale */
+    }
+  };
+
+  const cancelSwap = (ctx: ExtensionContext, reason: string): void => {
+    const active = swap;
+    if (active === null) return;
+    swap = null;
+    stopSwapTimer();
+    pi.appendEntry(SWAP_ENTRY_TYPE, inactiveSwapEntry(active, new Date().toISOString()));
+    ctx.ui.notify(`Model swap cancelled (${reason}); ${active.originalModel.provider}/${active.originalModel.id} stays as-is.`, "info");
+    updateStatus(ctx);
+  };
+
+  const startSwapTimer = (ctx: ExtensionContext) => {
+    stopSwapTimer();
+    swapTimer = setInterval(() => {
+      const active = swap;
+      if (active === null) {
+        stopSwapTimer();
+        return;
+      }
+      if (conditionMet(active, Date.now())) {
+        void revertSwap(ctx, "time was up");
+        return;
+      }
+      if (active.condition.kind === "free-text") void evaluateSwapCondition(ctx);
+    }, 20_000);
+    swapTimer.unref();
+  };
+
+  const beginSwap = async (ctx: ExtensionContext, target: { provider: string; id: string }, condition: SwapState["condition"]): Promise<void> => {
+    const current = (ctx as unknown as { model?: { provider?: string; id?: string } }).model;
+    if (!current?.provider || !current?.id) {
+      ctx.ui.notify("Swap failed: no active model to revert to.", "error");
+      return;
+    }
+    const targetModel = findModel(ctx, target.provider, target.id);
+    if (targetModel === null) {
+      ctx.ui.notify(`Swap failed: model ${target.provider}/${target.id} is not in the available model list.`, "error");
+      return;
+    }
+    applyingSwap = true;
+    try {
+      const ok = await pi.setModel(targetModel as never);
+      if (!ok) throw new Error("model switch failed");
+    } catch (error) {
+      ctx.ui.notify(`Swap failed: could not switch models (${String(error)}). Session model unchanged.`, "error");
+      return;
+    } finally {
+      applyingSwap = false;
+    }
+    swap = {
+      schemaVersion: SWAP_SCHEMA_VERSION,
+      swapModel: { provider: target.provider, id: target.id },
+      originalModel: { provider: current.provider, id: current.id },
+      condition,
+      applied: true,
+      startedAt: new Date().toISOString(),
+      balanceAtStart: credits?.balance ?? null,
+      promptsSeen: 0,
+      updatedAt: new Date().toISOString(),
+    };
+    swapEvalErrorNotified = false;
+    persistSwap();
+    startSwapTimer(ctx);
+    ctx.ui.notify(
+      `Swapped to ${target.provider}/${target.id} ${condition.kind === "free-text" ? `until: ${condition.text}` : condition.kind === "prompts" ? `for ${condition.remaining} more prompts` : `for ${condition.minutes} minutes`}. Reverts to ${current.provider}/${current.id} when met.`,
+      "info",
+    );
+    updateStatus(ctx);
+  };
+
+
   const updateStatus = (ctx: ExtensionContext) => {
     const percent = ctx.getContextUsage()?.percent ?? null;
     const base = formatStatus(state, percent, policy !== null, describeSandbox(sandbox));
-    ctx.ui.setStatus(STATUS_KEY, contextOverlay !== null ? `${base} | Context edited` : base);
+    const swapSegment = swapStatusSegment(swap, Date.now());
+    const line = swapSegment !== null ? `${base} · ${swapSegment}` : base;
+    ctx.ui.setStatus(STATUS_KEY, contextOverlay !== null ? `${line} | Context edited` : line);
   };
 
   const isBwrapAvailable = (): boolean => {
@@ -1068,6 +1333,42 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     }
   };
 
+  /** Session token usage for the footer: cumulative counts plus the latest
+   * turn's cache hit rate. Shared by the compact and detailed footers. */
+  const collectSessionUsage = (ctx: ExtensionContext) => {
+    let input = 0;
+    let output = 0;
+    let cacheRead = 0;
+    let cacheWrite = 0;
+    let cost = 0;
+    let cacheHitPercent: number | null = null;
+    for (const entry of ctx.sessionManager.getEntries() as unknown as Array<{
+      type: string;
+      message?: {
+        role?: string;
+        usage?: {
+          input?: number;
+          output?: number;
+          cacheRead?: number;
+          cacheWrite?: number;
+          cost?: { total?: number };
+        };
+      };
+    }>) {
+      if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+      const u = entry.message.usage;
+      if (u === undefined) continue;
+      input += u.input ?? 0;
+      output += u.output ?? 0;
+      cacheRead += u.cacheRead ?? 0;
+      cacheWrite += u.cacheWrite ?? 0;
+      cost += u.cost?.total ?? 0;
+      const prompt = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+      cacheHitPercent = prompt > 0 ? ((u.cacheRead ?? 0) / prompt) * 100 : null;
+    }
+    return { input, output, cacheRead, cacheWrite, cost, cacheHitPercent };
+  };
+
   // Compact footer uses one status row plus a contextual row only when needed.
   const installFooter = (ctx: ExtensionContext) => {
     if (footerInstalled) return;
@@ -1164,10 +1465,13 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
             modelPainted += theme.fg("dim", " · ") +
               theme.fg("muted", "thinking ") + footerPaint(theme, "footerYellow", thinking);
           }
+          const cacheRates = formatCacheRates(collectSessionUsage(ctx).cacheHitPercent);
+          const cachePainted =
+            cacheRates === null ? "" : theme.fg("muted", cacheRates) + separator;
           const status =
             PAD + theme.fg("muted", cwd) + separator +
             theme.fg("accent", view.mode) + separator +
-            contextPainted + separator + creditsPainted +
+            contextPainted + separator + cachePainted + creditsPainted +
             separator + modelPainted + separator + theme.fg("dim", "alt+h help");
           lines.push(clip(status, statusWidth, "…"));
           const contextual = [describeSandbox(sandbox), contextOverlay !== null ? "Context edited" : ""];
@@ -1182,36 +1486,8 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           return lines;
         }
         // Cumulative token usage across the whole session, like pi's footer.
-        let input = 0;
-        let output = 0;
-        let cacheRead = 0;
-        let cacheWrite = 0;
-        let cost = 0;
-        let cacheHitPercent: number | null = null;
-        for (const entry of ctx.sessionManager.getEntries() as unknown as Array<{
-          type: string;
-          message?: {
-            role?: string;
-            usage?: {
-              input?: number;
-              output?: number;
-              cacheRead?: number;
-              cacheWrite?: number;
-              cost?: { total?: number };
-            };
-          };
-        }>) {
-          if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
-          const u = entry.message.usage;
-          if (u === undefined) continue;
-          input += u.input ?? 0;
-          output += u.output ?? 0;
-          cacheRead += u.cacheRead ?? 0;
-          cacheWrite += u.cacheWrite ?? 0;
-          cost += u.cost?.total ?? 0;
-          const prompt = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
-          cacheHitPercent = prompt > 0 ? ((u.cacheRead ?? 0) / prompt) * 100 : null;
-        }
+        const { input, output, cacheRead, cacheWrite, cost, cacheHitPercent } =
+          collectSessionUsage(ctx);
         const usage = ctx.getContextUsage();
         const model = ctx.model as
           | { id?: string; provider?: string; reasoning?: boolean; contextWindow?: number }
@@ -1383,6 +1659,117 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     );
   };
   const refreshTodoWidget = () => todoWidgetTui?.requestRender(true);
+
+  // ---- live bash output (alt+b) ----
+  // A component-factory widget re-renders every TUI frame, so reading
+  // `bashStream` in render() keeps the tail live while the command runs.
+  let bashStreamTui: { requestRender(force?: boolean): void } | null = null;
+  const showBashStreamWidget = (ctx: ExtensionContext) => {
+    const setWidget = ctx.ui.setWidget as
+      | ((key: string, factory: unknown, options?: unknown) => void)
+      | undefined;
+    if (typeof setWidget !== "function") return false;
+    setWidget(
+      BASH_STREAM_WIDGET_KEY,
+      (tui: { requestRender(force?: boolean): void }, theme: { fg(color: string, text: string): string }) => {
+        bashStreamTui = tui;
+        return {
+          invalidate() {},
+          render: (width: number): string[] =>
+            renderBashStream(
+              bashStream,
+              width,
+              Date.now(),
+              { fg: (color, text) => theme.fg(color, text) },
+              { measure: measureWidth, clip: (text, max) => clipLine(text, max) },
+            ),
+          dispose() {
+            if (bashStreamTui === tui) bashStreamTui = null;
+          },
+        };
+      },
+      { placement: "aboveEditor" },
+    );
+    return true;
+  };
+  const hideBashStreamWidget = (ctx: ExtensionContext) => {
+    const setWidget = ctx.ui.setWidget as
+      | ((key: string, factory: unknown) => void)
+      | undefined;
+    if (typeof setWidget === "function") setWidget(BASH_STREAM_WIDGET_KEY, undefined);
+    bashStreamTui = null;
+  };
+  const refreshBashStreamWidget = () => bashStreamTui?.requestRender(true);
+
+  const logBackgroundDiagnostic = (kind: string, target: string) => {
+    pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, { kind, target, at: new Date().toISOString() });
+  };
+
+  /**
+   * Hand the running bash command to pi-background-tasks over its eventbus and
+   * resolve with the new task id.
+   *
+   * Pi has no per-tool-call detach: the foreground call is aborted by the
+   * caller and the command is RE-RUN from the beginning as a background task.
+   * Resolves to null when pi-background-tasks is not loaded (no answer) or
+   * rejects the request.
+   */
+  const requestBackgroundRun = (command: string): Promise<string | null> =>
+    new Promise((resolve) => {
+      const events = (pi as unknown as {
+        events?: { emit(channel: string, data: unknown): void; on(channel: string, handler: (data: unknown) => void): () => void };
+      }).events;
+      if (events === undefined) {
+        resolve(null);
+        return;
+      }
+      const requestId = `control-plane-bg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      let settled = false;
+      const finish = (taskId: string | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        off();
+        resolve(taskId);
+      };
+      const off = events.on(BG_RESPONSE_CHANNEL, (data) => {
+        const frame = data as {
+          schema_version?: string;
+          request_id?: string;
+          ok?: boolean;
+          result?: { task?: { id?: string }; id?: string };
+          error?: string;
+        };
+        if (frame?.schema_version !== BG_RESPONSE_SCHEMA || frame.request_id !== requestId) return;
+        if (frame.ok !== true) {
+          logBackgroundDiagnostic("bash-background-failed", frame.error ?? "unknown error");
+          finish(null);
+          return;
+        }
+        finish(frame.result?.task?.id ?? frame.result?.id ?? null);
+      });
+      const timer = setTimeout(() => {
+        logBackgroundDiagnostic("bash-background-failed", "no answer from pi-background-tasks");
+        finish(null);
+      }, BG_RESPONSE_TIMEOUT_MS);
+      try {
+        events.emit(BG_REQUEST_CHANNEL, {
+          schema_version: BG_REQUEST_SCHEMA,
+          request_id: requestId,
+          operation: "run",
+          payload: {
+            name: backgroundTaskName(command),
+            command,
+            isAgent: false,
+            notifyOnCompletion: true,
+            triggerOnCompletion: true,
+          },
+        });
+      } catch (error) {
+        logBackgroundDiagnostic("bash-background-failed", String(error));
+        finish(null);
+      }
+    });
 
   // ---- draft token counter (bottom-right, under the input box) ----
   // A component-factory widget re-renders every TUI frame, so reading the
@@ -1847,6 +2234,29 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     installFooter(ctx);
     installDraftCounter(ctx);
     ensureCredits(ctx);
+    // Temporary model swap (/swap): re-arm a swap persisted by an earlier
+    // session of this conversation. The session model itself is restored by
+    // Pi (it was the swap model when the session was saved). If the condition
+    // already elapsed while the session was closed, revert immediately.
+    const swapResult = restoreSwapFromEntries(entries, SWAP_ENTRY_TYPE);
+    swap = swapResult.swap;
+    if (swapResult.ignoredMalformed > 0) {
+      ctx.ui.notify(
+        `Control plane: ignored ${swapResult.ignoredMalformed} malformed swap entr${swapResult.ignoredMalformed === 1 ? "y" : "ies"}; ${swapResult.restored ? "restored the latest valid swap" : "no swap is active"}.`,
+        "warning",
+      );
+    }
+    if (swap !== null) {
+      swapEvalErrorNotified = false;
+      startSwapTimer(ctx);
+      ctx.ui.notify(
+        `Temporary model swap still active: on ${swap.swapModel.provider}/${swap.swapModel.id} (reverts to ${swap.originalModel.provider}/${swap.originalModel.id}).`,
+        "info",
+      );
+      if (conditionMet(swap, Date.now())) {
+        void revertSwap(ctx, "the condition elapsed while the session was closed");
+      }
+    }
     // Editor state is process/session scoped; a new or resumed session starts clean.
     contextOverlay = null;
     lastContextMessages = null;
@@ -1866,6 +2276,45 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     refreshCredits("live", ctx);
   });
   pi.on("model_select", (_event, ctx) => updateStatus(ctx));
+  // A manual model change while a swap is active cancels the swap — the user
+  // picked a different model on purpose. Restore-driven selections and this
+  // extension's own switch/revert (applyingSwap guard) are ignored.
+  pi.on("model_select", (event: { source?: string; model?: { provider?: string; id?: string } }, ctx) => {
+    if (swap === null || applyingSwap) return;
+    if (event.source !== "set" && event.source !== "cycle") return;
+    if (event.model?.provider === swap.swapModel.provider && event.model?.id === swap.swapModel.id) return;
+    cancelSwap(ctx, `model changed manually to ${event.model?.provider ?? "?"}/${event.model?.id ?? "?"}`);
+  });
+
+  // Bash output stream. Pi sends the cumulative output on every update, so the
+  // buffer is replaced rather than appended to. Captured even while the widget
+  // is hidden, so alt+b can show what a running command has already printed.
+  pi.on("tool_execution_start", (event) => {
+    if (event.toolName !== "bash") return;
+    const command = typeof (event.args as { command?: unknown })?.command === "string"
+      ? (event.args as { command: string }).command
+      : "";
+    bashStream = startBashStream(event.toolCallId, command, Date.now());
+    refreshBashStreamWidget();
+  });
+
+  pi.on("tool_execution_update", (event) => {
+    if (event.toolName !== "bash" || bashStream === null) return;
+    if (bashStream.toolCallId !== event.toolCallId) return;
+    const text = extractStreamText(event.partialResult);
+    if (text === null) return;
+    bashStream = applyBashOutput(bashStream, text);
+    refreshBashStreamWidget();
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    if (event.toolName !== "bash" || bashStream === null) return;
+    if (bashStream.toolCallId !== event.toolCallId) return;
+    const text = extractStreamText(event.result);
+    if (text !== null) bashStream = applyBashOutput(bashStream, text);
+    bashStream = endBashStream(bashStream, Date.now(), event.isError === true);
+    refreshBashStreamWidget();
+  });
 
   // Branch navigation may reveal a newer session snapshot, but never discards
   // newer workspace state shared by other sessions/windows.
@@ -2006,6 +2455,32 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     const completedCreditTurn = creditTurn;
     refreshCredits("end", ctx, true);
     scheduleCreditSettlement(ctx, completedCreditTurn);
+  });
+
+  // Temporary model swap (/swap): one user prompt has completed. Prompt-count
+  // conditions decrement here; free-text conditions are re-evaluated by the
+  // trusted evaluator at this turn boundary (plus the idle timer). A turn that
+  // ended in a provider error does not consume the budget: pi retries the same
+  // user prompt, which fires agent_end a second time (observed live), and the
+  // retry's successful turn is the one that counts.
+  pi.on("agent_end", (event, ctx) => {
+    const active = swap;
+    if (active === null) return;
+    const tail = event.messages.at(-1) as { role?: string; stopReason?: string } | undefined;
+    if (tail?.role === "assistant" && tail.stopReason === "error") return;
+    active.promptsSeen += 1;
+    if (active.condition.kind === "prompts") {
+      active.condition.remaining = Math.max(0, active.condition.remaining - 1);
+      persistSwap();
+      if (active.condition.remaining === 0) {
+        void revertSwap(ctx, "the prompt count ran out");
+        return;
+      }
+    } else {
+      persistSwap();
+    }
+    if (active.condition.kind === "free-text") void evaluateSwapCondition(ctx);
+    updateStatus(ctx);
   });
 
   // ---- tool authorization ----
@@ -2778,6 +3253,54 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         return;
       }
       pi.sendUserMessage("/control-reload", { expandPromptTemplates: true });
+    },
+  });
+
+  pi.registerCommand("swap", {
+    description: "Temporary model swap: /swap <model> until <condition> | for <N> prompts|minutes; status; cancel",
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
+      const parsed = parseSwapCommand(args);
+      if (parsed.kind === "error") {
+        ctx.ui.notify(`Swap: ${parsed.reason}`, "error");
+        return;
+      }
+      if (parsed.kind === "status") {
+        ctx.ui.notify(swapStatusLines(swap, Date.now()).join("\n"), "info");
+        return;
+      }
+      if (parsed.kind === "cancel") {
+        if (swap === null) {
+          ctx.ui.notify("No temporary model swap is active.", "info");
+          return;
+        }
+        await revertSwap(ctx, "you cancelled it");
+        return;
+      }
+      // set: resolve the model query against the available catalogue, then
+      // swap immediately and arm the condition.
+      const registry = (ctx as unknown as {
+        modelRegistry?: { getAll?: () => Array<{ provider: string; id: string }> };
+      }).modelRegistry;
+      const models = typeof registry?.getAll === "function" ? registry.getAll() : [];
+      const matches = resolveModelArgument(models, parsed.modelQuery);
+      if (matches.length === 0) {
+        ctx.ui.notify(`Swap: no model matches "${parsed.modelQuery}".`, "error");
+        return;
+      }
+      if (matches.length > 1) {
+        ctx.ui.notify(
+          `Swap: "${parsed.modelQuery}" is ambiguous (${matches.length} matches): ${matches.slice(0, 8).map((m) => `${m.provider}/${m.id}`).join(", ")}${matches.length > 8 ? ", …" : ""}`,
+          "error",
+        );
+        return;
+      }
+      const target = matches[0]!;
+      const condition = parsed.condition.kind === "free-text"
+        ? { kind: "free-text" as const, text: parsed.condition.text }
+        : parsed.condition.kind === "prompts"
+        ? { kind: "prompts" as const, remaining: parsed.condition.count }
+        : { kind: "minutes" as const, minutes: parsed.condition.count };
+      await beginSwap(ctx, target, condition);
     },
   });
 
@@ -3699,6 +4222,69 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         { placement: "aboveEditor" },
       );
       widgetVisible = true;
+    },
+  });
+
+  pi.registerShortcut("alt+b", {
+    description: "Control plane: toggle live bash output widget",
+    handler: (ctx) => {
+      if (bashStreamVisible) {
+        hideBashStreamWidget(ctx);
+        bashStreamVisible = false;
+        return;
+      }
+      if (showBashStreamWidget(ctx)) bashStreamVisible = true;
+    },
+  });
+
+  // (ctrl+alt+b)x2 moves the running bash command to a background task. Pi has no
+  // per-tool-call detach, so this aborts the foreground call (and with it the
+  // agent turn) and RE-RUNS the command from the start under
+  // pi-background-tasks. The command therefore restarts: anything it already
+  // did happens again. The double press is the deliberate-action gate; a
+  // single press only explains the gesture.
+  // ctrl+b alone is unusable under tmux: it is the default prefix, so the
+  // terminal multiplexer swallows it and pi never sees the key.
+  pi.registerShortcut("ctrl+alt+b", {
+    description: "Control plane: press twice to re-run the running bash command as a background task",
+    handler: async (ctx) => {
+      const now = Date.now();
+      const running = bashStream !== null && bashStream.endedAt === null &&
+        bashStream.backgroundTaskId === null;
+      if (!running) {
+        lastBackgroundPress = null;
+        ctx.ui.notify("No bash command is running to background.", "info");
+        return;
+      }
+      if (!isDoublePress(lastBackgroundPress, now)) {
+        lastBackgroundPress = now;
+        ctx.ui.notify(
+          "Press ctrl+alt+b again to background this bash command — it restarts from the beginning as a task.",
+          "info",
+        );
+        return;
+      }
+      lastBackgroundPress = null;
+      const command = bashStream!.command;
+      // The abort below makes pi deliver tool_execution_end, which replaces
+      // the state object — correlate by call id, not object identity.
+      const pendingCallId = bashStream!.toolCallId;
+      // Stop the foreground copy first, so the command never runs twice at once.
+      ctx.abort();
+      const taskId = await requestBackgroundRun(command);
+      if (taskId === null) {
+        ctx.ui.notify(
+          "Backgrounding failed: pi-background-tasks did not accept the run. The foreground command was already stopped.",
+          "error",
+        );
+        return;
+      }
+      if (bashStream !== null && bashStream.toolCallId === pendingCallId) {
+        bashStream = markBackgrounded(bashStream, taskId);
+        refreshBashStreamWidget();
+      }
+      logBackgroundDiagnostic("bash-backgrounded", taskId);
+      ctx.ui.notify(`Restarted as background task ${taskId} — /logs ${taskId}`, "info");
     },
   });
 

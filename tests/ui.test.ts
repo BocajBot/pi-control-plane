@@ -7,6 +7,7 @@ import {
   formatAddedContext,
   formatContextWarning,
   formatDraftCounter,
+  formatCacheRates,
   formatFooterStats,
   formatTokenCount,
   renderActiveTools,
@@ -78,7 +79,7 @@ test("formatFooterStats spells out every segment in plain words", () => {
   });
   assert.equal(
     stats,
-    "sent 4.2k · received 30 · cache 4.2k reused, 1.0k stored (99.2% hits) · cost $0.123",
+    "sent 4.2k · received 30 · cache 4.2k reused, 1.0k stored (99.2% hits, 0.8% misses) · cost $0.123",
   );
   assert.equal(context, "context ~8.6% of 49k (estimated)");
   const exact = formatFooterStats({
@@ -93,6 +94,12 @@ test("formatFooterStats spells out every segment in plain words", () => {
     exactTokens: 17243,
   });
   assert.equal(exact.context, "context 17,243 of 49,152 tokens at last request (model tokenizer)");
+});
+
+test("formatCacheRates reports hit and miss as complements", () => {
+  assert.equal(formatCacheRates(99.2), "cache 99.2% hit, 0.8% miss");
+  assert.equal(formatCacheRates(0), "cache 0.0% hit, 100.0% miss");
+  assert.equal(formatCacheRates(null), null);
 });
 
 test("formatFooterStats omits zero segments and unknown values", () => {

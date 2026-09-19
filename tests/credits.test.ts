@@ -79,3 +79,22 @@ test("credits use fixed official endpoint and reject malformed or denied respons
     await assert.rejects(readOpenRouterBalance("test-key", (async () => response) as typeof fetch));
   }
 });
+
+test("a mid-turn top-up lifts the projection floor instead of pinning the old balance", async () => {
+  // Baseline $10, one response billed $0.30, then $20 added to the account.
+  const values = [10, 10, 29.7, 29.7];
+  const credit = new CreditBalance(async () => values.shift()!, () => {});
+  await credit.refresh("idle");
+  await credit.refresh("start");
+  credit.recordCost(0.3);
+  assert.equal(credit.compact(), "OpenRouter · ~$9.70 · Δ −$0.30");
+
+  await credit.refresh("live");
+  assert.equal(
+    credit.compact(),
+    "OpenRouter · ~$29.40 · Δ −$0.30",
+    "top-up rebaselines the projection; the turn's cost stays subtracted",
+  );
+  await credit.refresh("end");
+  assert.equal(credit.compact(), "OpenRouter · ~$29.40 · Δ −$0.30");
+});

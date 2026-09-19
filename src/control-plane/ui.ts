@@ -62,7 +62,8 @@ export interface FooterStats {
   cacheRead: number;
   cacheWrite: number;
   cost: number;
-  /** Cache hit rate of the latest turn, or null when unknown. */
+  /** Cache hit rate of the latest turn, or null when unknown. The miss rate is
+   * its complement (prompt tokens that were sent fresh rather than reused). */
   cacheHitPercent: number | null;
   contextPercent: number | null;
   contextWindow: number;
@@ -84,7 +85,10 @@ export function formatFooterStats(s: FooterStats): { stats: string; context: str
     const cache: string[] = [];
     if (s.cacheRead > 0) cache.push(`${formatTokenCount(s.cacheRead)} reused`);
     if (s.cacheWrite > 0) cache.push(`${formatTokenCount(s.cacheWrite)} stored`);
-    const hits = s.cacheHitPercent !== null ? ` (${s.cacheHitPercent.toFixed(1)}% hits)` : "";
+    const hits =
+      s.cacheHitPercent !== null
+        ? ` (${s.cacheHitPercent.toFixed(1)}% hits, ${(100 - s.cacheHitPercent).toFixed(1)}% misses)`
+        : "";
     parts.push(`cache ${cache.join(", ")}${hits}`);
   }
   if (s.cost > 0) parts.push(`cost $${s.cost.toFixed(3)}`);
@@ -98,6 +102,16 @@ export function formatFooterStats(s: FooterStats): { stats: string; context: str
     context = `context ${pct} of ${formatTokenCount(s.contextWindow)} (estimated)`;
   }
   return { stats: parts.join(" · "), context };
+}
+
+/**
+ * Cache hit/miss rates for the compact footer. Miss is the complement of hit:
+ * the share of the last request's prompt tokens that were sent fresh rather
+ * than reused from the provider's cache. Null when no usage is known yet.
+ */
+export function formatCacheRates(hitPercent: number | null): string | null {
+  if (hitPercent === null) return null;
+  return `cache ${hitPercent.toFixed(1)}% hit, ${(100 - hitPercent).toFixed(1)}% miss`;
 }
 
 /**
@@ -447,6 +461,8 @@ export function renderHotkeyCheatsheet(): string[] {
     "Hotkeys — press any key to close",
     "",
     "Control plane:",
+    "  alt+b  toggle live bash output (tail of the running command)",
+    "  ctrl+alt+b x2  re-run the running bash command as a background task",
     "  alt+c  toggle context-preview widget",
     "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",
     "  alt+s  send preview: everything the next message will send, editable, incl. your draft",

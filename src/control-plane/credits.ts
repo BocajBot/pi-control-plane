@@ -39,6 +39,16 @@ export class CreditBalance {
           this.delta = null;
           this.pendingStartSnapshot = false;
         } else {
+          // Balance can only fall from spending, so a reading above the
+          // baseline means credits were added. Without this the projection
+          // floor (baseline - reportedCost) pins the footer to the
+          // pre-top-up number until the next prompt rebaselines. Only
+          // matters while a cost projection is active; with no reported cost
+          // visibleBalance already returns the raw balance and the top-up
+          // shows as a positive delta.
+          if (this.reportedCost > 0 && this.baseline !== null && value > this.baseline + 0.0000005) {
+            this.baseline = value;
+          }
           this.updateDelta();
         }
       } catch {

@@ -230,3 +230,59 @@ export interface SandboxState {
   network: boolean;
   updatedAt: string;
 }
+
+/**
+ * Temporary model swap (`/swap`): the session switches to `swapModel` now and
+ * reverts to `originalModel` when `condition` is met. Deterministic conditions
+ * (prompts, minutes) are evaluated locally; free-text conditions are evaluated
+ * by a trusted evaluator model (the saved global default) that receives the
+ * condition plus ground-truth facts and answers MET / NOT MET. State
+ * persistence mirrors sandbox.ts exactly. See model-swap.ts.
+ */
+export const SWAP_SCHEMA_VERSION = 1;
+export const SWAP_ENTRY_TYPE = "pi-control-plane-model-swap";
+
+export interface SwapConditionBase {
+  kind: "free-text" | "prompts" | "minutes";
+}
+export interface SwapFreeTextCondition extends SwapConditionBase {
+  kind: "free-text";
+  /** The user's condition, verbatim. Judged by the trusted evaluator model. */
+  text: string;
+}
+export interface SwapPromptsCondition extends SwapConditionBase {
+  kind: "prompts";
+  /** How many user prompts remain before reverting. */
+  remaining: number;
+}
+export interface SwapMinutesCondition extends SwapConditionBase {
+  kind: "minutes";
+  /** Total swap duration in minutes (>= 1). Deadline = startedAt + duration. */
+  minutes: number;
+}
+export type SwapCondition = SwapFreeTextCondition | SwapPromptsCondition | SwapMinutesCondition;
+
+export interface SwapModelRef {
+  provider: string;
+  id: string;
+}
+
+export interface SwapState {
+  schemaVersion: typeof SWAP_SCHEMA_VERSION;
+  /** Model the session temporarily switches to. */
+  swapModel: SwapModelRef;
+  /** Model to revert to once the condition is met (captured at swap time). */
+  originalModel: SwapModelRef;
+  condition: SwapCondition;
+  /** Whether the session is currently ON the swap model (false only before
+   * the initial switch applies or after a revert/cancel entry is written). */
+  applied: boolean;
+  /** ISO timestamp captured when the swap was created. */
+  startedAt: string;
+  /** OpenRouter balance (USD) observed at swap time, when known. Feeds the
+   * evaluator's ground truth for balance-shaped conditions; null = unknown. */
+  balanceAtStart: number | null;
+  /** User prompts seen while the swap has been active. */
+  promptsSeen: number;
+  updatedAt: string;
+}
