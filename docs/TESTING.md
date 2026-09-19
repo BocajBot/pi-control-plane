@@ -37,7 +37,7 @@ No dependencies: Node 22's built-in test runner executes the TypeScript directly
 | `sensitive-paths.test.ts` | Sensitive read-target denylist matching |
 | `transcription.test.ts` | Audio transcription tool (`transcribe_audio`) logic |
 
-Expected result: `pass 354, skip 1, fail 0` when the installed Pi dist is intact. At the time of writing the installed dist is missing `dist/modes/config.js`, so `model-picker-runtime.test.ts` fails on module resolution — an installed-runtime artifact (repair Pi or reinstall), not a control-plane failure.
+Expected result: `pass 357, skip 1, fail 0` (2026-09-19). A previous `model-picker-runtime.test.ts` failure ("Cannot find module dist/modes/config.js") was caused by the local pricing patch to installed Pi's `dist/modes/interactive/components/model-selector.js`, which imported `../../config.js` from the `components/` directory (one level short; siblings use `../../../config.js`). Fixed in the installed file; a backup of the pre-fix patched file is in `~/.pi/backups/`. Reinstalling Pi reverts both the pricing patch and this fix.
 
 ## Testing without exposing credentials
 
