@@ -45,9 +45,16 @@ relevant source, tests, and `docs/` before changing Pi behavior.
 - **Native `/model` patch:** Pi 0.85.1 source and executable bundle under
   `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/` restore
   cached OpenRouter catalog costs after scoped-model refresh. `pi update` can
-  overwrite this patch. [`tests/native-model-pricing.test.ts`](tests/native-model-pricing.test.ts)
-  fails when either installed artifact loses it; repair source and bundle
-  together before claiming native pricing works.
+  overwrite this patch. It is applied by
+  [`scripts/patch-pi-model-selector.mjs`](scripts/patch-pi-model-selector.mjs)
+  (`npm run patch-pi`; `--check` reports without writing): anchored
+  replacements, idempotent, aborts without writing if an anchor is not unique,
+  computes the `config.js` import path from the target file's location, and
+  discovers the bundle's minified fs/path aliases from its own imports. Never
+  hand-edit these files (a hand edit once wrote the import one directory
+  short). [`tests/native-model-pricing.test.ts`](tests/native-model-pricing.test.ts)
+  imports the patched module, runs the script in `--check` mode, and greps
+  both artifacts; it fails when either loses the patch.
 - **Custom tools:** `local_web_search` uses local SearxNG; `transcribe_audio`
   uses local Whisper service sequentially; `todo` owns task state. Tool names
   are part of model-visible API. Do not add a second `todo` or collide with
@@ -91,7 +98,8 @@ relevant source, tests, and `docs/` before changing Pi behavior.
    surface before editing. Keep extension source, tests, and installed-runtime
    patches distinct.
 2. Add or update regression coverage for changed behavior. For native `/model`,
-   run `node --test tests/native-model-pricing.test.ts` after every Pi update.
+   run `npm run patch-pi` then `node --test tests/native-model-pricing.test.ts`
+   after every Pi update.
 3. Update this continuity contract when feature inventory, ownership,
    preservation rule, user-visible behavior, or native-runtime path changes.
    Update command details here, `docs/ARCHITECTURE.md` for data flow/security,

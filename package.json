@@ -10,7 +10,8 @@
     "themes": ["./.pi/themes/pi-cyberpunk.json"]
   },
   "scripts": {
-    "test": "node --test \"tests/*.test.ts\""
+    "test": "node --test \"tests/*.test.ts\"",
+    "patch-pi": "node scripts/patch-pi-model-selector.mjs"
   },
   "dependencies": {
     "typebox": "^1.1.38"
