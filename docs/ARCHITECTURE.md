@@ -85,6 +85,41 @@ awaits `flush`, and checks write errors before reporting success. Errors never
 include raw settings content. No runtime patch, tool, or global Ctrl+s shortcut
 is added; thinking defaults and project settings are untouched.
 
+## Keybind consent (`shift+tab`, `/control-keys`)
+
+Pi reserves `shift+tab` for `app.thinking.cycle` and skips extension claims on
+reserved keys unless the user unbinds the action in `keybindings.json`. The
+extension therefore claims the extra mode-cycle key only after a recorded
+consent, and never edits the user's keymap silently:
+
+- **State:** `~/.pi/agent/control-plane-keys.json` (`KeybindConsent`):
+  `decision` = `claude` | `custom` | `keep-pi-defaults`, the recorded
+  `customKey`, the `unboundActions` this consent wrote, and `decidedAt`.
+  Malformed state is reported and treated as "no decision yet" — never
+  overwritten silently.
+- **Factory time:** with `decision: claude` the entry registers `shift+tab`
+  (working only if the unbind exists); with `custom` it registers the recorded
+  key; otherwise nothing beyond `alt+p`.
+- **First interactive session** (`session_start`, TUI only, fire-and-forget so
+  startup ordering is untouched): `ctx.ui.custom` dialog — Claude-style /
+  record your own / keep Pi defaults (esc = keep). The recorder captures a key
+  via pi-tui's `parseKey`, refuses unmodified keys (editor safety) and this
+  extension's own shortcuts, then `ctx.ui.confirm` states exactly which Pi
+  actions are affected before anything is written: reserved occupants are
+  unbound in `keybindings.json` (merge-preserving, atomic write, fail-closed on
+  malformed files); non-reserved occupants keep their entries (Pi gives
+  extension claims priority and logs a diagnostic).
+- **Drift:** later sessions re-check `expectedUnboundActions` against
+  `keybindings.json` and report re-bound actions without auto-repairing.
+- **Cheat sheet:** the alt+h mode-cycle line reflects the recorded state
+  (`alt+p`, `alt+p / shift+tab`, or `alt+p / <customKey>`), never the intent.
+
+Pure logic (state IO, key validation, occupant detection, unbind merge, drift)
+lives in `src/control-plane/keybind-consent.ts`;
+`tests/keybind-consent-runtime.test.ts` verifies the whole chain against the
+real loader, `ExtensionRunner.getShortcuts` diagnostics, and
+`KeybindingsManager.create`.
+
 ## Command flow
 
 `registerCommand` handlers parse arguments through the pure parsers in `commands.ts` (usage errors are data, not exceptions), act on state, persist, refresh status, and emit chat-visible output as custom entries (`pi-control-plane-output`) rendered by a registered entry renderer — visible in the TUI, excluded from LLM context.

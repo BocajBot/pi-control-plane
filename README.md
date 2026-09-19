@@ -15,8 +15,11 @@ relevant source, tests, and `docs/` before changing Pi behavior.
 
 ### Custom surfaces
 
-- **Control plane:** `/mode`, `alt+p`, and `shift+tab` enforce Plan, Manual,
-  Accept, and Auto. `/context` exposes and controls injected context,
+- **Control plane:** `/mode`, `alt+p`, and — after explicit keybind consent —
+  `shift+tab` (or a recorded custom key) enforce Plan, Manual, Accept, and
+  Auto. `/control-keys` opens the consent dialog (Claude-style keybinds /
+  record your own / keep Pi defaults); without a recorded decision nothing is
+  overridden. `/context` exposes and controls injected context,
   tool profiles, exact recounting, and edited-context restoration. `/bwrap`
   provides optional OS isolation. `/harness-rules` manages remembered
   confirmations. `/control-ui` selects minimal, details, or timing views.
@@ -206,7 +209,7 @@ Persisted as its own session entry, the same way control-plane state is: exclude
 
 ### `/mode` — what is the model allowed to do right now?
 
-One merged setting (workflow stage and permissions used to be two separate settings — `/phase` and `/autonomy` — which allowed contradictory combos like Execute + Read-only; they are now one). Four modes, and `alt+p` / `shift+tab` cycle them in this order:
+One merged setting (workflow stage and permissions used to be two separate settings — `/phase` and `/autonomy` — which allowed contradictory combos like Execute + Read-only; they are now one). Four modes, and `alt+p` (plus `shift+tab` or a custom key after keybind consent — see [Keybind consent](#keybind-consent-shifttab)) cycle them in this order:
 
 - `plan` — read-only. Every mutating tool blocked; reads (`read`, `grep`, `find`, `ls`, …) allowed under the sensitive-path denylist. Shell is blocked entirely — commands are never parsed to guess whether they are "safe" (pattern-level command filtering proved unreliable in practice; whole-tool denial is reliable). Plan doubles as the verification stage: read-only, framed for checking the work.
 - `manual` — changes allowed, **attended**: reads inside the project run freely; anything risky (writes, edits, shell, unknown tools, reads outside the project root) pops a confirmation dialog showing the tool, risk category, target/command, and whether it is inside the project root. Denying blocks the call. If no confirmation UI exists (e.g. print mode), risky calls are blocked — never silently allowed.
@@ -246,7 +249,7 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 | `ctrl+alt+t` | Tool-profile picker: modal with profile names in a left column (1/5 width) and, on the right, the selected profile's description over its tool list. ↑/↓ or j/k select, **enter** applies for this session only, **space** also saves it as the default for new sessions (written to `policy/profiles.json` as `defaultProfile`), esc closes; `*` marks the active profile, `(default)` the default one |
 | `ctrl+alt+r` | Reload Pi resources (same as `/reload`); refuses while Pi is busy |
 | `alt+p` | Cycle mode: Plan → Manual → Accept → Auto |
-| `shift+tab` | Same cycle as `alt+p` (Claude-Code-style) |
+| `shift+tab` | Same cycle as `alt+p` (Claude-Code-style) — **only after keybind consent**, see below |
 | `alt+m` | Model picker: typeahead with ↑↓ move, **PgUp/PgDn page**, enter select, **Ctrl+s select + save default**, esc close (also `/models`; `/models <query>` switches directly) |
 | `alt+i` | Diagnostics panel: a centered modal listing this session's diagnostic entries (declined reads, unattended action logs, verification events) |
 | `alt+h` | Hotkey cheat sheet as a centered modal (any key closes; `/hotkeys` lists everything) |
@@ -263,7 +266,13 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 - The override lives in memory only: it does not survive quitting, `/reload`, or compaction (compaction invalidates it with a notification, since the conversation no longer lines up).
 - Malformed edits (broken markers, missing system-prompt section) are rejected whole — nothing half-applies.
 
-**shift+tab:** Pi's default binding for `shift+tab` is cycling the thinking level; that default is unbound in `~/.pi/agent/keybindings.json` (`"app.thinking.cycle": []`) so this extension can claim the key for the mode cycle. Thinking level is set with `/effort` instead.
+**Keybind consent (shift+tab):** Pi reserves `shift+tab` for cycling the thinking level and skips extension claims on it unless the user unbinds the action in `~/.pi/agent/keybindings.json`. This extension therefore **changes nothing without your explicit choice**. On the first interactive session it asks:
+
+- **Claude Code-style** — writes `"app.thinking.cycle": []` to `~/.pi/agent/keybindings.json` (preserving all other entries) and claims `shift+tab` for the mode cycle. Thinking level stays on `/effort`.
+- **Record my own key** — press any `ctrl`/`alt`/`super` combo (or f1–f12). Unmodified keys are refused (they would break editing). If the key currently drives a Pi action, you confirm exactly what happens: reserved Pi actions are unbound in `keybindings.json`; others keep their entries and the extension claim simply takes priority.
+- **Keep Pi defaults** — claims nothing; `alt+p` keeps cycling modes and `shift+tab` keeps cycling thinking level.
+
+The decision is stored in `~/.pi/agent/control-plane-keys.json`, so the prompt is asked once; `/control-keys` re-opens it anytime. Escapes cancel without recording. If a recorded unbind is later re-bound by hand, startup reports the drift but never auto-repairs it. Takes effect after `/reload` or a restart.
 
 ## Model picker (`alt+m` / `/models`)
 
@@ -368,6 +377,7 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 | `src/control-plane/turn-timing.ts` | Workload timing ledger: per-turn records (TTFT + total), cumulative totals, strict validation, compaction-safe restoration, footer and summary rendering. |
 | `src/control-plane/websearch.ts` | Pure searxng client (injected fetch): URL building, response parsing, result formatting. No Pi imports. |
 | `src/control-plane/commands.ts` | Argument parsing for every command (so bad input handling is testable). |
+| `src/control-plane/keybind-consent.ts` | Consent-gated keybind claims: decision state IO (`control-plane-keys.json`), recorded-key validation, conflict detection against Pi's effective bindings, `keybindings.json` unbind-merge (fail-closed on malformed user files), drift detection. Wiring (consent dialog, key recorder, `/control-keys`) lives in `extensions/control-plane.ts`. |
 | `src/control-plane/ui.ts` | All text formatting: status line, summaries, denial messages, the injected state block. |
 | `policy/default-policy.json` | Auto (unattended) policy rules: denied path names/substrings, whether bash is allowed (default: no), out-of-root allowlist prefixes (default: none). Also the credential-path source of truth `/bwrap`'s `$HOME` shadowing reuses. Edit carefully — an invalid or old-schema file makes Auto enforce read-only. |
 | `tests/` | 356 unit and harness tests. Run with `npm test`. |

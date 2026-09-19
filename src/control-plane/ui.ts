@@ -456,7 +456,12 @@ export function renderProfilePicker(
 }
 
 /** Cheat-sheet shown by the alt+h hotkey widget. Pure data, testable. */
-export function renderHotkeyCheatsheet(): string[] {
+/**
+ * The mode-cycle line reflects the consent state, not the intent: with no
+ * recorded keybind consent only alt+p is claimed (shift+tab stays pi's
+ * thinking-level cycle), so the caller passes the actual label.
+ */
+export function renderHotkeyCheatsheet(modeCycleKeys = "alt+p"): string[] {
   return [
     "Hotkeys — press any key to close",
     "",
@@ -467,7 +472,7 @@ export function renderHotkeyCheatsheet(): string[] {
     "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",
     "  alt+s  send preview: everything the next message will send, editable, incl. your draft",
     "  ctrl+alt+t  tool-profile picker (enter: apply this session · space: set as default)",
-    "  alt+p / shift+tab  cycle mode: Plan > Manual > Accept > Auto",
+    `  ${modeCycleKeys}  cycle mode: Plan > Manual > Accept > Auto`,
     "  alt+i  diagnostics panel (session diagnostic log)",
     "  alt+h  this cheat sheet",
     "  ctrl+alt+r  reload Pi resources (when idle)",

@@ -124,6 +124,24 @@ the alt+h/ctrl+alt+t/alt+i modals and the attended/advisor dialog headers. Pure
 formatters in `ui.ts` stay width-unaware except `renderActiveTools` and
 `renderDiagnosticsPanel`, which bound every row by construction.
 
+## Keybind consent dialog and recorder
+
+Two `ctx.ui.custom` modals in `extensions/control-plane.ts` (pure logic in
+`src/control-plane/keybind-consent.ts`):
+
+- **Consent dialog** (first interactive session without a recorded decision,
+  or `/control-keys`): explains the reserved `shift+tab` conflict, offers
+  Claude-style / record-your-own / keep-Pi-defaults; keys `c`/`r`/`k`, `esc`
+  keeps Pi defaults. Every line is width-clipped with the shared cheat helper.
+- **Key recorder**: shows the live capture (`Recorded: <key>` or
+  `(none yet)`); any combo (parsed with pi-tui's `parseKey`) replaces the
+  capture, `enter` confirms, `esc` cancels. Unmodified keys are refused by the
+  pure validator, so the recorder never accepts an editor-breaking bind.
+
+The alt+h cheat sheet's mode-cycle line is parameterized
+(`renderHotkeyCheatsheet(modeCycleKeys)`) and reflects the recorded consent —
+`alt+p` alone until a decision claims more.
+
 ## Scope and verification
 
 Changes apply to `installFooter`, `installDraftCounter`, `/control-ui` in

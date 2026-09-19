@@ -105,6 +105,10 @@ interface FakeCtxOptions {
    * needed in tests. */
   withCustom?: boolean;
   customChoice?: string | null;
+  /** Queue of scripted ui.custom results, consumed in order (dialog →
+   * recorder → …). Falls back to null once exhausted. Takes precedence over
+   * `customChoice`. */
+  customChoices?: (string | null)[];
 }
 
 function makeCtx(options: FakeCtxOptions = {}) {
@@ -125,8 +129,10 @@ function makeCtx(options: FakeCtxOptions = {}) {
   if (options.withCustom) {
     // Resolve the scripted choice without invoking the factory (so the real
     // SelectList never has to load under the test harness).
+    const queue = options.customChoices;
     ui.custom = async (factory: unknown) => {
       customCalls.push(factory);
+      if (queue !== undefined) return queue.length > 0 ? queue.shift() : null;
       return options.customChoice === undefined ? null : options.customChoice;
     };
   }
@@ -159,7 +165,23 @@ function tmpRoot(): string {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cp-harness-")));
 }
 
+/**
+ * File-scoped fake pi agent dir. The keybind-consent flow must never touch
+ * the real ~/.pi/agent from tests, and its consent dialog must not inject
+ * ui.custom calls into unrelated tests: seeding keep-pi-defaults here makes
+ * every default boot a silent no-op. Tests that exercise the consent flow
+ * override PI_CODING_AGENT_DIR with their own fresh temp dir and restore it.
+ */
+const harnessAgentDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cp-harness-agent-")));
+fs.writeFileSync(
+  path.join(harnessAgentDir, "control-plane-keys.json"),
+  JSON.stringify({ version: 1, decision: "keep-pi-defaults", decidedAt: new Date().toISOString() }),
+);
+test.after(() => fs.rmSync(harnessAgentDir, { recursive: true, force: true }));
+
 async function boot(): Promise<FakePi> {
+  // Default to the seeded fake agent dir unless the test set its own.
+  process.env.PI_CODING_AGENT_DIR ??= harnessAgentDir;
   const pi = new FakePi();
   await controlPlaneExtension(pi as never);
   return pi;
@@ -167,7 +189,7 @@ async function boot(): Promise<FakePi> {
 
 test("registers the commands, the local_web_search tool, and the shortcuts", async () => {
   const pi = await boot();
-  for (const name of ["clear", "context", "mode", "scratchpad", "bwrap", "harness-rules", "task"]) {
+  for (const name of ["clear", "context", "mode", "scratchpad", "bwrap", "harness-rules", "task", "control-keys"]) {
     assert.ok(pi.commands.has(name), `missing /${name}`);
   }
   assert.ok(!pi.commands.has("phase") && !pi.commands.has("autonomy"), "phase/autonomy merged into /mode");
@@ -1248,6 +1270,7 @@ test("/bwrap: off by default, status reports it, on refuses without confirmation
   const ctx = makeCtx({ cwd: root });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
 
+
   await pi.commands.get("bwrap")!.handler("", ctx);
   const statusOutput = pi.entries.at(-1)?.data as { title: string; lines: string[] };
   assert.equal(statusOutput.title, "bwrap");
@@ -1418,6 +1441,7 @@ test("/context profile applies loadouts, lists them, and 'all' restores", async 
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
 
+
   await pi.commands.get("context")!.handler("profile minimal", ctx);
   assert.ok(!pi.activeTools.includes("web_search"), "profile must remove unlisted tools");
   assert.ok(pi.activeTools.includes("bash"));
@@ -1484,6 +1508,7 @@ test("/scratchpad: add, list, remove, clear round-trip and persist across a sess
   const ctx = makeCtx({ cwd: root });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
 
+
   await pi.commands.get("scratchpad")!.handler("add remember to check the config", ctx);
   assert.ok(ctx.notifications.some((n) => /added/i.test(n.message)));
 
@@ -1531,11 +1556,22 @@ test("local_web_search tool: registered read-only and reachable even outside Exe
   // Executing it does not require network access to prove the wiring: a
   // failed fetch (no searxng reachable in this test environment) still
   // returns a structured, non-throwing result via formatSearchResults.
+  // Regression: this tool once returned the legacy `{ output }` shape, which
+  // crashed Pi's interactive renderer (getTextOutput reads result.content
+  // unconditionally) and killed the whole session. The result MUST carry the
+  // Pi-native `content: [{ type: "text", ... }]` array; a bare `output` key
+  // is forbidden here.
   const result = (await tool!.execute("call-1", { query: "test query" }, undefined, undefined, {})) as {
-    output: string;
+    content: { type: string; text: string }[];
+    output?: unknown;
   };
-  assert.equal(typeof result.output, "string");
-  assert.ok(result.output.length > 0);
+  assert.equal(result.output, undefined, "legacy { output } results crash Pi's interactive renderer");
+  assert.deepEqual(
+    result.content.map(({ type }) => type),
+    ["text"],
+    "result must be a single text content block",
+  );
+  assert.ok(result.content[0].text.length > 0);
 });
 
 test("transcribe_audio tool: registered sequentially and returns Pi-native content", async () => {
@@ -2431,4 +2467,200 @@ test("prompt lifecycle refreshes credits without blocking and exposes timing", a
     const detailLines = footer!.render(140).join("\n");
     assert.match(detailLines, /time [0-9.]+s · 1 turn/);
   } finally { globalThis.fetch = originalFetch; }
+});
+
+// ---- keybind consent (shift+tab conflict, resolved only with consent) ----
+
+/** Runs a test against a FRESH fake agent dir, restoring the env afterwards. */
+async function withFreshAgentDir(run: (agentDir: string) => Promise<void>): Promise<void> {
+  const agentDir = tmpRoot();
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    await run(agentDir);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+}
+
+/** Drains the fire-and-forget consent flow: its only awaits are promise
+ *  microtasks (fake ui.custom/confirm), so one event-loop turn suffices. */
+const settleKeybindFlow = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+const consentPath = (agentDir: string) => path.join(agentDir, "control-plane-keys.json");
+const bindingsPath = (agentDir: string) => path.join(agentDir, "keybindings.json");
+
+test("keybind consent: default boots stay silent and never write the real agent dir", async () => {
+  // The seeded file-scoped agent dir carries keep-pi-defaults, so a normal
+  // boot neither prompts nor claims shift+tab, and every default-boot ctx
+  // (even with withCustom) sees zero custom calls.
+  const pi = await boot();
+  assert.ok(!pi.shortcuts.has("shift+tab"), "no reserved claim without consent");
+  assert.ok(pi.shortcuts.has("alt+p"));
+  const ctx = makeCtx({ withCustom: true });
+  await pi.emit("session_start", { reason: "startup" }, ctx);
+    await settleKeybindFlow();
+  assert.equal(ctx.customCalls.length, 0, "seeded consent suppresses the dialog");
+  assert.equal(ctx.notifications.length, 0, "drift check is silent when nothing drifted");
+});
+
+test("keybind consent: claude preset unbinds thinking-cycle and claims shift+tab after consent", async () => {
+  await withFreshAgentDir(async (agentDir) => {
+    const pi = await boot();
+    assert.ok(!pi.shortcuts.has("shift+tab"), "no claim before consent");
+    const ctx = makeCtx({ withCustom: true, customChoices: ["claude"] });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await settleKeybindFlow();
+    assert.equal(JSON.parse(fs.readFileSync(consentPath(agentDir), "utf8")).decision, "claude");
+    assert.deepEqual(JSON.parse(fs.readFileSync(bindingsPath(agentDir), "utf8")), { "app.thinking.cycle": [] });
+    assert.ok(ctx.notifications.some((n) => /shift\+tab now cycles modes/.test(n.message)));
+    const pi2 = await boot();
+    assert.ok(pi2.shortcuts.has("shift+tab"), "claim registers after consent");
+    assert.ok(pi2.shortcuts.has("alt+p"), "alt+p is unconditional");
+  });
+});
+
+test("keybind consent: custom key with no conflicts records consent without touching keybindings.json", async () => {
+  await withFreshAgentDir(async (agentDir) => {
+    const pi = await boot();
+    const ctx = makeCtx({ withCustom: true, customChoices: ["custom", "ctrl+shift+m"] });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await settleKeybindFlow();
+    const consent = JSON.parse(fs.readFileSync(consentPath(agentDir), "utf8"));
+    assert.equal(consent.decision, "custom");
+    assert.equal(consent.customKey, "ctrl+shift+m");
+    assert.deepEqual(consent.unboundActions, []);
+    assert.ok(!fs.existsSync(bindingsPath(agentDir)), "no unbinds needed, no file written");
+    assert.ok(ctx.notifications.some((n) => /ctrl\+shift\+m now cycles modes/.test(n.message)));
+    const pi2 = await boot();
+    assert.ok(pi2.shortcuts.has("ctrl+shift+m"));
+    assert.ok(!pi2.shortcuts.has("shift+tab"));
+  });
+});
+
+test("keybind consent: custom key over a reserved builtin unbinds exactly that action, on explicit confirm", async () => {
+  await withFreshAgentDir(async (agentDir) => {
+    fs.writeFileSync(bindingsPath(agentDir), JSON.stringify({ "app.session.toggleSort": "ctrl+s", "app.thinking.toggle": "ctrl+t" }));
+    const pi = await boot();
+    const ctx = makeCtx({ withCustom: true, customChoices: ["custom", "ctrl+t"], confirmResult: true });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await settleKeybindFlow();
+    assert.deepEqual(JSON.parse(fs.readFileSync(bindingsPath(agentDir), "utf8")), {
+      "app.session.toggleSort": "ctrl+s",
+      "app.thinking.toggle": [],
+    });
+    const consent = JSON.parse(fs.readFileSync(consentPath(agentDir), "utf8"));
+    assert.deepEqual(consent.unboundActions, ["app.thinking.toggle"]);
+    assert.ok(ctx.notifications.some((n) => /ctrl\+t now cycles modes/.test(n.message)));
+  });
+});
+
+test("keybind consent: declining the unbind confirm changes nothing", async () => {
+  await withFreshAgentDir(async (agentDir) => {
+    fs.writeFileSync(bindingsPath(agentDir), JSON.stringify({ "app.thinking.toggle": "ctrl+t" }));
+    const pi = await boot();
+    const ctx = makeCtx({ withCustom: true, customChoices: ["custom", "ctrl+t"], confirmResult: false });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await settleKeybindFlow();
+    assert.ok(!fs.existsSync(consentPath(agentDir)), "declined consent is not recorded");
+    assert.deepEqual(JSON.parse(fs.readFileSync(bindingsPath(agentDir), "utf8")), { "app.thinking.toggle": "ctrl+t" });
+    assert.ok(ctx.notifications.some((n) => /nothing was changed/i.test(n.message)));
+  });
+});
+
+test("keybind consent: invalid and self-conflicting recordings re-prompt instead of writing", async () => {
+  await withFreshAgentDir(async (agentDir) => {
+    const pi = await boot();
+    const ctx = makeCtx({ withCustom: true, customChoices: ["custom", "a", "alt+h", "ctrl+shift+m"] });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await settleKeybindFlow();
+    assert.ok(ctx.notifications.some((n) => /needs ctrl, alt or super/.test(n.message)), "unmodified key refused");
+    assert.ok(ctx.notifications.some((n) => /already used by this extension/.test(n.message)), "own shortcut refused");
+    assert.equal(JSON.parse(fs.readFileSync(consentPath(agentDir), "utf8")).customKey, "ctrl+shift+m");
+  });
+});
+
+test("keybind consent: esc at any stage records nothing", async () => {
+  await withFreshAgentDir(async (agentDir) => {
+    const pi = await boot();
+    await pi.emit("session_start", { reason: "startup" }, ctxDialogEscapeAtDialog());
+    await settleKeybindFlow();
+    assert.ok(!fs.existsSync(consentPath(agentDir)), "dialog escape records nothing");
+
+    const pi2 = await boot();
+    const ctx = makeCtx({ withCustom: true, customChoices: ["custom", null] });
+    await pi2.emit("session_start", { reason: "startup" }, ctx);
+    await settleKeybindFlow();
+    assert.ok(!fs.existsSync(consentPath(agentDir)), "recorder escape records nothing");
+    assert.ok(ctx.notifications.some((n) => /recording cancelled/i.test(n.message)));
+
+    function ctxDialogEscapeAtDialog() {
+      return makeCtx({ withCustom: true, customChoices: [null] });
+    }
+  });
+});
+
+test("keybind consent: keep-pi-defaults records the decision and claims nothing", async () => {
+  await withFreshAgentDir(async (agentDir) => {
+    const pi = await boot();
+    const ctx = makeCtx({ withCustom: true, customChoices: ["keep-pi-defaults"] });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await settleKeybindFlow();
+    assert.equal(JSON.parse(fs.readFileSync(consentPath(agentDir), "utf8")).decision, "keep-pi-defaults");
+    assert.ok(!fs.existsSync(bindingsPath(agentDir)), "keep never writes keybindings.json");
+    assert.ok(ctx.notifications.some((n) => /Pi defaults kept/.test(n.message)));
+    const pi2 = await boot();
+    assert.ok(!pi2.shortcuts.has("shift+tab"));
+    // A later session on the same consent does not re-prompt.
+    const ctx2 = makeCtx({ withCustom: true });
+    await pi2.emit("session_start", { reason: "resume" }, ctx2);
+    await settleKeybindFlow();
+    assert.equal(ctx2.customCalls.length, 0);
+  });
+});
+
+test("keybind consent: re-bound unbind actions are reported as drift, never auto-repaired", async () => {
+  await withFreshAgentDir(async (agentDir) => {
+    fs.writeFileSync(consentPath(agentDir), JSON.stringify({ version: 1, decision: "claude", unboundActions: ["app.thinking.cycle"], decidedAt: "x" }));
+    fs.writeFileSync(bindingsPath(agentDir), JSON.stringify({ "app.thinking.cycle": "shift+tab" }));
+    const pi = await boot(); // claim still registered (claude consent)...
+    assert.ok(pi.shortcuts.has("shift+tab"));
+    const ctx = makeCtx({});
+    await pi.emit("session_start", { reason: "resume" }, ctx);
+    await settleKeybindFlow();
+    assert.ok(ctx.notifications.some((n) => /app\.thinking\.cycle is bound again/.test(n.message)));
+    assert.deepEqual(JSON.parse(fs.readFileSync(bindingsPath(agentDir), "utf8")), { "app.thinking.cycle": "shift+tab" }, "drift is not auto-repaired");
+  });
+});
+
+test("keybind consent: a malformed consent file is reported, ignored, and replaceable", async () => {
+  await withFreshAgentDir(async (agentDir) => {
+    fs.writeFileSync(consentPath(agentDir), "{broken");
+    const pi = await boot();
+    assert.ok(!pi.shortcuts.has("shift+tab"), "malformed consent claims nothing");
+    const ctx = makeCtx({ withCustom: true, customChoices: ["keep-pi-defaults"] });
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await settleKeybindFlow();
+    assert.ok(ctx.notifications.some((n) => /invalid and was ignored/.test(n.message)));
+    assert.equal(JSON.parse(fs.readFileSync(consentPath(agentDir), "utf8")).decision, "keep-pi-defaults");
+  });
+});
+
+test("/control-keys: usage, forced re-run, and conversion from keep to claude", async () => {
+  await withFreshAgentDir(async (agentDir) => {
+    const pi = await boot();
+    const ctx = makeCtx({ withCustom: true });
+    await pi.commands.get("control-keys")!.handler("now", ctx);
+    await settleKeybindFlow();
+    assert.ok(ctx.notifications.some((n) => /Usage: \/control-keys/.test(n.message)));
+    assert.ok(!fs.existsSync(consentPath(agentDir)), "usage errors write nothing");
+    const ctx2 = makeCtx({ withCustom: true, customChoices: ["claude"] });
+    await pi.commands.get("control-keys")!.handler("", ctx2);
+    await settleKeybindFlow();
+    assert.equal(JSON.parse(fs.readFileSync(consentPath(agentDir), "utf8")).decision, "claude");
+    assert.deepEqual(JSON.parse(fs.readFileSync(bindingsPath(agentDir), "utf8")), { "app.thinking.cycle": [] });
+    assert.ok(ctx2.notifications.some((n) => /shift\+tab now cycles modes/.test(n.message)));
+  });
 });

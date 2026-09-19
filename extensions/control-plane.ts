@@ -65,6 +65,23 @@ import {
   readWorkspaceTodo,
   writeWorkspaceTodo,
 } from "../src/control-plane/todo-store.ts";
+import {
+  agentConfigDir,
+  applyUnbinds,
+  canonicalizeKeyId,
+  consentDrift,
+  effectiveBindings,
+  findOccupantActions,
+  type KeybindConsent,
+  OWN_EXTENSION_SHORTCUTS,
+  planUnbinds,
+  readConsent,
+  CONSENT_FILE,
+  readKeybindingsConfig,
+  validateRecordedKey,
+  writeConsent,
+  writeKeybindingsConfig,
+} from "../src/control-plane/keybind-consent.ts";
 
 import {
   parseBwrapArgs,
@@ -2268,6 +2285,10 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     contextWarnedLevel = null;
     void refreshProspectiveCount(ctx);
     updateStatus(ctx);
+    // Fire-and-forget: the consent dialog / drift check must not delay or
+    // reorder session startup (restores, footer, credits). It resolves on its
+    // own microtasks; nothing else depends on its completion.
+    void offerKeybindSetup(ctx);
   });
 
   pi.on("agent_settled", (_event, ctx) => {
@@ -3185,6 +3206,295 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     return handleDecision(event, ctx, decision);
   });
 
+  // ---- keybind consent (nothing about the user's keymap changes silently) ----
+  //
+  // The control-plane claims shift+tab for mode cycling (Claude Code-style),
+  // but pi reserves that key for app.thinking.cycle: extension shortcuts on
+  // reserved keys are skipped unless the user unbinds the action in
+  // keybindings.json. History: the README claimed that unbind was
+  // pre-configured; it never was, so the claim silently failed with a startup
+  // warning. The fix is consent-based: on first interactive use pi asks —
+  // Claude-style keybinds / record your own key / keep pi defaults — and only
+  // a recorded decision ever writes keybindings.json or claims a reserved
+  // key. alt+p is this extension's own shortcut and always cycles modes.
+  // Pure logic: ../src/control-plane/keybind-consent.ts.
+
+  const consentDir = agentConfigDir();
+  const storedKeybindConsent = readConsent(consentDir);
+  // A malformed consent file is reported + re-offered by offerKeybindSetup on
+  // session_start; here it only means "no usable decision yet".
+
+  // Cheat-sheet label matches what is actually claimed, never the intent.
+  let modeCycleLabel = "alt+p";
+  {
+    const stored = storedKeybindConsent.consent;
+    if (stored?.decision === "claude") modeCycleLabel = "alt+p / shift+tab";
+    else if (stored?.decision === "custom" && stored.customKey && validateRecordedKey(stored.customKey).ok) {
+      modeCycleLabel = `alt+p / ${stored.customKey}`;
+    }
+  }
+
+  // pi-tui's parseKey turns raw terminal bytes into a canonical key id
+  // ("\x13" -> "ctrl+s"); unavailable outside a real TUI, where the recorder
+  // is never shown anyway. Same fallback posture as the imports above.
+  let parseKeyFn: ((data: string) => string) | null = null;
+  try {
+    const tui = (await import("@earendil-works/pi-tui")) as unknown as {
+      parseKey?: (data: string) => string;
+    };
+    parseKeyFn = tui.parseKey ?? null;
+  } catch {
+    parseKeyFn = null;
+  }
+
+  const cheatLine = (text: string, width: number): string =>
+    truncateToWidth !== null ? truncateToWidth(text, width) : text.slice(0, Math.max(0, width));
+
+  const consentNow = () => new Date().toISOString();
+
+  const keybindDialog = <T>(
+    _tui: { requestRender?(): void },
+    _theme: unknown,
+    _keybindings: unknown,
+    done: (value: T) => void,
+  ) => {
+    const lines = [
+      "Keybind setup — control-plane mode cycling",
+      "",
+      "shift+tab is reserved by pi for thinking-level cycling, so this",
+      "extension's claim on it is skipped unless you unbind it here.",
+      "Nothing below changes your keymap without your explicit choice:",
+      "",
+      "  c  Claude Code-style: shift+tab cycles modes (thinking: /effort)",
+      "  r  record my own key for mode cycling",
+      "  k  keep pi defaults (alt+p only; shift+tab keeps cycling thinking)",
+      "",
+      "press c / r / k · esc keeps pi defaults · re-run anytime: /control-keys",
+    ];
+    return {
+      render: (width: number): string[] => lines.map((line) => cheatLine(line, width)),
+      handleInput: (data: string): void => {
+        if (data === "c") done("claude" as T);
+        else if (data === "r") done("custom" as T);
+        else if (data === "k" || data === "\x1b") done("keep-pi-defaults" as T);
+      },
+    };
+  };
+
+  const keybindRecorder = <T>(
+    tui: { requestRender?(): void },
+    _theme: unknown,
+    _keybindings: unknown,
+    done: (value: T) => void,
+  ) => {
+    let captured: string | null = null;
+    const lines = (): string[] => [
+      "Mode-cycle key recording",
+      "",
+      "Press the key combination now (ctrl/alt/super + key, or f1-f12).",
+      `Recorded: ${captured ?? "(none yet)"}`,
+      "",
+      captured ? "enter confirm · esc cancel · another combo replaces" : "esc cancel",
+    ];
+    return {
+      render: (width: number): string[] => lines().map((line) => cheatLine(line, width)),
+      handleInput: (data: string): void => {
+        const parsed = parseKeyFn !== null ? parseKeyFn(data) : data;
+        if (parsed === "escape" || parsed === "esc") {
+          done(null as T);
+          return;
+        }
+        if (parsed === "enter" || parsed === "return") {
+          if (captured !== null) done(captured as T);
+          return;
+        }
+        const canonical = canonicalizeKeyId(parsed);
+        if (canonical !== null) captured = canonical;
+        tui.requestRender?.();
+      },
+    };
+  };
+
+  const recordKeybindConsent = (
+    ctx: ExtensionContext,
+    consent: KeybindConsent,
+  ): boolean => {
+    const error = writeConsent(consentDir, consent);
+    if (error !== null) {
+      ctx.ui.notify(`Control plane: could not save the keybind decision (${error}). keybindings.json was not changed.`, "warning");
+      return false;
+    }
+    return true;
+  };
+
+  const applyClaudeKeybind = (ctx: ExtensionContext): void => {
+    const { config, malformed } = readKeybindingsConfig(consentDir);
+    if (malformed) {
+      ctx.ui.notify(
+        "Control plane: keybindings.json is not valid JSON; fix or remove it, then run /control-keys again. Nothing was changed.",
+        "warning",
+      );
+      return;
+    }
+    const occupants = findOccupantActions("shift+tab", effectiveBindings(config as Record<string, string> | null));
+    const unbinds = planUnbinds(occupants);
+    const writeError = writeKeybindingsConfig(consentDir, applyUnbinds(config, unbinds));
+    if (writeError !== null) {
+      ctx.ui.notify(`Control plane: could not update keybindings.json (${writeError}). Nothing was changed.`, "warning");
+      return;
+    }
+    if (!recordKeybindConsent(ctx, { version: 1, decision: "claude", unboundActions: unbinds, decidedAt: consentNow() })) {
+      return;
+    }
+    modeCycleLabel = "alt+p / shift+tab";
+    ctx.ui.notify(
+      "Saved: shift+tab now cycles modes (Claude-style) once you run /reload or restart pi. Thinking level stays on /effort.",
+      "info",
+    );
+  };
+
+  const applyCustomKeybind = async (ctx: ExtensionContext): Promise<void> => {
+    const ui = ctx.ui as unknown as {
+      custom: <T>(
+        factory: (
+          tui: { requestRender?(): void },
+          theme: unknown,
+          keybindings: unknown,
+          done: (v: T) => void,
+        ) => { render(width: number): string[]; handleInput(data: string): void },
+      ) => Promise<T>;
+      confirm: (message: string) => Promise<boolean>;
+    };
+    for (;;) {
+      const recorded = await ui.custom<string | null>((tui, theme, keybindings, done) =>
+        keybindRecorder<string | null>(tui, theme, keybindings, done),
+      );
+      if (recorded === null || recorded === undefined) {
+        ctx.ui.notify("Keybind recording cancelled; nothing was changed.", "info");
+        return;
+      }
+      const check = validateRecordedKey(recorded);
+      if (!check.ok) {
+        ctx.ui.notify(`Control plane: ${check.reason}`, "warning");
+        continue;
+      }
+      const key = check.key;
+      if ((OWN_EXTENSION_SHORTCUTS as readonly string[]).includes(key)) {
+        ctx.ui.notify(`Control plane: ${key} is already used by this extension (alt+h lists all shortcuts). Pick another.`, "warning");
+        continue;
+      }
+      const { config, malformed } = readKeybindingsConfig(consentDir);
+      if (malformed) {
+        ctx.ui.notify(
+          "Control plane: keybindings.json is not valid JSON; fix or remove it, then run /control-keys again. Nothing was changed.",
+          "warning",
+        );
+        return;
+      }
+      const occupants = findOccupantActions(key, effectiveBindings(config as Record<string, string> | null));
+      const unbinds = planUnbinds(occupants);
+      const inherited = occupants.filter((action) => !unbinds.includes(action));
+      if (unbinds.length > 0 || inherited.length > 0) {
+        const plan: string[] = [];
+        if (unbinds.length > 0) plan.push(`unbind ${unbinds.join(", ")} in keybindings.json`);
+        if (inherited.length > 0) {
+          plan.push(`${inherited.join(", ")} keep their bindings but the control-plane shortcut takes priority`);
+        }
+        const confirmed = await ui.confirm(
+          `"${key}" is currently bound to: ${occupants.join(", ")}. Plan: ${plan.join("; ")}. Proceed?`,
+        );
+        if (!confirmed) {
+          ctx.ui.notify("Cancelled; nothing was changed.", "info");
+          return;
+        }
+      }
+      if (unbinds.length > 0 || config !== undefined) {
+        const writeError = writeKeybindingsConfig(consentDir, applyUnbinds(config, unbinds));
+        if (writeError !== null) {
+          ctx.ui.notify(`Control plane: could not update keybindings.json (${writeError}). Nothing was changed.`, "warning");
+          return;
+        }
+      }
+      if (!recordKeybindConsent(ctx, { version: 1, decision: "custom", customKey: key, unboundActions: unbinds, decidedAt: consentNow() })) {
+        return;
+      }
+      modeCycleLabel = `alt+p / ${key}`;
+      ctx.ui.notify(
+        `Saved: ${key} now cycles modes (alt+p unchanged) once you run /reload or restart pi.`,
+        "info",
+      );
+      return;
+    }
+  };
+
+  const applyKeepPiKeybind = (ctx: ExtensionContext): void => {
+    if (!recordKeybindConsent(ctx, { version: 1, decision: "keep-pi-defaults", decidedAt: consentNow() })) {
+      return;
+    }
+    modeCycleLabel = "alt+p";
+    ctx.ui.notify(
+      "Pi defaults kept: shift+tab cycles thinking level, alt+p cycles modes. Re-run /control-keys anytime.",
+      "info",
+    );
+  };
+
+  /**
+   * Offer the consent dialog once (no recorded decision yet), or verify the
+   * stored decision still matches keybindings.json (drift is reported, never
+   * auto-repaired — re-binding is the user's prerogative). Silent no-op
+   * without a modal host or when ui.custom is unavailable (headless, tests).
+   */
+  const offerKeybindSetup = async (ctx: ExtensionContext, options: { force?: boolean } = {}): Promise<void> => {
+    try {
+      if (ctx.mode !== "tui") return;
+      const { consent, malformed } = readConsent(consentDir);
+      if (malformed) {
+        ctx.ui.notify(
+          `Control plane: ${CONSENT_FILE} in the pi agent directory is invalid and was ignored; choose your keybind preference via /control-keys.`,
+          "warning",
+        );
+      }
+      if (!options.force && consent !== null) {
+        const { config, malformed: bindingsMalformed } = readKeybindingsConfig(consentDir);
+        if (!bindingsMalformed) {
+          const drifted = consentDrift(consent, config ?? {});
+          if (drifted.length > 0) {
+            ctx.ui.notify(
+              `Control plane: ${drifted.join(", ")} is bound again in keybindings.json, so the recorded mode-cycle claim is inactive. Review /control-keys or the file.`,
+              "warning",
+            );
+          }
+        }
+        return;
+      }
+      // The dialog below needs a modal host; without one (headless runs,
+      // test fakes) record nothing and stay silent.
+      if (typeof (ctx.ui as { custom?: unknown }).custom !== "function") return;
+      const ui = ctx.ui as unknown as {
+        custom: <T>(
+          factory: (
+            tui: { requestRender?(): void },
+            theme: unknown,
+            keybindings: unknown,
+            done: (v: T) => void,
+          ) => { render(width: number): string[]; handleInput(data: string): void },
+        ) => Promise<T>;
+      };
+      const choice = await ui.custom<"claude" | "custom" | "keep-pi-defaults">((tui, theme, keybindings, done) =>
+        keybindDialog<"claude" | "custom" | "keep-pi-defaults">(tui, theme, keybindings, done),
+      );
+      if (choice === "claude") applyClaudeKeybind(ctx);
+      else if (choice === "custom") await applyCustomKeybind(ctx);
+      else if (choice === "keep-pi-defaults") applyKeepPiKeybind(ctx);
+      // undefined/null host result: record nothing, prompt again next session.
+    } catch (error) {
+      ctx.ui.notify(
+        `Control plane: keybind setup failed (${error instanceof Error ? error.message : String(error)}). Nothing was changed.`,
+        "warning",
+      );
+    }
+  };
+
   // ---- commands ----
 
   pi.registerCommand("task", {
@@ -3214,6 +3524,17 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       } catch {
         ctx.ui.notify(`${result.message}. Model notification failed; the task remains saved and will appear in the next task-context refresh.`, "warning");
       }
+    },
+  });
+
+  pi.registerCommand("control-keys", {
+    description: "Review or change the consent-based mode-cycle keybind (Claude-style / custom / pi defaults)",
+    handler: async (args, ctx) => {
+      if (args.trim()) {
+        ctx.ui.notify("Usage: /control-keys (opens the keybind consent dialog)", "warning");
+        return;
+      }
+      await offerKeybindSetup(ctx, { force: true });
     },
   });
 
@@ -3878,7 +4199,13 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         };
         const baseUrl = process.env.PI_CONTROL_PLANE_SEARXNG_URL ?? DEFAULT_SEARXNG_BASE_URL;
         const outcome = await searchSearxng(baseUrl, query, fetchGet, MAX_SEARCH_RESULTS);
-        return { output: formatSearchResults(outcome) } as never;
+        // AgentToolResult contract: `content` is REQUIRED. Returning the
+        // legacy `{ output }` shape here crashed Pi's interactive renderer
+        // (getTextOutput reads result.content.filter) and killed the whole
+        // session with uncaughtException the moment the result rendered.
+        return {
+          content: [{ type: "text", text: formatSearchResults(outcome) }],
+        } as never;
       },
     });
 
@@ -4295,7 +4622,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         custom?: <T>(factory: unknown, options?: unknown) => Promise<T>;
       };
       if (ctx.mode !== "tui" || typeof uiAny.custom !== "function") {
-        emit("hotkeys", renderHotkeyCheatsheet());
+        emit("hotkeys", renderHotkeyCheatsheet(modeCycleLabel));
         return;
       }
       if (hotkeysModalOpen) return;
@@ -4304,7 +4631,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         await uiAny.custom<void>(
           (_tui: unknown, theme: { fg(color: string, text: string): string }, _kb: unknown, done: (r: void) => void) => ({
             render: (width: number) => {
-              const lines = renderHotkeyCheatsheet();
+              const lines = renderHotkeyCheatsheet(modeCycleLabel);
               const inner = Math.max(20, Math.min(width - 6, Math.max(...lines.map((l) => l.length)) + 2));
               const top = "╭" + "─".repeat(inner + 2) + "╮";
               const bottom = "╰" + "─".repeat(inner + 2) + "╯";
@@ -4492,11 +4819,26 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     handler: cycleModeHandler,
   });
 
-  // shift+tab is pi's default "cycle thinking level" binding; that keybinding
-  // is unbound in ~/.pi/agent/keybindings.json ("app.thinking.cycle": []) so
-  // this shortcut can claim the key. Thinking level moves to /effort.
-  pi.registerShortcut("shift+tab", {
-    description: "Control plane: cycle mode",
-    handler: cycleModeHandler,
-  });
+  // Consent-gated extra mode-cycle key. shift+tab is pi's reserved
+  // "cycle thinking level" action: extension claims on reserved keys are
+  // skipped with a startup warning unless the user unbinds the action in
+  // keybindings.json. This extension therefore registers the extra binding
+  // ONLY after a recorded consent (see offerKeybindSetup + /control-keys);
+  // without consent nothing is overridden and alt+p keeps working.
+  if (storedKeybindConsent.consent?.decision === "claude") {
+    pi.registerShortcut("shift+tab", {
+      description: "Control plane: cycle mode",
+      handler: cycleModeHandler,
+    });
+  } else if (
+    storedKeybindConsent.consent?.decision === "custom" &&
+    storedKeybindConsent.consent.customKey !== undefined &&
+    validateRecordedKey(storedKeybindConsent.consent.customKey).ok
+  ) {
+    const customModeCycleKey = storedKeybindConsent.consent.customKey;
+    pi.registerShortcut(customModeCycleKey, {
+      description: "Control plane: cycle mode",
+      handler: cycleModeHandler,
+    });
+  }
 }
