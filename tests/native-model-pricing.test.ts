@@ -25,12 +25,26 @@ const dist = process.env.PI_CODING_AGENT_DIST ?? path.join(
   ".local/lib/node_modules/@earendil-works/pi-coding-agent/dist",
 );
 const selector = path.join(dist, "modes/interactive/components/model-selector.js");
-const bundleChunk = path.join(dist, "bundle/chunks/chunk-JVUZSMYM.js");
 const patchScript = path.resolve("scripts/patch-pi-model-selector.mjs");
 
+// The bundle chunk defining the model selector is hash-named by esbuild and
+// changes on every Pi update; discover it exactly as the patch script does.
+function findBundleChunk(): string | null {
+  const dir = path.join(dist, "bundle/chunks");
+  if (!fs.existsSync(dir)) return null;
+  const hits = fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".js"))
+    .map((f) => path.join(dir, f))
+    .filter((f) => fs.readFileSync(f, "utf8").includes("loadModelsFromSnapshot(){"));
+  return hits.length === 1 ? hits[0] : null;
+}
+
 test("native /model preserves OpenRouter catalog pricing for scoped models", {
-  skip: !fs.existsSync(selector) || !fs.existsSync(bundleChunk),
+  skip: !fs.existsSync(selector) || findBundleChunk() === null,
 }, async () => {
+  const bundleChunk = findBundleChunk();
+  assert.ok(bundleChunk, "bundle chunk defining loadModelsFromSnapshot not found");
   // 1. The patched module must resolve every import it was given.
   await assert.doesNotReject(
     () => import(pathToFileURL(selector).href),
