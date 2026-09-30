@@ -71,7 +71,7 @@ test("renderBashStream draws a width-bounded box with status and tail", () => {
   // tailRows=2 keeps only the last two output lines.
   assert.match(lines[1], /ok 2/);
   assert.match(lines[2], /ok 3/);
-  assert.match(lines[lines.length - 1], /alt\+b hide/);
+  assert.match(lines[lines.length - 1], /alt\+o hide/);
 
   const done = renderBashStream(endBashStream(state, 4000, false), 40, 90_000, paint, opts);
   // Elapsed freezes at completion instead of tracking wall clock.

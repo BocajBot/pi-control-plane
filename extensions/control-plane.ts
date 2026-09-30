@@ -546,7 +546,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let projectRoot: string | null = null;
   let widgetVisible = false;
   // Live bash output: the current (or last) call's bounded tail, shown only
-  // while the alt+b widget is open. Never written to the transcript.
+  // while the alt+o widget is open. Never written to the transcript.
   let bashStream: BashStreamState | null = null;
   let bashStreamVisible = false;
   /** Timestamp of the last ctrl+alt+b, for the double-press backgrounding gesture. */
@@ -1677,7 +1677,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   };
   const refreshTodoWidget = () => todoWidgetTui?.requestRender(true);
 
-  // ---- live bash output (alt+b) ----
+  // ---- live bash output (alt+o) ----
   // A component-factory widget re-renders every TUI frame, so reading
   // `bashStream` in render() keeps the tail live while the command runs.
   let bashStreamTui: { requestRender(force?: boolean): void } | null = null;
@@ -2309,7 +2309,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
   // Bash output stream. Pi sends the cumulative output on every update, so the
   // buffer is replaced rather than appended to. Captured even while the widget
-  // is hidden, so alt+b can show what a running command has already printed.
+  // is hidden, so alt+o can show what a running command has already printed.
   pi.on("tool_execution_start", (event) => {
     if (event.toolName !== "bash") return;
     const command = typeof (event.args as { command?: unknown })?.command === "string"
@@ -4552,7 +4552,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     },
   });
 
-  pi.registerShortcut("alt+b", {
+  pi.registerShortcut("alt+o", {
     description: "Control plane: toggle live bash output widget",
     handler: (ctx) => {
       if (bashStreamVisible) {

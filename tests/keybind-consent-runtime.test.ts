@@ -11,12 +11,9 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { resolvePiDist } from "../scripts/pi-dist.mjs";
 
-const dist = [
-  process.env.PI_CODING_AGENT_DIST,
-  "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist",
-  path.join(os.homedir(), ".local/lib/node_modules/@earendil-works/pi-coding-agent/dist"),
-].find((p) => p && fs.existsSync(path.join(p, "core/extensions/loader.js")));
+const dist = resolvePiDist();
 
 const CONSENT = {
   version: 1 as const,
@@ -25,8 +22,9 @@ const CONSENT = {
 
 /**
  * Diagnostics about the consent-gated key only. Unrelated built-in collisions
- * (e.g. alt+b shadowing tui.editor.cursorWordLeft for the bash widget) are not
- * this test's subject and would otherwise fail every zero-diagnostic check.
+ * (a Pi release claiming a key this extension already registers, as 0.86
+ * did with alt+b before the bash widget moved to alt+o) are not this test's
+ * subject and would otherwise fail every zero-diagnostic check.
  */
 function keyDiagnostics(diagnostics: { message: string }[]): { message: string }[] {
   return diagnostics.filter((d) => /shift\+tab|ctrl\+shift\+m/.test(d.message));

@@ -6,11 +6,9 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { test } from "node:test";
+import { resolvePiDist } from "../scripts/pi-dist.mjs";
 
-const dist = [process.env.PI_CODING_AGENT_DIST,
-  "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist",
-  path.join(os.homedir(), ".local/lib/node_modules/@earendil-works/pi-coding-agent/dist"),
-].find((p) => p && fs.existsSync(path.join(p, "core/extensions/loader.js")));
+const dist = resolvePiDist();
 
 test("/models Ctrl+s saves the filtered selection; Enter/Esc/failed switches do not save", {
   skip: !dist,

@@ -216,7 +216,7 @@ export function renderBashStream(
     lines.push(border("│") + " " + paintOr("text", text, "text") + pad + border("│"));
   }
 
-  const hint = " alt+b hide ";
+  const hint = " alt+o hide ";
   const hintPad = Math.max(0, inner - opts.measure(hint));
   lines.push(border("╰") + border("─".repeat(hintPad)) + paintOr("dim", hint, "muted") + border("╯"));
   return lines;

@@ -466,7 +466,7 @@ export function renderHotkeyCheatsheet(modeCycleKeys = "alt+p"): string[] {
     "Hotkeys — press any key to close",
     "",
     "Control plane:",
-    "  alt+b  toggle live bash output (tail of the running command)",
+    "  alt+o  toggle live bash output (tail of the running command)",
     "  ctrl+alt+b x2  re-run the running bash command as a background task",
     "  alt+c  toggle context-preview widget",
     "  alt+e  view/edit session context in nvim (:wq apply, :q! cancel)",

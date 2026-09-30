@@ -309,7 +309,15 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
     if (result === "save-failed") {
       ctx.ui.notify("Model selected for this session, but saving the default failed. Check Pi settings permissions and JSON validity.", "error");
     }
-    if (result === "switch-failed") ctx.ui.notify("Model switch failed; default not saved.", "error");
+    if (result === "switch-failed") {
+      // Pi's setModel returns false (without switching) when the provider has
+      // no configured credentials; name the provider so the fix is obvious.
+      const provider = picked.value.split("/")[0] ?? "the provider";
+      ctx.ui.notify(
+        `Model switch failed; default not saved. Pi has no credentials for "${provider}" — run /login or set its API key (e.g. ${provider.toUpperCase().replace(/-/g, "_")}_API_KEY), then pick again.`,
+        "error",
+      );
+    }
   };
 
   // Keep the frecency data warm on every selection, however it happens.

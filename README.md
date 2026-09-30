@@ -45,10 +45,12 @@ relevant source, tests, and `docs/` before changing Pi behavior.
   measured by the control plane; `/swap status` and `/swap cancel` manage it;
   a manual model change cancels an active swap; state persists with the
   session.
-- **Native `/model` patch:** Pi 0.85.1 source and executable bundle under
-  `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/` restore
-  cached OpenRouter catalog costs after scoped-model refresh. `pi update` can
-  overwrite this patch. It is applied by
+- **Native `/model` patch:** the installed Pi's source and executable bundle
+  (located by [`scripts/pi-dist.mjs`](scripts/pi-dist.mjs): `$PI_CODING_AGENT_DIST`,
+  else the managed install `~/.pi/agent/install/releases/<current-version>/…/dist`,
+  else a legacy global npm prefix) restore cached OpenRouter catalog costs after
+  scoped-model refresh. Verified on Pi 0.86.1. `pi update` installs a new
+  release directory, which drops this patch. It is applied by
   [`scripts/patch-pi-model-selector.mjs`](scripts/patch-pi-model-selector.mjs)
   (`npm run patch-pi`; `--check` reports without writing): anchored
   replacements, idempotent, aborts without writing if an anchor is not unique,
@@ -69,8 +71,9 @@ relevant source, tests, and `docs/` before changing Pi behavior.
 - **Session UX:** `alt+e` edits context in nvim, `alt+s` previews next send,
   `alt+c` toggles context preview, `ctrl+alt+t` picks tool profiles,
   `ctrl+alt+r` reloads when idle, `alt+i` opens diagnostics, `alt+h` opens
-  hotkey help. `alt+d` remains Pi editor delete-word-forward and must not be
-  claimed by this extension.
+  hotkey help, `alt+o` toggles the live bash output widget. `alt+d` remains Pi
+  editor delete-word-forward and `alt+b`/`alt+f` remain Pi cursor word
+  left/right (built-in since 0.86); this extension must not claim them.
 
 ### Preservation rules
 
@@ -241,7 +244,7 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 
 | Key | Action |
 |---|---|
-| `alt+b` | Toggle a live **bash output** widget above the editor: the tail of the running (or last) bash call, with elapsed time and running/done/failed status. Hidden by default and never written to the transcript; output is captured even while hidden, so pressing `alt+b` mid-command shows what has already printed |
+| `alt+o` | Toggle a live **bash output** widget above the editor: the tail of the running (or last) bash call, with elapsed time and running/done/failed status. Hidden by default and never written to the transcript; output is captured even while hidden, so pressing `alt+o` mid-command shows what has already printed |
 | `ctrl+alt+b` `ctrl+alt+b` | Move the running bash command to a **background task** (pi-background-tasks). Pi has no per-tool-call detach, so this aborts the foreground call — and with it the agent turn — and **re-runs the command from the beginning** as a task; side effects it already performed happen again. The first press only prints the warning, the second acts. Output then goes to the task log (`/logs <id>`), and the widget shows `background` |
 | `alt+c` | Toggle a context-preview widget above the editor |
 | `alt+e` | Open the session context in **nvim** to view and edit it |

@@ -21,21 +21,24 @@
  *
  * Usage: node scripts/patch-pi-model-selector.mjs [--check] [--dist <dir>]
  *   --check  report status, write nothing (exit 1 if a patch is missing)
- *   --dist   Pi dist directory (default: $PI_CODING_AGENT_DIST or
- *            ~/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist)
+ *   --dist   Pi dist directory (default: $PI_CODING_AGENT_DIST, else the
+ *            managed install under ~/.pi/agent/install, else a legacy global
+ *            npm prefix — see scripts/pi-dist.mjs)
  */
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { piDistCandidates, resolvePiDist } from "./pi-dist.mjs";
 
 const args = process.argv.slice(2);
 const check = args.includes("--check");
 const distArg = args[args.indexOf("--dist") + 1];
-const dist = path.resolve(
-  (args.includes("--dist") && distArg) ||
-    process.env.PI_CODING_AGENT_DIST ||
-    path.join(os.homedir(), ".local/lib/node_modules/@earendil-works/pi-coding-agent/dist"),
-);
+const explicitDist = args.includes("--dist") && distArg ? path.resolve(distArg) : undefined;
+const dist = explicitDist ?? resolvePiDist("modes/interactive/components/model-selector.js");
+if (dist === undefined) {
+  console.error("no installed Pi dist found; looked in:");
+  for (const c of piDistCandidates()) console.error(`  ${c}`);
+  process.exit(2);
+}
 
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
