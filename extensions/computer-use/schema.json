@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "computer_action",
+  "description": "One GUI action for the computer-use loop. Coordinates are normalized to 0-999 on both axes and scaled to the actual screen at execution time.",
+  "type": "object",
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["click", "double_click", "right_click", "type", "key", "scroll", "drag", "wait", "done"]
+    },
+    "x": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 999,
+      "description": "Horizontal click target, 0 = left edge, 999 = right edge. Required for click/double_click/right_click/drag (drag start x)."
+    },
+    "y": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 999,
+      "description": "Vertical click target, 0 = top edge, 999 = bottom edge. Required for click/double_click/right_click/drag (drag start y)."
+    },
+    "x2": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 999,
+      "description": "Drag end x. Required only for drag."
+    },
+    "y2": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 999,
+      "description": "Drag end y. Required only for drag."
+    },
+    "text": {
+      "type": "string",
+      "description": "Literal text to type. Required only for type. Never send shell commands or credentials here."
+    },
+    "key": {
+      "type": "string",
+      "description": "xdotool key combination, e.g. 'Return', 'ctrl+l', 'alt+Tab'. Required only for key."
+    },
+    "direction": {
+      "type": "string",
+      "enum": ["up", "down"],
+      "description": "Scroll direction. Required only for scroll."
+    },
+    "thought": {
+      "type": "string",
+      "description": "One short sentence explaining why this action advances the task."
+    }
+  },
+  "required": ["action", "thought"],
+  "additionalProperties": false
+}
