@@ -15,7 +15,7 @@
  */
 
 import { spawn, execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultConfigFromEnv, getScreenGeometry, runTask, selfTest } from "./core";
@@ -30,6 +30,14 @@ function xdotool(args: string[]): string {
 const DISPLAY = process.env.DISPLAY ?? ":0";
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const artifactDir = join(HERE, "artifacts", stamp);
+// Screenshots are ~10 MB per run; keep only the newest runs (probe-crop and preflight are controls, not runs).
+const KEEP_RUNS = Number(process.env.COMPUTER_USE_KEEP_RUNS ?? 5);
+function pruneArtifacts() {
+	const root = join(HERE, "artifacts");
+	if (!existsSync(root)) return;
+	const runs = readdirSync(root).filter((d) => /^\d{4}-\d{2}-\d{2}T/.test(d)).sort();
+	for (const d of runs.slice(0, Math.max(0, runs.length - KEEP_RUNS))) rmSync(join(root, d), { recursive: true, force: true });
+}
 
 async function main() {
 	if (process.argv.includes("--selftest")) {
@@ -69,6 +77,7 @@ async function main() {
 	}
 	if (existing) throw new Error(`a window named CU-Demo already exists (pids/wids: ${existing}); refusing to run`);
 
+	pruneArtifacts();
 	mkdirSync(artifactDir, { recursive: true });
 
 	// MPX input isolation: the agent gets its own "CU-Agent" master cursor so

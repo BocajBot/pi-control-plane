@@ -68,3 +68,7 @@ Development load without installing: `pi --extension ./extensions/computer-use/i
   `xdotool` is steered by the `cu-client-pointer.so` preload shim (build
   command in `cu-client-pointer.c`; rebuild after an X11/libXi upgrade).
 - `captureToDataUrl` (artifact-less mode) intentionally unimplemented.
+
+## Game harness
+
+Moved to the private repo `BocajBot/atlyss-fastcu-bridge` (was `game/`).
