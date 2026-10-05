@@ -1,5 +1,9 @@
 # Pi Control Plane
 
+![Pi extension](https://img.shields.io/badge/Pi-extension-8a2be2)
+![Node](https://img.shields.io/badge/node-%E2%89%A522.6-339933?logo=node.js&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178c6?logo=typescript&logoColor=white)
+
 A control-plane extension for the [Pi coding agent](https://github.com/earendil-works/pi-mono). It makes visible — and actually enforces — things that are normally invisible while an agent works:
 
 1. **What the model can see** (context files, skills, tools, system prompt, token usage) — `/context`
@@ -7,123 +11,57 @@ A control-plane extension for the [Pi coding agent](https://github.com/earendil-
 
 The central rule: **you can inspect and correct Pi's context before Pi is permitted to modify anything.** Enforcement is real — a mode that would only change a label is treated as a bug.
 
-## Continuity contract — read before changing Pi
+## Features
 
-This repository is working record for custom Pi behavior. Preserve every item
-below unless user explicitly asks to remove or replace it. Read this section,
-relevant source, tests, and `docs/` before changing Pi behavior.
+- **Enforced modes** — Plan (read-only), Manual (confirm risky calls), Accept (auto-accept in-root edits), Auto (credential-path protection only). Fails closed: corrupted state restores as Plan, a broken policy file means read-only.
+- **Context inspection and editing** — `/context` summaries, diffs, verified source toggles, tool profiles, exact token recounts, and an nvim context editor (`alt+e`) / send preview (`alt+s`).
+- **Edit safety** — read-before-edit, backup-before-edit, and a sensitive-path denylist.
+- **OS isolation (optional)** — `/bwrap` wraps allowed `bash` calls in bubblewrap with credential paths blanked.
+- **Model tooling** — typeahead `/models` picker (`alt+m`) with frecency, paging, and OpenRouter price badges; `/swap` temporary model switches that revert on a condition.
+- **Persistent work state** — top-right To-Do overlay, `/task add`, and a `/scratchpad` that survives `/compact`.
+- **Live usage** — footer with context %, OpenRouter balance, and live cost projection; per-turn timing ledger.
+- **Local-first tools** — `local_web_search` (SearxNG) and `transcribe_audio` (local Whisper).
 
-### Custom surfaces
+## Quick start
 
-- **Control plane:** `/mode`, `alt+p`, and — after explicit keybind consent —
-  `shift+tab` (or a recorded custom key) enforce Plan, Manual, Accept, and
-  Auto. `/control-keys` opens the consent dialog (Claude-style keybinds /
-  record your own / keep Pi defaults); without a recorded decision nothing is
-  overridden. `/context` exposes and controls injected context,
-  tool profiles, exact recounting, and edited-context restoration. `/bwrap`
-  provides optional OS isolation. `/harness-rules` manages remembered
-  confirmations. `/control-ui` selects minimal, details, or timing views.
-- **Persistent work state:** `/task add <text>` appends to the persistent task
-  list, refreshes the overlay, and injects a model-visible update into the
-  current session (steered into a running turn; otherwise included on the next
-  turn without starting generation; never a request to duplicate the task).
-  `/scratchpad` survives compaction and remains
-  injected. `todo` creates visible tasks. Open tasks stay in a noncapturing
-  top-right widget; `done` removes task state and writes `Task [id] -
-  description has completed.` into transcript. `/todo-clear` removes all tasks
-  (including unfinished ones) without completion entries. `/clear` aliases Pi `/new`.
-- **Custom model surface:** `/models` and `alt+m` provide typeahead, frecency,
-  direct model references, PageUp/PageDown navigation, Ctrl+s to select and
-  save the highlighted model as the global default, and OpenRouter
-  input/output price badges. Native `/model` also keeps OpenRouter price badges
-  for both all and scoped lists.
-- **Temporary model swap:** `/swap <model> until <condition>` (or `for <N>
-  prompts|minutes`) switches the session to another model immediately and
-  reverts to the original when the condition is met — checked at turn
-  boundaries and on a 20s idle timer. Free-text conditions are judged by the
-  saved global default model (the trusted evaluator) fed ground-truth facts
-  measured by the control plane; `/swap status` and `/swap cancel` manage it;
-  a manual model change cancels an active swap; state persists with the
-  session.
-- **Native `/model` patch:** the installed Pi's source and executable bundle
-  (located by [`scripts/pi-dist.mjs`](scripts/pi-dist.mjs): `$PI_CODING_AGENT_DIST`,
-  else the managed install `~/.pi/agent/install/releases/<current-version>/…/dist`,
-  else a legacy global npm prefix) restore cached OpenRouter catalog costs after
-  scoped-model refresh. Verified on Pi 0.86.1. `pi update` installs a new
-  release directory, which drops this patch. It is applied by
-  [`scripts/patch-pi-model-selector.mjs`](scripts/patch-pi-model-selector.mjs)
-  (`npm run patch-pi`; `--check` reports without writing): anchored
-  replacements, idempotent, aborts without writing if an anchor is not unique,
-  computes the `config.js` import path from the target file's location, and
-  discovers the bundle's minified fs/path aliases from its own imports. Never
-  hand-edit these files (a hand edit once wrote the import one directory
-  short). [`tests/native-model-pricing.test.ts`](tests/native-model-pricing.test.ts)
-  imports the patched module, runs the script in `--check` mode, and greps
-  both artifacts; it fails when either loses the patch.
-- **Custom tools:** `local_web_search` uses local SearxNG; `transcribe_audio`
-  uses local Whisper service sequentially; `todo` owns task state. Tool names
-  are part of model-visible API. Do not add a second `todo` or collide with
-  another extension's tool name.
-- **TUI and live usage:** cyberpunk theme supplies readable editor/Working
-  state, neon purple To-Do border, neon blue `Tasks x/y`, yellow open-task
-  bullets, visible footer credits, live OpenRouter cost projection, context
-  counts, timing, diagnostics, and active-tool header.
-- **Session UX:** `alt+e` edits context in nvim, `alt+s` previews next send,
-  `alt+c` toggles context preview, `ctrl+alt+t` picks tool profiles,
-  `ctrl+alt+r` reloads when idle, `alt+i` opens diagnostics, `alt+h` opens
-  hotkey help, `alt+o` toggles the live bash output widget. `alt+d` remains Pi
-  editor delete-word-forward and `alt+b`/`alt+f` remain Pi cursor word
-  left/right (built-in since 0.86); this extension must not claim them.
+Requirements: [Pi](https://github.com/earendil-works/pi-mono) and Node.js 22.6+ (tests run TypeScript directly).
 
-### Preservation rules
+```bash
+git clone https://github.com/BocajBot/pi-control-plane.git
+cd pi-control-plane
+npm install
+pi install "$PWD"
+```
 
-- Preserve mode enforcement, credential-path protection, read-before-edit,
-  backup-before-edit, and fail-closed malformed-state handling.
-- Preserve both model pickers: `/models` is extension-owned; `/model` is
-  native Pi with installed-runtime price repair. A fix to one does not repair
-  the other.
-- Preserve the swap trust boundary: a free-text condition is judged only by
-  the saved global default model from ground-truth facts — never by the
-  swapped-to model, the working session model, or any model-supplied claim.
-  A non-verdict evaluator reply is retried, never guessed. Reverts go only to
-  the captured `originalModel`.
-- Preserve task persistence, wrapping, overlay placement, completion removal,
-  and completion transcript entries together. Do not reintroduce completed
-  task rows or a duplicate task tool.
-- Preserve live credit updates from completed OpenRouter responses; do not
-  defer balance changes until next prompt. The cost projection floor
-  (`baseline - reportedCost`) assumes balance only falls, so a snapshot above
-  the baseline is treated as an account top-up and rebaselines the projection
-  while a cost is being projected.
-- Preserve user-local configuration and unrelated dirty files. Never print or
-  persist OpenRouter keys, provider credentials, or raw sensitive context.
+Then start `pi`, run `/context` to see what the model sees, and `/mode plan` to go read-only. Press `alt+h` for the hotkey cheat sheet.
 
-### Change and documentation protocol
+Optional extras each feature uses if present: [SearxNG](https://github.com/searxng/searxng) on `127.0.0.1:8888` (web search), [bubblewrap](https://github.com/containers/bubblewrap) (`/bwrap`, Linux), nvim or vim (context editor), llama-swap (exact token recounts), and a local Whisper service (`transcribe_audio`).
 
-1. Map affected command, tool, event handler, persistence entry, and TUI
-   surface before editing. Keep extension source, tests, and installed-runtime
-   patches distinct.
-2. Add or update regression coverage for changed behavior. For native `/model`,
-   run `npm run patch-pi` then `node --test tests/native-model-pricing.test.ts`
-   after every Pi update.
-3. Update this continuity contract when feature inventory, ownership,
-   preservation rule, user-visible behavior, or native-runtime path changes.
-   Update command details here, `docs/ARCHITECTURE.md` for data flow/security,
-   `docs/TUI.md` for rendering, and `docs/TESTING.md` for validation coverage.
-4. Run focused tests, `git diff --check`, then applicable full tests. Record
-   failed checks exactly; never claim behavior verified from source inspection
-   alone.
+## Contents
+
+- [Installation](#installation)
+- [Default behavior](#default-behavior)
+- [Commands](#commands)
+- [Hotkeys](#hotkeys)
+- [Model picker](#model-picker-altm--models)
+- [Temporary model swap](#temporary-model-swap-swap)
+- [Web search](#web-search-local_web_search-tool) and [web access](#web-access-fetch_content--get_search_content--source_check)
+- [What each file does](#what-each-file-does)
+- [Current limitations](#current-limitations)
+- [Development](#development)
+- [Continuity contract](#continuity-contract--read-before-changing-pi)
+- Docs: [Architecture](docs/ARCHITECTURE.md) · [Security](docs/SECURITY.md) · [TUI](docs/TUI.md) · [Testing](docs/TESTING.md)
 
 ## Installation
 
 ```bash
-pi install ~/Documents/pi-control-plane
+pi install /path/to/pi-control-plane
 ```
 
 This adds the package to `~/.pi/agent/settings.json` (`packages` list). Nothing else is changed. To uninstall:
 
 ```bash
-pi remove ../../Documents/pi-control-plane   # the path as shown by: pi list
+pi remove <path>   # the path as shown by: pi list
 ```
 
 A backup of `settings.json` from before the first install exists at `~/.pi/agent/settings.json.bak.pre-control-plane-<timestamp>`.
@@ -287,7 +225,8 @@ A typeahead model picker built entirely on public extension APIs — the isolate
 - `pi.setModel` switches for this session only (including `/models <query>`). Ctrl+s explicitly saves `defaultProvider` and `defaultModel` through Pi's exported `SettingsManager`, preserving unrelated settings and thinking defaults. Success is reported only after the write finishes; a failed switch never saves, and a failed save reports that the model is session-only. Project settings and CLI overrides still take precedence over global defaults.
 
 Native `/model` retains its own selector. Its installed-runtime scoped
-OpenRouter pricing repair is documented in the continuity contract above.
+OpenRouter pricing repair is documented in the
+[continuity contract](#continuity-contract--read-before-changing-pi) below.
 
 ## Temporary model swap (`/swap`)
 
@@ -409,9 +348,14 @@ Note: the mode controls what *tools* may do. It does not change the model or its
 ## Development
 
 ```bash
-npm test        # no dependencies; Node built-in test runner
+npm install     # installs the typebox peer dependency
+npm test        # Node built-in test runner
+npm run patch-pi -- --check   # verify the installed-Pi /model pricing patch
 /reload         # inside pi, after editing extension code
 ```
+
+Before changing behavior, read the continuity contract below and
+[`AGENTS.md`](AGENTS.md).
 
 ## Additions restored 2026-09-14 (control plane only, no harness)
 
@@ -427,3 +371,110 @@ Cherry-picked from branch `harness-refactor-2026-09-14` without `pi-harness`:
 
 Code paths that key on harness tool names (`harness_delegate`, `harness_request_scope`, `pi_harness_bash`) are
 still present as string matches; without the harness extension they never fire.
+
+## Continuity contract — read before changing Pi
+
+This repository is working record for custom Pi behavior. Preserve every item
+below unless user explicitly asks to remove or replace it. Read this section,
+relevant source, tests, and `docs/` before changing Pi behavior.
+
+### Custom surfaces
+
+- **Control plane:** `/mode`, `alt+p`, and — after explicit keybind consent —
+  `shift+tab` (or a recorded custom key) enforce Plan, Manual, Accept, and
+  Auto. `/control-keys` opens the consent dialog (Claude-style keybinds /
+  record your own / keep Pi defaults); without a recorded decision nothing is
+  overridden. `/context` exposes and controls injected context,
+  tool profiles, exact recounting, and edited-context restoration. `/bwrap`
+  provides optional OS isolation. `/harness-rules` manages remembered
+  confirmations. `/control-ui` selects minimal, details, or timing views.
+- **Persistent work state:** `/task add <text>` appends to the persistent task
+  list, refreshes the overlay, and injects a model-visible update into the
+  current session (steered into a running turn; otherwise included on the next
+  turn without starting generation; never a request to duplicate the task).
+  `/scratchpad` survives compaction and remains
+  injected. `todo` creates visible tasks. Open tasks stay in a noncapturing
+  top-right widget; `done` removes task state and writes `Task [id] -
+  description has completed.` into transcript. `/todo-clear` removes all tasks
+  (including unfinished ones) without completion entries. `/clear` aliases Pi `/new`.
+- **Custom model surface:** `/models` and `alt+m` provide typeahead, frecency,
+  direct model references, PageUp/PageDown navigation, Ctrl+s to select and
+  save the highlighted model as the global default, and OpenRouter
+  input/output price badges. Native `/model` also keeps OpenRouter price badges
+  for both all and scoped lists.
+- **Temporary model swap:** `/swap <model> until <condition>` (or `for <N>
+  prompts|minutes`) switches the session to another model immediately and
+  reverts to the original when the condition is met — checked at turn
+  boundaries and on a 20s idle timer. Free-text conditions are judged by the
+  saved global default model (the trusted evaluator) fed ground-truth facts
+  measured by the control plane; `/swap status` and `/swap cancel` manage it;
+  a manual model change cancels an active swap; state persists with the
+  session.
+- **Native `/model` patch:** the installed Pi's source and executable bundle
+  (located by [`scripts/pi-dist.mjs`](scripts/pi-dist.mjs): `$PI_CODING_AGENT_DIST`,
+  else the managed install `~/.pi/agent/install/releases/<current-version>/…/dist`,
+  else a legacy global npm prefix) restore cached OpenRouter catalog costs after
+  scoped-model refresh. Verified on Pi 0.86.1. `pi update` installs a new
+  release directory, which drops this patch. It is applied by
+  [`scripts/patch-pi-model-selector.mjs`](scripts/patch-pi-model-selector.mjs)
+  (`npm run patch-pi`; `--check` reports without writing): anchored
+  replacements, idempotent, aborts without writing if an anchor is not unique,
+  computes the `config.js` import path from the target file's location, and
+  discovers the bundle's minified fs/path aliases from its own imports. Never
+  hand-edit these files (a hand edit once wrote the import one directory
+  short). [`tests/native-model-pricing.test.ts`](tests/native-model-pricing.test.ts)
+  imports the patched module, runs the script in `--check` mode, and greps
+  both artifacts; it fails when either loses the patch.
+- **Custom tools:** `local_web_search` uses local SearxNG; `transcribe_audio`
+  uses local Whisper service sequentially; `todo` owns task state. Tool names
+  are part of model-visible API. Do not add a second `todo` or collide with
+  another extension's tool name.
+- **TUI and live usage:** cyberpunk theme supplies readable editor/Working
+  state, neon purple To-Do border, neon blue `Tasks x/y`, yellow open-task
+  bullets, visible footer credits, live OpenRouter cost projection, context
+  counts, timing, diagnostics, and active-tool header.
+- **Session UX:** `alt+e` edits context in nvim, `alt+s` previews next send,
+  `alt+c` toggles context preview, `ctrl+alt+t` picks tool profiles,
+  `ctrl+alt+r` reloads when idle, `alt+i` opens diagnostics, `alt+h` opens
+  hotkey help, `alt+o` toggles the live bash output widget. `alt+d` remains Pi
+  editor delete-word-forward and `alt+b`/`alt+f` remain Pi cursor word
+  left/right (built-in since 0.86); this extension must not claim them.
+
+### Preservation rules
+
+- Preserve mode enforcement, credential-path protection, read-before-edit,
+  backup-before-edit, and fail-closed malformed-state handling.
+- Preserve both model pickers: `/models` is extension-owned; `/model` is
+  native Pi with installed-runtime price repair. A fix to one does not repair
+  the other.
+- Preserve the swap trust boundary: a free-text condition is judged only by
+  the saved global default model from ground-truth facts — never by the
+  swapped-to model, the working session model, or any model-supplied claim.
+  A non-verdict evaluator reply is retried, never guessed. Reverts go only to
+  the captured `originalModel`.
+- Preserve task persistence, wrapping, overlay placement, completion removal,
+  and completion transcript entries together. Do not reintroduce completed
+  task rows or a duplicate task tool.
+- Preserve live credit updates from completed OpenRouter responses; do not
+  defer balance changes until next prompt. The cost projection floor
+  (`baseline - reportedCost`) assumes balance only falls, so a snapshot above
+  the baseline is treated as an account top-up and rebaselines the projection
+  while a cost is being projected.
+- Preserve user-local configuration and unrelated dirty files. Never print or
+  persist OpenRouter keys, provider credentials, or raw sensitive context.
+
+### Change and documentation protocol
+
+1. Map affected command, tool, event handler, persistence entry, and TUI
+   surface before editing. Keep extension source, tests, and installed-runtime
+   patches distinct.
+2. Add or update regression coverage for changed behavior. For native `/model`,
+   run `npm run patch-pi` then `node --test tests/native-model-pricing.test.ts`
+   after every Pi update.
+3. Update this continuity contract when feature inventory, ownership,
+   preservation rule, user-visible behavior, or native-runtime path changes.
+   Update command details here, `docs/ARCHITECTURE.md` for data flow/security,
+   `docs/TUI.md` for rendering, and `docs/TESTING.md` for validation coverage.
+4. Run focused tests, `git diff --check`, then applicable full tests. Record
+   failed checks exactly; never claim behavior verified from source inspection
+   alone.
