@@ -2664,3 +2664,82 @@ test("/control-keys: usage, forced re-run, and conversion from keep to claude", 
     assert.ok(ctx2.notifications.some((n) => /shift\+tab now cycles modes/.test(n.message)));
   });
 });
+
+// ---- thinking budget (anti-overexpansion) wiring ----
+
+function thinkingCtx(level: string | undefined) {
+  const aborts = { count: 0 };
+  const ctx = { ...makeCtx({ cwd: tmpRoot() }), thinkingLevel: level, abort: () => { aborts.count += 1; } };
+  return { ctx, aborts };
+}
+const assistantStart = { type: "message_start", message: { role: "assistant" } };
+const thinkDelta = (n: number) => ({
+  type: "message_update",
+  message: { role: "assistant" },
+  assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "x".repeat(n) },
+});
+const settle = () => new Promise((r) => setTimeout(r, 20));
+const budgetDiags = (pi: FakePi) =>
+  pi.entries.filter((e) => e.customType === DIAGNOSTIC_ENTRY_TYPE && (e.data as { kind?: string }).kind === "blocked-thinking-overexpansion");
+
+test("thinking budget: over budget aborts once, audits, and delivers the fix after agent_end", async () => {
+  const pi = await boot();
+  const { ctx, aborts } = thinkingCtx("low"); // 4000
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.emit("message_start", assistantStart, ctx);
+  await pi.emit("message_update", thinkDelta(3000), ctx);
+  assert.equal(aborts.count, 0);
+  await pi.emit("message_update", thinkDelta(1500), ctx);
+  await pi.emit("message_update", thinkDelta(1500), ctx); // late deltas before abort lands
+  assert.equal(aborts.count, 1, "aborted exactly once");
+  const diags = budgetDiags(pi);
+  assert.equal(diags.length, 1);
+  assert.deepEqual({ ...(diags[0].data as object), at: undefined }, { kind: "blocked-thinking-overexpansion", level: "low", chars: 4500, budget: 4000, at: undefined });
+  assert.equal(pi.sentUserMessages.length, 0, "fix not sent mid-stream");
+  await pi.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+  await settle();
+  assert.equal(pi.sentUserMessages.length, 1);
+  assert.match(pi.sentUserMessages[0], /Rule: thinking-budget/);
+  await pi.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+  await settle();
+  assert.equal(pi.sentUserMessages.length, 1, "fix delivered once");
+});
+
+test("thinking budget: under budget, text deltas, and level off never abort", async () => {
+  const pi = await boot();
+  const { ctx, aborts } = thinkingCtx("medium"); // 8000
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  await pi.emit("message_start", assistantStart, ctx);
+  await pi.emit("message_update", thinkDelta(7000), ctx);
+  await pi.emit("message_update", { ...thinkDelta(0), assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "y".repeat(50000) } }, ctx);
+  const off = thinkingCtx(undefined);
+  await pi.emit("message_start", assistantStart, off.ctx);
+  await pi.emit("message_update", thinkDelta(100000), off.ctx);
+  await pi.emit("agent_end", { type: "agent_end", messages: [] }, ctx);
+  await settle();
+  assert.equal(aborts.count + off.aborts.count, 0);
+  assert.equal(pi.sentUserMessages.length, 0);
+});
+
+test("thinking budget: cooldown gives two messages 2x room; /harness-thinking-budget off disables", async () => {
+  const pi = await boot();
+  const { ctx, aborts } = thinkingCtx("low");
+  await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+  for (let i = 0; i < 4; i++) {
+    await pi.emit("message_start", assistantStart, ctx);
+    await pi.emit("message_update", thinkDelta(5000), ctx);
+  }
+  assert.equal(aborts.count, 2, "trip, two exempt messages, trip again");
+  await pi.commands.get("harness-thinking-budget")!.handler("off", ctx);
+  await pi.emit("message_start", assistantStart, ctx);
+  await pi.emit("message_start", assistantStart, ctx);
+  await pi.emit("message_start", assistantStart, ctx);
+  await pi.emit("message_update", thinkDelta(50000), ctx);
+  assert.equal(aborts.count, 2, "disabled: no abort");
+  await pi.commands.get("harness-thinking-budget")!.handler("on", ctx);
+  // Deltas streamed while off are not counted; enforcement resumes from re-enable.
+  await pi.emit("message_update", thinkDelta(4000), ctx);
+  assert.equal(aborts.count, 2, "re-enabled: off-period thinking not counted");
+  await pi.emit("message_update", thinkDelta(1), ctx);
+  assert.equal(aborts.count, 3, "re-enabled: thinking after re-enable is enforced");
+});

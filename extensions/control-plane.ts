@@ -158,6 +158,13 @@ import {
   planBackup,
   resolveNonCollidingPath,
 } from "../src/control-plane/backup.ts";
+import {
+  initialThinkingState,
+  onAssistantMessageStart,
+  overexpansionFix,
+  recordThinking,
+  thinkingBudgetFor,
+} from "../src/control-plane/thinking-budget.ts";
 import { isSensitiveReadTarget, type SensitiveReadExtra } from "../src/control-plane/sensitive-paths.ts";
 import {
   addRule,
@@ -296,6 +303,7 @@ export interface DiagnosticRow {
 /** kind -> [glyph, tone, sentence-case label]. Unknown kinds render pending. */
 const DIAGNOSTIC_LABELS: Record<string, [DiagnosticRow["glyph"], DiagnosticTone, string]> = {
   "blocked-read-before-edit": ["✗", "error", "Blocked: read before edit"],
+  "blocked-thinking-overexpansion": ["✗", "error", "Blocked: thinking over budget"],
   "read-out-of-scope-denied": ["✗", "error", "Read out of scope"],
   "backup-before-edit-failed": ["✗", "error", "Backup failed"],
   "advisor-budget-blocked": ["✗", "error", "Advisor budget blocked"],
@@ -580,6 +588,12 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   let advisorConsultsThisTask = 0;
   let advisorBudgetTaskKey: string | null = null;
   let advisorBudgetLifted = false;
+  // Thinking budget (anti-overexpansion; logic in thinking-budget.ts). Session
+  // scoped: /harness-thinking-budget off lasts until restart, which re-enables
+  // it (the safe direction, like the advisor lift).
+  let thinkingBudgetEnabled = true;
+  let thinkingState = initialThinkingState();
+  let pendingThinkingFix: string | null = null;
   // Exact token counting (memory only; raw payloads are never persisted).
   let lastProviderRequest: { payload: unknown; model: string; baseUrl: string } | null = null;
   let lastTokenCount: TokenCountResult | null = null;
@@ -1337,6 +1351,50 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     if (cost === null) return;
     credits?.recordCost(cost);
     refreshCredits("live", ctx);
+  });
+
+  // Thinking budget (hard rule, anti-overexpansion). A runaway thought has no
+  // tool call yet, so the tool_call gate never sees it: enforce mid-stream.
+  // Over budget -> audit, abort, and queue a short fix message; the fix is
+  // delivered on agent_end once the aborted run is idle (sending from inside
+  // the stream would race the abort). Cooldown in thinking-budget.ts stops an
+  // abort -> rethink -> abort loop.
+  pi.on("message_start", (event) => {
+    if ((event.message as { role?: string }).role === "assistant") {
+      thinkingState = onAssistantMessageStart(thinkingState);
+    }
+  });
+  pi.on("message_update", (event, ctx) => {
+    const update = event.assistantMessageEvent;
+    if (!thinkingBudgetEnabled || update?.type !== "thinking_delta") return;
+    const level = ctx.thinkingLevel ?? "off";
+    const budget = thinkingBudgetFor(level);
+    const verdict = recordThinking(thinkingState, update.delta.length, budget);
+    thinkingState = verdict.state;
+    if (!verdict.exceeded || verdict.limit === null) return;
+    pi.appendEntry(DIAGNOSTIC_ENTRY_TYPE, {
+      kind: "blocked-thinking-overexpansion",
+      level,
+      chars: thinkingState.chars,
+      budget: verdict.limit,
+      at: new Date().toISOString(),
+    });
+    pendingThinkingFix = overexpansionFix(thinkingState.chars, verdict.limit, level);
+    ctx.abort();
+  });
+  pi.on("agent_end", (_event, ctx) => {
+    if (pendingThinkingFix === null) return;
+    const fix = pendingThinkingFix;
+    pendingThinkingFix = null;
+    // agent_end fires before the run is idle (idle = after its listeners
+    // settle), so step out of the listener and wait; give up waiting after
+    // ~2s and queue as a follow-up instead.
+    const deliver = (tries: number) => {
+      if (ctx.isIdle()) return pi.sendUserMessage(fix);
+      if (tries >= 20) return pi.sendUserMessage(fix, { deliverAs: "followUp" });
+      setTimeout(() => deliver(tries + 1), 100).unref();
+    };
+    setTimeout(() => deliver(0), 0).unref();
   });
 
   /** Cyberpunk footer accents ("footerYellow"/"footerPurple") are optional
@@ -4042,6 +4100,29 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           return;
         }
       }
+    },
+  });
+
+  pi.registerCommand("harness-thinking-budget", {
+    description: "Show or toggle the per-message thinking budget (anti-overexpansion abort)",
+    getArgumentCompletions: (prefix) => {
+      const matches = ["on", "off", "status"].filter((s) => s.startsWith(prefix.toLowerCase()));
+      return matches.length > 0 ? matches.map((s) => ({ value: s, label: s })) : null;
+    },
+    handler: async (args, ctx) => {
+      const sub = (args.trim().split(/\s+/)[0] || "status").toLowerCase();
+      if (sub === "on" || sub === "off") {
+        thinkingBudgetEnabled = sub === "on";
+      } else if (sub !== "status") {
+        ctx.ui.notify("Usage: /harness-thinking-budget on|off|status", "warning");
+        return;
+      }
+      const level = ctx.thinkingLevel ?? "off";
+      const budget = thinkingBudgetFor(level);
+      emit("harness-thinking-budget", [
+        `Thinking budget: ${thinkingBudgetEnabled ? "on" : "off"} (session; restart re-enables)`,
+        `Current level ${level}: ${budget === null ? "unlimited" : `${budget} chars per assistant message`}`,
+      ]);
     },
   });
 

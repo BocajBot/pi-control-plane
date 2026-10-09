@@ -363,6 +363,10 @@ Cherry-picked from branch `harness-refactor-2026-09-14` without `pi-harness`:
 
 - `transcribe_audio` tool (local whisper; `bin/transcribe-voicemail.ts`; "voicemail" profile)
 - read-before-edit hard rule, backup-before-edit (pre-mutation snapshot, fails closed)
+- thinking-budget hard rule (anti-overexpansion): per-message thinking cap by level
+  (low 4k / medium 8k / xhigh 16k chars); over it the stream is aborted, audited, and a
+  one-line fix is sent; next 2 messages get 2x room; `/harness-thinking-budget on|off|status`
+  (`src/control-plane/thinking-budget.ts`)
 - reads free by default with a sensitive-path denylist; declined out-of-scope reads recorded
 - read-only shell default; Yes / No / Always on every confirm; "Always (remember)" rules that suppress repeat prompts
 - attended phase-switch dialog on phase-blocked mutating tools

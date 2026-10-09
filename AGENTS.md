@@ -7,7 +7,7 @@ of truth for user-visible expectations.
 ## Preserve
 
 - Control-plane modes and fail-closed policy behavior: credential protection,
-  read-before-edit, backup-before-edit, and malformed-state recovery.
+  read-before-edit, backup-before-edit, thinking-budget, and malformed-state recovery.
 - Both model selectors: extension `/models` + `alt+m`, and native `/model`.
   Native `/model` scoped OpenRouter pricing is an installed-runtime patch.
   Repair source and executable bundle together; run
