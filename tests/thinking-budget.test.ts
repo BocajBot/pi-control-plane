@@ -10,9 +10,9 @@ import {
 } from "../src/control-plane/thinking-budget.ts";
 
 test("budget by level: chosen values, off/unknown/undefined unlimited", () => {
-  assert.equal(thinkingBudgetFor("low"), 4000);
-  assert.equal(thinkingBudgetFor("medium"), 8000);
-  assert.equal(thinkingBudgetFor("xhigh"), 16000);
+  assert.equal(thinkingBudgetFor("low"), 2000);
+  assert.equal(thinkingBudgetFor("medium"), 4000);
+  assert.equal(thinkingBudgetFor("xhigh"), 8000);
   assert.equal(thinkingBudgetFor("off"), null);
   assert.equal(thinkingBudgetFor("bogus"), null);
   assert.equal(thinkingBudgetFor(undefined), null);

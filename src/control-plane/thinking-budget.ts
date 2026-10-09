@@ -21,12 +21,12 @@
 /** Per-message thinking budget in chars by thinking level. null = unlimited. */
 export const THINKING_BUDGET_CHARS: Readonly<Record<string, number | null>> = {
   off: null,
-  minimal: 2000,
-  low: 4000,
-  medium: 8000,
-  high: 12000,
-  xhigh: 16000,
-  max: 32000,
+  minimal: 1000,
+  low: 2000,
+  medium: 4000,
+  high: 6000,
+  xhigh: 8000,
+  max: 16000,
 };
 
 /** Assistant messages on the raised budget after a trip. */
