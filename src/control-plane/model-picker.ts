@@ -18,6 +18,26 @@ export const MAX_VISIBLE = 15;
 /** Page jump size for PageUp/PageDown in the picker list. */
 export const PAGE_JUMP = MAX_VISIBLE;
 
+/** Picker sort modes, cycled with Tab in the typeahead. */
+export type SortMode = "frecency" | "name" | "price" | "provider" | "publisher";
+export const SORT_MODES: readonly SortMode[] = ["frecency", "name", "price", "provider", "publisher"];
+
+export function nextSortMode(mode: SortMode): SortMode {
+  return SORT_MODES[(SORT_MODES.indexOf(mode) + 1) % SORT_MODES.length];
+}
+
+/**
+ * Primary (model-ref) column bounds for the picker's SelectList layout.
+ * pi-tui clamps the label column to 32 chars by default, which truncates long
+ * `provider/model` refs (observed max 41 in models.json) whenever a
+ * description column is shown (price labels, "current" marker). Grow the
+ * column with content up to 60 instead of clipping mid-name.
+ */
+export const PRIMARY_COLUMN_LAYOUT = {
+  minPrimaryColumnWidth: 32,
+  maxPrimaryColumnWidth: 60,
+} as const;
+
 export interface UsageEntry {
   count: number;
   lastUsed: number;
@@ -82,6 +102,65 @@ export function sortModels<T extends ModelLike>(models: readonly T[], usage: Usa
     if (lb !== la) return lb - la;
     return keyOf(a.provider, a.id).localeCompare(keyOf(b.provider, b.id));
   });
+}
+
+/**
+ * Upstream publisher of a model: OpenRouter-style ids carry it as the first
+ * `publisher/model` segment ("z-ai/glm-5.3"); the stealth `~z-ai/...` prefix
+ * variant is stripped. Ids without a publisher segment (local models) fall
+ * back to the provider name so they group instead of collapsing together.
+ */
+export function publisherOf(model: ModelLike): string {
+  const slash = model.id.indexOf("/");
+  if (slash <= 0) return model.provider;
+  return model.id.slice(0, slash).replace(/^~/, "") || model.provider;
+}
+
+/** Input/output cost pair, or null when the model exposes no usable cost. */
+function costOf(model: PricedModelLike): { input: number; output: number } | null {
+  const cost = model.cost;
+  if (cost === undefined || !Number.isFinite(cost.input) || !Number.isFinite(cost.output)) return null;
+  return { input: cost.input, output: cost.output };
+}
+
+/**
+ * Order models for the picker by the chosen mode:
+ *   frecency  — the default ordering (sortModels above);
+ *   name      — plain `provider/model` alphabetical, ignoring usage;
+ *   price     — cheapest input first (output breaks ties), unpriced models
+ *               last, name order within each group;
+ *   provider  — grouped by registry provider, name order within a group;
+ *   publisher — grouped by upstream publisher (publisherOf), name order
+ *               within a group.
+ */
+export function sortModelsBy<T extends PricedModelLike>(
+  mode: SortMode,
+  models: readonly T[],
+  usage: Usage,
+  localProvider: string,
+  now: number,
+): T[] {
+  const byName = (a: T, b: T): number => keyOf(a.provider, a.id).localeCompare(keyOf(b.provider, b.id));
+  if (mode === "name") return [...models].sort(byName);
+  if (mode === "provider") {
+    return [...models].sort((a, b) => a.provider.localeCompare(b.provider) || byName(a, b));
+  }
+  if (mode === "publisher") {
+    return [...models].sort((a, b) => publisherOf(a).localeCompare(publisherOf(b)) || byName(a, b));
+  }
+  if (mode === "price") {
+    return [...models].sort((a, b) => {
+      const ca = costOf(a);
+      const cb = costOf(b);
+      if (ca === null && cb === null) return byName(a, b);
+      if (ca === null) return 1;
+      if (cb === null) return -1;
+      if (ca.input !== cb.input) return ca.input - cb.input;
+      if (ca.output !== cb.output) return ca.output - cb.output;
+      return byName(a, b);
+    });
+  }
+  return sortModels(models, usage, localProvider, now);
 }
 
 /** One recorded use of a model: count +1, lastUsed = now. */
@@ -150,6 +229,7 @@ export type PickerKey =
   | { kind: "backspace" }
   | { kind: "page-up" }
   | { kind: "page-down" }
+  | { kind: "sort" }
   | { kind: "save-default" }
   | { kind: "other"; data: string };
 
@@ -162,6 +242,7 @@ export type PickerKey =
  */
 export function classifyKey(data: string): PickerKey {
   if (data === "\x13") return { kind: "save-default" };
+  if (data === "\t") return { kind: "sort" };
   if (data === "\x7f" || data === "\b") return { kind: "backspace" };
   if (data.length > 0 && !/[\x00-\x1f]/.test(data)) return { kind: "type", char: data };
   if (/^\x1b\[5(?:;[0-9]+)?~$/.test(data)) return { kind: "page-up" };

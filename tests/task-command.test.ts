@@ -9,3 +9,11 @@ test("/task parser accepts add with text and preserves internal whitespace", () 
     assert.deepEqual(parseTaskArgs(args), { kind: "usage" });
   }
 });
+
+test("/task parser accepts clear with no extra args, case-insensitive", () => {
+  assert.deepEqual(parseTaskArgs("clear"), { kind: "clear" });
+  assert.deepEqual(parseTaskArgs(" CLEAR "), { kind: "clear" });
+  for (const args of ["clear now", "clear all", "cleared"]) {
+    assert.deepEqual(parseTaskArgs(args), { kind: "usage" });
+  }
+});

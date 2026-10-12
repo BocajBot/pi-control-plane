@@ -37,12 +37,17 @@ import {
   loadUsage,
   MAX_VISIBLE,
   modelPriceLabel,
+  nextSortMode,
   pageStep,
   pickerDisabled,
+  PRIMARY_COLUMN_LAYOUT,
   recordUse,
   resolveModelArgument,
   saveUsage,
   sortModels,
+  sortModelsBy,
+  type SortMode,
+  type Usage,
   type UsageFs,
 } from "../src/control-plane/model-picker.ts";
 
@@ -126,6 +131,7 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
     items: SelectListItem[],
     maxVisible: number,
     theme?: unknown,
+    layout?: { minPrimaryColumnWidth?: number; maxPrimaryColumnWidth?: number },
   ) => SelectListLike) | null = null;
   let selectListTheme: unknown;
   let matchesSaveKey = (data: string) => classifyKey(data).kind === "save-default";
@@ -167,29 +173,35 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
    * Typeahead over a SelectList: printable keys build a filter string,
    * backspace edits it, PageUp/PageDown jump a page (SelectList handles only
    * up/down/enter/escape natively — the gap the retired bundle patch filled),
-   * everything else is delegated to the list.
+   * Tab cycles the sort mode (frecency → name → price, re-sorting the full
+   * list and keeping the highlighted model), everything else is delegated to
+   * the list.
    */
   const makeTypeahead = (
-    items: SelectListItem[],
+    models: PickerModel[],
+    itemOf: (m: PickerModel) => SelectListItem,
+    usage: Usage,
     onPick: (value: ModelPick) => void,
     onQuit: () => void,
   ) => {
     let query = "";
-    let list = new SelectListCtor!(items, MAX_VISIBLE, selectListTheme);
-    list.onSelect = (item) => onPick({ value: item.value, saveDefault: false });
-    list.onCancel = () => onQuit();
-    const rebuild = () => {
-      const q = query.toLowerCase();
-      const matches = q ? items.filter((i) => i.value.toLowerCase().includes(q)) : items;
-      list = new SelectListCtor!(matches, MAX_VISIBLE, selectListTheme);
-      list.onSelect = (item) => onPick({ value: item.value, saveDefault: false });
-      list.onCancel = () => onQuit();
+    let sortMode: SortMode = "frecency";
+    const localProvider = localProviderOf();
+    const now = Date.now();
+    const build = (mode: SortMode, q: string): SelectListLike => {
+      const ordered = sortModelsBy(mode, models, usage, localProvider, now);
+      const matches = q ? ordered.filter((m) => keyOf(m.provider, m.id).toLowerCase().includes(q)) : ordered;
+      const next = new SelectListCtor!(matches.map(itemOf), MAX_VISIBLE, selectListTheme, PRIMARY_COLUMN_LAYOUT);
+      next.onSelect = (item) => onPick({ value: item.value, saveDefault: false });
+      next.onCancel = () => onQuit();
+      return next;
     };
+    let list = build(sortMode, query);
     return {
       render(width: number): string[] {
         return [
           truncate(" Model — ↑↓ move · PgUp/PgDn page · enter select · esc close", width),
-          truncate(" Ctrl+s select and save as default", width),
+          truncate(` Ctrl+s select and save as default · Tab sort: ${sortMode}`, width),
           truncate(` > ${query}${query ? "" : "(type to search)"}`, width),
           ...list.render(width),
         ];
@@ -203,12 +215,22 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
         const key = classifyKey(data);
         if (key.kind === "type") {
           query += key.char;
-          rebuild();
+          list = build(sortMode, query);
           return;
         }
         if (key.kind === "backspace") {
           query = query.slice(0, -1);
-          rebuild();
+          list = build(sortMode, query);
+          return;
+        }
+        if (key.kind === "sort") {
+          sortMode = nextSortMode(sortMode);
+          const keep = list.filteredItems[list.selectedIndex]?.value;
+          list = build(sortMode, query);
+          if (keep !== undefined) {
+            const index = list.filteredItems.findIndex((item) => item.value === keep);
+            if (index >= 0) list.setSelectedIndex(index);
+          }
           return;
         }
         if (key.kind === "page-up" || key.kind === "page-down") {
@@ -233,17 +255,18 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
   /** Open the typeahead modal, retaining whether persistence was requested. */
   const openPicker = async (ctx: ExtensionContext): Promise<ModelPick | null> => {
     if (SelectListCtor === null) return null;
-    const sorted = sortedModels(ctx);
-    if (sorted.length === 0) return null;
+    const models = modelsOf(ctx);
+    if (models.length === 0) return null;
+    const usage = loadUsage(nodeFs, USAGE_FILE);
     const current = (ctx as unknown as { model?: PickerModel | undefined }).model;
     const currentKey = current ? keyOf(current.provider, current.id) : null;
-    const items = sorted.map((m) => {
+    const itemOf = (m: PickerModel): SelectListItem => {
       const k = keyOf(m.provider, m.id);
       const details = [k === currentKey ? "current" : null, modelPriceLabel(m)].filter(
         (detail): detail is string => detail !== null,
       );
       return { value: k, label: k, description: details.length > 0 ? details.join(" · ") : undefined };
-    });
+    };
     const ui = ctx.ui as unknown as {
       custom: <T>(
         factory: (
@@ -255,7 +278,7 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
       ) => Promise<T>;
     };
     return await ui.custom<ModelPick | null>((tui, _theme, _kb, done) => {
-      const typeahead = makeTypeahead(items, (value) => done(value), () => done(null));
+      const typeahead = makeTypeahead(models, itemOf, usage, (value) => done(value), () => done(null));
       return {
         render: (width: number) => typeahead.render(width),
         handleInput: (data: string) => {

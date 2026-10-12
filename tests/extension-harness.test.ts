@@ -69,7 +69,7 @@ class FakePi {
   // tools) so "minimal" and "all minus alwaysDisabledTools" are never
   // coincidentally the same set here, the way they would be in a toy
   // universe of exactly minimal's own tools + one extra.
-  allToolNames = ["read", "bash", "edit", "write", "grep", "find", "ls", "web_search", "local_web_search", "transcribe_audio", "todo"];
+  allToolNames = ["read", "bash", "edit", "write", "grep", "find", "ls", "web_search", "local_web_search", "transcribe_audio", "generate_image", "todo"];
   getActiveTools() {
     return [...this.activeTools];
   }
@@ -1602,6 +1602,48 @@ test("transcribe_audio tool: registered sequentially and returns Pi-native conte
   assert.match(result.content[0]?.text ?? "", /Transcription failed: audio file not found/);
 });
 
+test("generate_image tool: registered sequentially, mutate-classified, fails structurally before any upload", async () => {
+  const pi = await boot();
+  const tool = pi.tools.get("generate_image");
+  assert.ok(tool, "generate_image must be registered");
+  assert.equal(tool!.executionMode, "sequential", "sd-server holds one model context; sibling renders must not race");
+  // An invalid size is rejected before the tool touches the network or the
+  // output path, which proves the wiring without llama-swap running.
+  const result = (await tool!.execute(
+    "call-1",
+    { prompt: "a cat", path: path.join(os.tmpdir(), "pi-control-plane-never-written.png"), size: "1000x1000" },
+    undefined,
+    undefined,
+    {},
+  )) as { content: { type: string; text: string }[]; output?: unknown };
+  assert.equal(result.output, undefined, "legacy { output } results crash Pi's interactive renderer");
+  assert.deepEqual(result.content.map(({ type }) => type), ["text"]);
+  assert.match(result.content[0]?.text ?? "", /Image generation failed: size must be/);
+  assert.equal(fs.existsSync(path.join(os.tmpdir(), "pi-control-plane-never-written.png")), false);
+});
+
+// Optional live check of the real transport (fetch, FormData, PNG write)
+// against llama-swap's `qwen-image` entry. Loads sd-server onto the XTX and
+// evicts whatever chat model is resident, so it only runs when asked:
+//   CP_LIVE_IMAGEGEN=1 node --test tests/extension-harness.test.ts
+test("generate_image tool (live, CP_LIVE_IMAGEGEN=1): renders a PNG through llama-swap", { skip: process.env.CP_LIVE_IMAGEGEN !== "1" }, async () => {
+  const pi = await boot();
+  const tool = pi.tools.get("generate_image");
+  assert.ok(tool);
+  const out = path.join(tmpRoot(), "live", "smoke.png");
+  const result = (await tool!.execute(
+    "call-live",
+    { prompt: "a small wooden boat on a calm lake at dawn", path: out, size: "512x512", seed: 7 },
+    undefined,
+    undefined,
+    {},
+  )) as { content: { type: string; text: string }[] };
+  assert.match(result.content[0]?.text ?? "", /^Saved .*smoke\.png \(512x512, seed 7 [0-9.]+s\)\.$/, result.content[0]?.text);
+  const bytes = fs.readFileSync(out);
+  assert.ok(bytes.length > 10_000, `png too small: ${bytes.length}`);
+  assert.deepEqual([...bytes.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], "PNG signature");
+});
+
 test("Unattended (Auto): mutating calls run without a precondition and are logged for audit; reads are not", async () => {
   const pi = await boot();
   const root = tmpRoot();
@@ -2071,7 +2113,8 @@ test("top-right context tools header reads active registry on every render", asy
   const rendered = header.render(120).join("\n");
   for (const tool of pi.getActiveTools()) assert.ok(rendered.includes(tool));
   pi.setActiveTools(pi.allToolNames);
-  assert.match(header.render(120)[0], /\+4 more  ·  ctrl\+alt\+t/, "11 tools collapse to 7 + more");
+  // 140 columns: generate_image lengthens the seven-name grid past what 120 fits before the shortcut.
+  assert.match(header.render(140)[0], /\+5 more  ·  ctrl\+alt\+t/, "12 tools collapse to 7 + more");
   for (const width of [1, 12, 40, 80]) assert.ok(header.render(width).every((line) => line.length <= width));
 });
 
@@ -2186,6 +2229,55 @@ test("/todo-clear removes unfinished tasks, persists empty state, and refreshes 
     await tool.execute("add-3", { op: "add", text: "Preserve on invalid args" }, undefined, undefined, ctx);
     await command.handler("unexpected", ctx);
     assert.equal(readWorkspaceTodo(workspace).todo?.items.length, 1);
+  } finally {
+    if (oldStateDirectory === undefined) delete process.env.PI_CONTROL_PLANE_STATE_DIR;
+    else process.env.PI_CONTROL_PLANE_STATE_DIR = oldStateDirectory;
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("/task clear removes all tasks like /todo-clear and rejects extra args", async () => {
+  const oldStateDirectory = process.env.PI_CONTROL_PLANE_STATE_DIR;
+  const stateDirectory = tmpRoot();
+  const workspace = tmpRoot();
+  process.env.PI_CONTROL_PLANE_STATE_DIR = stateDirectory;
+  try {
+    const pi = await boot();
+    const ctx = makeCtx({ branchEntries: [], cwd: workspace });
+    let renderRequests = 0;
+    let overlay: { render(width: number): string[] } | undefined;
+    ctx.ui.setWidget = (key: string, factory: unknown) => {
+      if (key !== "control-plane-todo" || typeof factory !== "function") return;
+      factory({
+        requestRender: () => { renderRequests++; },
+        showOverlay: (component: { render(width: number): string[] }) => {
+          overlay = component;
+          return { hide() {} };
+        },
+      }, { fg: (_color: string, text: string) => text });
+    };
+    await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
+    const tool = pi.tools.get("todo")!;
+    await tool.execute("add-1", { op: "add", text: "Unfinished task" }, undefined, undefined, ctx);
+    await tool.execute("add-2", { op: "add", text: "Another unfinished task" }, undefined, undefined, ctx);
+    const command = pi.commands.get("task")!;
+    assert.match(overlay!.render(44).join("\n"), /Unfinished task/);
+    await command.handler("clear now", ctx);
+    assert.ok(ctx.notifications.some((n) => /Usage: \/task add/.test(n.message)));
+    const { readWorkspaceTodo } = await import("../src/control-plane/todo-store.ts");
+    assert.equal(readWorkspaceTodo(workspace).todo?.items.length, 2, "extra args must not clear");
+    const before = renderRequests;
+    await command.handler("CLEAR", ctx);
+    assert.ok(renderRequests > before, "clear requests a fresh frame");
+    assert.deepEqual(overlay!.render(44), []);
+    const saved = readWorkspaceTodo(workspace).todo;
+    assert.ok(saved);
+    assert.deepEqual(saved.items, []);
+    assert.equal(saved.nextId, 3, "clearing must not reuse task IDs");
+    assert.ok(!pi.entries.some((entry) => entry.customType === "pi-control-plane-todo-complete"), "clearing is not completion");
+    await command.handler("clear", ctx);
+    assert.ok(ctx.notifications.some((n) => /No tasks to clear/.test(n.message)));
   } finally {
     if (oldStateDirectory === undefined) delete process.env.PI_CONTROL_PLANE_STATE_DIR;
     else process.env.PI_CONTROL_PLANE_STATE_DIR = oldStateDirectory;

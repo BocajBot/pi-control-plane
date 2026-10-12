@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   canonicalizePath,
   classifyTool,
+  riskCategoryFor,
   evaluateToolCall,
   type EvaluateInput,
   isInsideRoot,
@@ -75,6 +76,9 @@ test("tool classification: read tools known, unknown tools never safe", () => {
   assert.equal(classifyTool("ls"), "read");
   assert.equal(classifyTool("local_web_search"), "read");
   assert.equal(classifyTool("transcribe_audio"), "read");
+  // generate_image writes a PNG at `path`: mutate with write semantics, never read.
+  assert.equal(classifyTool("generate_image"), "mutate");
+  assert.equal(riskCategoryFor("generate_image"), "file-write");
   // pi-web-access's non-search tools are network reads; the duplicate
   // web_search stays force-disabled via profiles and is NOT read-classified
   // (treating it as read would defeat the denylist if ever re-enabled).

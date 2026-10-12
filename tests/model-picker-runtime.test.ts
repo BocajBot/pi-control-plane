@@ -84,3 +84,131 @@ test("/models Ctrl+s saves the filtered selection; Enter/Esc/failed switches do 
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test("/models renders long model refs untruncated even with a description column", {
+  skip: !dist,
+}, async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "model-picker-test-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = temp;
+  try {
+    fs.writeFileSync(path.join(temp, "settings.json"), "{}");
+    const { loadExtensions, createExtensionRuntime } = await import(pathToFileURL(path.join(dist!, "core/extensions/loader.js")).href);
+    const { initTheme } = await import(pathToFileURL(path.join(dist!, "modes/interactive/theme/theme.js")).href);
+    initTheme("dark", false);
+    const runtime = createExtensionRuntime();
+    runtime.setModel = async () => true;
+    const loaded = await loadExtensions([path.resolve("extensions/model-picker.ts")], process.cwd(), undefined, runtime);
+    assert.deepEqual(loaded.errors, []);
+    const command = loaded.extensions[0].commands.get("models");
+    // 46-char ref: wider than pi-tui's 32-char default primary column. The
+    // cost makes a description render, which is the path that truncates.
+    const longId = "nemotron-3-5-lightning-30b-a3b".padEnd(41, "-");
+    const ref = `openrouter/${longId}`;
+    const models = [{ provider: "openrouter", id: longId, cost: { input: 1, output: 2 } }];
+    let lines: string[] = [];
+    const ctx = {
+      cwd: temp, mode: "tui", modelRegistry: { getAll: () => models },
+      ui: {
+        notify: () => {},
+        custom: async (factory: Function) => {
+          const component = factory({ requestRender() {} }, {}, {}, () => {});
+          lines = component.render(100).map((l: string) => stripVTControlCharacters(l));
+          return { value: ref, saveDefault: false };
+        },
+      },
+    };
+    await command.handler("", ctx);
+    assert.ok(
+      lines.some((line) => line.includes(ref)),
+      `full ref ${ref} must appear in the picker render; got:\n${lines.join("\n")}`,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("/models Tab cycles sort modes; order and header follow the mode", {
+  skip: !dist,
+}, async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "model-picker-test-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = temp;
+  try {
+    fs.writeFileSync(path.join(temp, "settings.json"), "{}");
+    const { loadExtensions, createExtensionRuntime } = await import(pathToFileURL(path.join(dist!, "core/extensions/loader.js")).href);
+    const { initTheme } = await import(pathToFileURL(path.join(dist!, "modes/interactive/theme/theme.js")).href);
+    initTheme("dark", false);
+    const runtime = createExtensionRuntime();
+    runtime.setModel = async () => true;
+    const loaded = await loadExtensions([path.resolve("extensions/model-picker.ts")], process.cwd(), undefined, runtime);
+    assert.deepEqual(loaded.errors, []);
+    const command = loaded.extensions[0].commands.get("models");
+    // name, price, provider and publisher orders are usage-independent, so
+    // assertions hold against whatever real ~/.pi/agent/model-usage.json has.
+    const models = [
+      { provider: "openrouter", id: "alpha", cost: { input: 9, output: 9 } },
+      { provider: "openrouter", id: "beta", cost: { input: 1, output: 2 } },
+      { provider: "llama-swap", id: "zeta" },
+      { provider: "openrouter", id: "anthropic/claude" },
+    ];
+    const refOrder = (lines: string[]): string[] =>
+      lines.flatMap((l) => l.match(/(?:openrouter|llama-swap)\/\S+/g) ?? []);
+    const rendered: string[][] = [];
+    const ctx = {
+      cwd: temp, mode: "tui", modelRegistry: { getAll: () => models },
+      ui: {
+        notify: () => {},
+        custom: async (factory: Function) => {
+          const component = factory({ requestRender() {} }, {}, {}, () => {});
+          const snapshot = (): void => {
+            rendered.push(component.render(100).map((l: string) => stripVTControlCharacters(l)));
+          };
+          snapshot(); // frecency
+          component.handleInput("\t");
+          snapshot(); // name
+          component.handleInput("\t");
+          snapshot(); // price
+          component.handleInput("\t");
+          snapshot(); // provider
+          component.handleInput("\t");
+          snapshot(); // publisher
+          component.handleInput("\t");
+          snapshot(); // back to frecency
+          component.handleInput("\x1b");
+          return null;
+        },
+      },
+    };
+    await command.handler("", ctx);
+    assert.equal(rendered.length, 6);
+    assert.match(rendered[0].join("\n"), /Tab sort: frecency/);
+    assert.match(rendered[1].join("\n"), /Tab sort: name/);
+    assert.deepEqual(refOrder(rendered[1]), [
+      "llama-swap/zeta", "openrouter/alpha", "openrouter/anthropic/claude", "openrouter/beta",
+    ]);
+    assert.match(rendered[2].join("\n"), /Tab sort: price/);
+    // Cheapest input first, unpriced last.
+    assert.deepEqual(refOrder(rendered[2]), [
+      "openrouter/beta", "openrouter/alpha", "llama-swap/zeta", "openrouter/anthropic/claude",
+    ]);
+    assert.match(rendered[3].join("\n"), /Tab sort: provider/);
+    // Registry provider groups: llama-swap, then openrouter (name order inside).
+    assert.deepEqual(refOrder(rendered[3]), [
+      "llama-swap/zeta", "openrouter/alpha", "openrouter/anthropic/claude", "openrouter/beta",
+    ]);
+    assert.match(rendered[4].join("\n"), /Tab sort: publisher/);
+    // Upstream publisher groups: anthropic, llama-swap (no id segment), z-ai…
+    // here: anthropic < llama-swap < openrouter (ids without a segment).
+    assert.deepEqual(refOrder(rendered[4]), [
+      "openrouter/anthropic/claude", "llama-swap/zeta", "openrouter/alpha", "openrouter/beta",
+    ]);
+    assert.match(rendered[5].join("\n"), /Tab sort: frecency/);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});

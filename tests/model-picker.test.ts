@@ -8,18 +8,23 @@ import { test } from "node:test";
 import {
   applyModelPick,
   classifyKey,
+  SORT_MODES,
   persistDefaultModel,
   filterModels,
   frecency,
   keyOf,
   loadUsage,
   modelPriceLabel,
+  nextSortMode,
   pageStep,
+  publisherOf,
   pickerDisabled,
   recordUse,
   resolveModelArgument,
   saveUsage,
   sortModels,
+  sortModelsBy,
+  type SortMode,
   type Usage,
   type UsageFs,
 } from "../src/control-plane/model-picker.ts";
@@ -78,6 +83,75 @@ test("sortModels: frecency desc, then local provider, then name", () => {
     cold.map((m) => keyOf(m.provider, m.id)),
     ["llama-swap/alpha", "llama-swap/beta", "openrouter/gamma"],
   );
+});
+
+test("sortModelsBy: name ignores usage; price is cheapest-input-first, unpriced last", () => {
+  const now = 10 * DAY;
+  const usage: Usage = { "openrouter/gamma": { count: 5, lastUsed: now } };
+  // name: plain alphabetical, ignoring usage and local boost.
+  assert.deepEqual(
+    sortModelsBy("name", models, usage, "llama-swap", now).map((m) => keyOf(m.provider, m.id)),
+    ["llama-swap/alpha", "llama-swap/beta", "openrouter/gamma"],
+  );
+  // frecency mode is exactly the default sortModels order.
+  assert.deepEqual(
+    sortModelsBy("frecency", models, usage, "llama-swap", now),
+    sortModels(models, usage, "llama-swap", now),
+  );
+  const priced = [
+    { provider: "openrouter", id: "cheap", cost: { input: 0.5, output: 9 } },
+    { provider: "openrouter", id: "cheap-out", cost: { input: 0.5, output: 1 } },
+    { provider: "openrouter", id: "dear", cost: { input: 3, output: 0 } },
+    { provider: "llama-swap", id: "local", cost: { input: 0, output: 0 } },
+    { provider: "openrouter", id: "free", cost: { input: 0, output: 0 } },
+    { provider: "openrouter", id: "unpriced" },
+    { provider: "openrouter", id: "nan", cost: { input: Number.NaN, output: 1 } },
+  ];
+  assert.deepEqual(
+    sortModelsBy("price", priced, usage, "llama-swap", now).map((m) => m.id),
+    // input asc (output breaks ties); zero-cost local counts as priced and
+    // wins the 0/0 tie by name (llama-swap < openrouter); unpriced/NaN-cost
+    // go last in name order.
+    ["local", "free", "cheap-out", "cheap", "dear", "nan", "unpriced"],
+  );
+});
+
+test("sortModelsBy: provider groups by registry provider; publisher by upstream publisher", () => {
+  const now = 10 * DAY;
+  const grouped = [
+    { provider: "openrouter", id: "z-ai/glm" },
+    { provider: "openrouter", id: "anthropic/claude" },
+    { provider: "llama-swap", id: "local" },
+  ];
+  // Non-empty usage: grouping modes must override frecency (z-ai/glm is the
+  // hot model there, and must NOT lead under provider/publisher).
+  const usage: Usage = { "openrouter/z-ai/glm": { count: 5, lastUsed: now } };
+  // provider: llama-swap before openrouter; within openrouter, name order.
+  assert.deepEqual(
+    sortModelsBy("provider", grouped, usage, "llama-swap", now).map((m) => m.id),
+    ["local", "anthropic/claude", "z-ai/glm"],
+  );
+  // publisher: anthropic < llama-swap < z-ai — distinct from provider order.
+  assert.deepEqual(
+    sortModelsBy("publisher", grouped, usage, "llama-swap", now).map((m) => m.id),
+    ["anthropic/claude", "local", "z-ai/glm"],
+  );
+  // publisherOf: first id segment, stealth ~ prefix stripped, provider fallback.
+  assert.equal(publisherOf({ provider: "openrouter", id: "z-ai/glm-5.3:batch" }), "z-ai");
+  assert.equal(publisherOf({ provider: "openrouter", id: "~z-ai/glm-flash" }), "z-ai");
+  assert.equal(publisherOf({ provider: "openrouter", id: "deepseek/deepseek-v4-pro" }), "deepseek");
+  assert.equal(publisherOf({ provider: "llama-swap", id: "local" }), "llama-swap");
+  assert.equal(publisherOf({ provider: "llama-swap", id: "" }), "llama-swap");
+});
+
+test("nextSortMode cycles all five modes back to frecency", () => {
+  const order: SortMode[] = [];
+  let mode: SortMode = "frecency";
+  for (let i = 0; i < SORT_MODES.length; i++) {
+    mode = nextSortMode(mode);
+    order.push(mode);
+  }
+  assert.deepEqual(order, ["name", "price", "provider", "publisher", "frecency"]);
 });
 
 test("usage IO: record, round-trip, atomic save, tolerant load", () => {
@@ -146,6 +220,7 @@ test("modelPriceLabel: shows OpenRouter input/output rates and tier marker", () 
 
 test("classifyKey: typeable, backspace, page keys, modifier variants, other", () => {
   assert.deepEqual(classifyKey("\x13"), { kind: "save-default" });
+  assert.deepEqual(classifyKey("\t"), { kind: "sort" });
   assert.deepEqual(classifyKey("s"), { kind: "type", char: "s" });
   assert.deepEqual(classifyKey("a"), { kind: "type", char: "a" });
   assert.deepEqual(classifyKey("Z"), { kind: "type", char: "Z" });

@@ -67,7 +67,10 @@ export const READ_TOOLS: ReadonlySet<string> = new Set([
   "source_check",
   "todo",
 ]);
-export const MUTATING_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
+/** "generate_image" (see imagegen.ts) writes a PNG at its `path` argument, so
+ * it is a mutating tool with `write` semantics: blocked in read-only Plan,
+ * backup-before-edit when the target exists, never silently allowed. */
+export const MUTATING_TOOLS: ReadonlySet<string> = new Set(["edit", "write", "generate_image"]);
 export const SHELL_TOOLS: ReadonlySet<string> = new Set(["bash"]);
 /** The harness's own sandboxed shell. Classified distinctly from a bare `bash`
  * so it is labelled "shell" (not "unknown-tool") and its target resolves to the
@@ -108,7 +111,7 @@ export function riskCategoryFor(toolName: string): RiskCategory {
     case "harness":
       return "harness-tool";
     case "mutate":
-      return toolName === "write" ? "file-write" : "file-edit";
+      return toolName === "write" || toolName === "generate_image" ? "file-write" : "file-edit";
     default:
       return "unknown-tool";
   }

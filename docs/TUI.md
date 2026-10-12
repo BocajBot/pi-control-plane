@@ -232,8 +232,8 @@ Mutations request an immediate render. Hollow radial bullets mark open tasks.
 Completing a task removes it from the live list and writes `Task [id] -
 description has completed.` into the conversation. Rounded borders and theme
 colors follow the active theme. Six tasks display before a `+N more` summary.
-`/todo-clear` removes all tasks, including unfinished ones, immediately hides the
-empty overlay, and notifies how many were removed. It saves the empty list across
+`/task clear` (alias `/todo-clear`) removes all tasks, including unfinished
+ones, immediately hides the empty overlay, and notifies how many were removed. It saves the empty list across
 sessions without adding task-completion entries.
 
 `/control-ui timing` shows the workload ledger: last turn (first streamed text
@@ -247,12 +247,18 @@ sessions keep their totals; the detailed footer carries a compact segment
 
 The model picker is a `ctx.ui.custom` modal: a keymap header and separate
 `Ctrl+s select and save as default` hint, both clipped to viewport width, a
-filter line (`> query`), and pi-tui's `SelectList` (15 visible). Printable keys
+filter line (`> query`), and pi-tui's `SelectList` (15 visible) laid out with
+`PRIMARY_COLUMN_LAYOUT` (the model-ref column grows with content up to 60
+chars, so long `provider/model` refs stay whole next to their description).
+Printable keys
 extend the substring filter (rebuilt per keystroke), backspace edits it,
 ↑↓/enter/esc go to the list, and PageUp/PageDown jump a page via
 `setSelectedIndex(±15)` — public component API only, no bundle patching (the
 retired `bin/patch-pi-model-page-nav.mjs` approach is archived under
-`~/.pi/agent/archive/`). OpenRouter rows show input/output pricing in Pi's
+`~/.pi/agent/archive/`). Tab cycles the sort mode (frecency → name → price →
+provider → publisher, shown in the hint line as `Tab sort: <mode>`),
+re-sorting the full model list (`sortModelsBy`) while keeping the highlighted
+model selected. OpenRouter rows show input/output pricing in Pi's
 native `$input/$output per Mtok` format; `+` marks models with request-size
 pricing tiers. Ctrl+s selects the highlighted filtered row, closes the modal,
 and saves it as the global default after selection succeeds. Enter remains

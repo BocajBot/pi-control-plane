@@ -95,8 +95,9 @@ Multi-step work appears in a noncapturing task overlay at the top-right. Open
 tasks use hollow bullets. Completing a task removes it from the live list and
 writes `Task [id] - description has completed.` into the conversation. Updates
 repaint immediately, and workspace-scoped state lets new Pi sessions and
-windows resume the same unfinished list. Use `/todo-clear` to remove all tasks
-immediately and persist an empty list, without starting a new session. This is
+windows resume the same unfinished list. Use `/task clear` (alias
+`/todo-clear`) to remove all tasks immediately and persist an empty list,
+without starting a new session. This is
 separate from the model's `todo clear` operation, which only removes legacy
 completed tasks.
 
@@ -219,7 +220,7 @@ The decision is stored in `~/.pi/agent/control-plane-keys.json`, so the prompt i
 
 A typeahead model picker built entirely on public extension APIs — the isolated replacement for the retired `bin/patch-pi-model-page-nav.mjs`, which patched minified anchors inside pi's bundle and broke on every `pi update`. Paged navigation (PageUp/PageDown jump 15 models — the exact feature the patch existed for) is implemented via `SelectList.setSelectedIndex`, so it survives updates by construction. OpenRouter rows retain Pi's input/output price badge (`$input/$output per Mtok`, with `+` for tiered pricing).
 
-- `alt+m` or `/models` — the picker, on demand. Type to filter (substring), ↑↓ move, PgUp/PgDn page, enter selects for this session, **Ctrl+s selects and saves as the global default**, esc closes.
+- `alt+m` or `/models` — the picker, on demand. Type to filter (substring), ↑↓ move, PgUp/PgDn page, enter selects for this session, **Ctrl+s selects and saves as the global default**, esc closes. **Tab cycles the sort** (frecency → name → price → provider → publisher; `sortModelsBy`): name is plain `provider/model` alphabetical, price is cheapest-input-first with unpriced models last, provider groups by registry provider, publisher groups by upstream publisher (`publisherOf`: first `publisher/model` segment of the id, stealth `~` prefix stripped, provider fallback for local ids), and the highlighted model is kept across a cycle. The model-ref column grows with the longest visible ref (up to 60 chars, `PRIMARY_COLUMN_LAYOUT`) so long `provider/model` names are not truncated when a description column is shown.
 - At interactive startup the picker also appears (frecency-ordered: most-used-recently first, local models leading while history is cold, usage tracked in `~/.pi/agent/model-usage.json`); esc at launch quits pi — no model chosen, no session. Disable the startup dialog with `"modelPicker": false` in `~/.pi/agent/settings.json` (usage tracking continues either way).
 - `/models <query>` (any mode, incl. RPC/print) — switch directly; exact `provider/model` wins, then unique substring match; ambiguous queries list their matches instead of guessing.
 - `pi.setModel` switches for this session only (including `/models <query>`). Ctrl+s explicitly saves `defaultProvider` and `defaultModel` through Pi's exported `SettingsManager`, preserving unrelated settings and thinking defaults. Success is reported only after the write finishes; a failed switch never saves, and a failed save reports that the model is session-only. Project settings and CLI overrides still take precedence over global defaults.
@@ -362,6 +363,9 @@ Before changing behavior, read the continuity contract below and
 Cherry-picked from branch `harness-refactor-2026-09-14` without `pi-harness`:
 
 - `transcribe_audio` tool (local whisper; `bin/transcribe-voicemail.ts`; "voicemail" profile)
+- `generate_image` tool (2026-09-21: local Qwen-Image-2.1 via stable-diffusion.cpp `sd-server`
+  behind llama-swap as `qwen-image`; `src/control-plane/imagegen.ts`; env
+  `PI_CONTROL_PLANE_IMAGEGEN_URL` / `_MODEL` override the loopback target)
 - read-before-edit hard rule, backup-before-edit (pre-mutation snapshot, fails closed)
 - thinking-budget hard rule (anti-overexpansion): per-message thinking cap by level
   (low 2k / medium 4k / xhigh 8k chars); over it the stream is aborted, audited, and a
@@ -399,8 +403,9 @@ relevant source, tests, and `docs/` before changing Pi behavior.
   `/scratchpad` survives compaction and remains
   injected. `todo` creates visible tasks. Open tasks stay in a noncapturing
   top-right widget; `done` removes task state and writes `Task [id] -
-  description has completed.` into transcript. `/todo-clear` removes all tasks
-  (including unfinished ones) without completion entries. `/clear` aliases Pi `/new`.
+  description has completed.` into transcript. `/task clear` (alias
+  `/todo-clear`) removes all tasks (including unfinished ones) without
+  completion entries. `/clear` aliases Pi `/new`.
 - **Custom model surface:** `/models` and `alt+m` provide typeahead, frecency,
   direct model references, PageUp/PageDown navigation, Ctrl+s to select and
   save the highlighted model as the global default, and OpenRouter
@@ -430,7 +435,10 @@ relevant source, tests, and `docs/` before changing Pi behavior.
   imports the patched module, runs the script in `--check` mode, and greps
   both artifacts; it fails when either loses the patch.
 - **Custom tools:** `local_web_search` uses local SearxNG; `transcribe_audio`
-  uses local Whisper service sequentially; `todo` owns task state. Tool names
+  uses local Whisper service sequentially; `generate_image` renders or edits
+  PNGs through llama-swap's `qwen-image` (sd-server, Qwen-Image-2.1) and is
+  mutate-classified with `write` semantics because it writes `path`; `todo`
+  owns task state. Tool names
   are part of model-visible API. Do not add a second `todo` or collide with
   another extension's tool name.
 - **TUI and live usage:** cyberpunk theme supplies readable editor/Working

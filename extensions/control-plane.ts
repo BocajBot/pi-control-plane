@@ -236,6 +236,16 @@ import {
   transcribeAudio,
 } from "../src/control-plane/transcription.ts";
 import {
+  DEFAULT_IMAGE_SIZE,
+  DEFAULT_IMAGEGEN_BASE_URL,
+  DEFAULT_IMAGEGEN_MODEL,
+  formatImageResult,
+  generateImage,
+  MAX_REFERENCE_IMAGES,
+  parseImageSize,
+  type PostImageGen,
+} from "../src/control-plane/imagegen.ts";
+import {
   DEFAULT_SEARXNG_BASE_URL,
   formatSearchResults,
   type GetFetch,
@@ -248,6 +258,10 @@ import {
  * cover a llama-swap cold start that may first evict a 23 GiB chat model,
  * not a typical HTTP round trip. */
 const TRANSCRIPTION_TIMEOUT_MS = 900_000;
+/** Image generation: llama-swap cold-loads sd-server (13 GB onto the XTX,
+ * evicting the resident chat model) and a 2048x2048 render is minutes, so
+ * this is a ceiling for the whole round trip, not a typical HTTP call. */
+const IMAGEGEN_TIMEOUT_MS = 1_800_000;
 
 const STATUS_KEY = "control-plane";
 const WIDGET_KEY = "control-plane-context";
@@ -3555,12 +3569,26 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
   // ---- commands ----
 
+  /** Shared by /todo-clear and /task clear: remove every task (unfinished
+   * included), persist the empty list, and repaint the overlay. */
+  const clearAllTasks = (ctx: ExtensionContext): void => {
+    const count = todo.items.length;
+    todo = { ...todo, items: [] };
+    persistTodo(ctx);
+    refreshTodoWidget();
+    ctx.ui.notify(count === 0 ? "No tasks to clear." : `Cleared ${count} task${count === 1 ? "" : "s"}.`, "info");
+  };
+
   pi.registerCommand("task", {
-    description: "Append a To-Do task and inform the current model: /task add <text>",
+    description: "To-Do list: /task add <text> (inform the current model) | /task clear (remove all tasks)",
     handler: async (args, ctx) => {
       const command = parseTaskArgs(args);
       if (command.kind === "usage") {
-        ctx.ui.notify("Usage: /task add <text> (500 chars max)", "warning");
+        ctx.ui.notify("Usage: /task add <text> (500 chars max) | /task clear", "warning");
+        return;
+      }
+      if (command.kind === "clear") {
+        clearAllTasks(ctx);
         return;
       }
       const result = addTodo(todo, command.text, new Date().toISOString());
@@ -3597,17 +3625,13 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("todo-clear", {
-    description: "Clear all To-Do tasks, including unfinished tasks",
+    description: "Clear all To-Do tasks, including unfinished tasks (alias of /task clear)",
     handler: async (args, ctx) => {
       if (args.trim()) {
         ctx.ui.notify("Usage: /todo-clear (clears all tasks)", "warning");
         return;
       }
-      const count = todo.items.length;
-      todo = { ...todo, items: [] };
-      persistTodo(ctx);
-      refreshTodoWidget();
-      ctx.ui.notify(count === 0 ? "No tasks to clear." : `Cleared ${count} task${count === 1 ? "" : "s"}.`, "info");
+      clearAllTasks(ctx);
     },
   });
 
@@ -4373,6 +4397,114 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
         );
         return {
           content: [{ type: "text", text: formatTranscript(outcome) }],
+        } as never;
+      },
+    });
+
+    // ---- image generation tool (qwen-image via sd-server, see imagegen.ts) ----
+    // Mutate-classified: it writes a PNG at `path`, so it goes through the same
+    // policy gate, read-before-edit and backup-before-edit hooks as `write`
+    // (blocked in read-only Plan, confirmed or allowed per the autonomy ladder).
+    pi.registerTool({
+      name: "generate_image",
+      label: "Generate Image",
+      // sd-server owns one model context, and llama-swap serialises loads;
+      // parallel sibling calls would only queue behind each other while
+      // holding the batch open. Same stance as transcribe_audio.
+      executionMode: "sequential",
+      description:
+        `Generate an image from a text prompt, or edit reference images according to the prompt, using the local Qwen-Image-2.1 model (llama-swap "${DEFAULT_IMAGEGEN_MODEL}", runs on the GPU, about 70 s per 1024x1024 image). Renders text in images accurately. Writes a PNG to \`path\`; pass \`reference_paths\` (up to ${MAX_REFERENCE_IMAGES} local images) to edit instead of generate. Mutating: creates or overwrites the output file.`,
+      promptSnippet:
+        "generate_image(prompt, path, size?, seed?, reference_paths?) — render a PNG with the local Qwen-Image-2.1 model; reference_paths switches to editing",
+      parameters: T.Object({
+        prompt: T.String({ description: "What to draw, or how to edit the reference images." }),
+        path: T.String({ description: "Output PNG path (created or overwritten)." }),
+        size: T.Optional(
+          T.String({
+            description: `"WIDTHxHEIGHT", each a multiple of 32 between 256 and 2048. Defaults to ${DEFAULT_IMAGE_SIZE}.`,
+          }),
+        ),
+        seed: T.Optional(T.Number({ description: "Sampler seed for reproducible output." })),
+        reference_paths: T.Optional(
+          T.Array(T.String(), { description: "Local image files to edit (PNG/JPEG); omit for text-to-image." }),
+        ),
+      }) as never,
+      execute: async (_toolCallId, params) => {
+        const { prompt, path: outPath, size, seed, reference_paths } = params as {
+          prompt: string;
+          path: string;
+          size?: string;
+          seed?: number;
+          reference_paths?: string[];
+        };
+        const expand = (p: string) => path.resolve(p.replace(/^~(?=$|\/)/, os.homedir()));
+        const dims = parseImageSize(size ?? DEFAULT_IMAGE_SIZE);
+        if (dims === null) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Image generation failed: size must be WIDTHxHEIGHT with multiples of 32 between 256 and 2048, got "${size}".`,
+              },
+            ],
+          } as never;
+        }
+        const references: { filename: string; bytes: Uint8Array }[] = [];
+        for (const ref of reference_paths ?? []) {
+          const resolved = expand(ref);
+          try {
+            references.push({ filename: path.basename(resolved), bytes: fs.readFileSync(resolved) });
+          } catch {
+            return {
+              content: [{ type: "text", text: `Image generation failed: reference image not found: ${resolved}` }],
+            } as never;
+          }
+        }
+        const post: PostImageGen = async (url, payload) => {
+          let res: Response;
+          if (payload.kind === "json") {
+            res = await fetch(url, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(payload.body),
+              signal: AbortSignal.timeout(IMAGEGEN_TIMEOUT_MS),
+            });
+          } else {
+            const form = new FormData();
+            for (const [k, v] of Object.entries(payload.fields)) form.append(k, v);
+            for (const f of payload.files) form.append(f.field, new Blob([f.bytes]), f.filename);
+            res = await fetch(url, { method: "POST", body: form, signal: AbortSignal.timeout(IMAGEGEN_TIMEOUT_MS) });
+          }
+          return { ok: res.ok, status: res.status, json: () => res.json() as Promise<unknown> };
+        };
+        const started = Date.now();
+        const outcome = await generateImage(
+          process.env.PI_CONTROL_PLANE_IMAGEGEN_URL ?? DEFAULT_IMAGEGEN_BASE_URL,
+          {
+            prompt,
+            width: dims.width,
+            height: dims.height,
+            seed,
+            model: process.env.PI_CONTROL_PLANE_IMAGEGEN_MODEL ?? DEFAULT_IMAGEGEN_MODEL,
+            references,
+          },
+          post,
+        );
+        let saved: string | null = null;
+        if (outcome.ok) {
+          const resolvedOut = expand(outPath);
+          try {
+            fs.mkdirSync(path.dirname(resolvedOut), { recursive: true });
+            fs.writeFileSync(resolvedOut, Buffer.from(outcome.pngBase64, "base64"));
+            saved = resolvedOut;
+          } catch (error) {
+            return {
+              content: [{ type: "text", text: `Image generation failed: could not write ${resolvedOut}: ${String(error)}` }],
+            } as never;
+          }
+        }
+        return {
+          content: [{ type: "text", text: formatImageResult(outcome, saved, Date.now() - started) }],
         } as never;
       },
     });
