@@ -193,8 +193,11 @@ function findBundleChunk() {
  */
 function alias(chunk, name, modules, before) {
   let best = null;
-  for (const mod of modules) {
-    const re = new RegExp(`import\\{([^}]*)\\}from"${escapeRegExp(mod)}"`, "g");
+  // An empty module list matches any specifier (for names imported from a
+  // content-hashed chunk whose name varies per build).
+  const from = modules.length ? `(?:${modules.map(escapeRegExp).join("|")})` : '[^"]*';
+  {
+    const re = new RegExp(`import\\{([^}]*)\\}from"${from}"`, "g");
     for (const m of chunk.matchAll(re)) {
       if (m.index >= before) continue;
       for (const spec of m[1].split(",")) {
@@ -211,10 +214,13 @@ function bundleHunks(chunk) {
   const at = chunk.indexOf("loadModelsFromSnapshot(){");
   // If the patch is already present, reuse the aliases it was written with so
   // the idempotence check compares against the real text, not a re-guess.
-  const existing = /getOpenRouterCosts\(\)\{try\{return new Map\(\(JSON\.parse\((\w+)\((\w+)\(getAgentDir\(\)/.exec(chunk);
+  const existing = /getOpenRouterCosts\(\)\{try\{return new Map\(\(JSON\.parse\((\w+)\((\w+)\((\w+)\(\)/.exec(chunk);
   const readFileSync = existing?.[1] ?? alias(chunk, "readFileSync", ["fs", "node:fs"], at);
   const join = existing?.[2] ?? alias(chunk, "join", ["path", "node:path"], at);
-  if (!/function getAgentDir\(\)\{/.test(chunk)) throw new Error("bundle: getAgentDir not defined in this chunk");
+  // Older Pi builds defined getAgentDir inside this chunk; current builds
+  // import it from a shared chunk, so resolve it from the import list. The
+  // module specifier is a content-hashed chunk name, hence the wildcard.
+  const getAgentDir = existing?.[3] ?? alias(chunk, "getAgentDir", [], at);
   return [
     {
       name: "bundle: loadModelsFromSnapshot",
@@ -222,7 +228,7 @@ function bundleHunks(chunk) {
         "loadModelsFromSnapshot(){let models=this.modelRuntime.getAvailableSnapshot().map(model=>({provider:model.provider,id:model.id,model}));" +
         "this.allModels=this.sortModels(models),this.scopedModels=this.scopedModels.map(scoped=>{let refreshed=this.modelRuntime.getModel(scoped.model.provider,scoped.model.id);return refreshed?{...scoped,model:refreshed}:scoped}),",
       patched:
-        `getOpenRouterCosts(){try{return new Map((JSON.parse(${readFileSync}(${join}(getAgentDir(),"models-store.json"))).openrouter?.models??[]).filter(model=>model?.id&&model?.cost).map(model=>[model.id,model.cost]))}catch{return new Map}}` +
+        `getOpenRouterCosts(){try{return new Map((JSON.parse(${readFileSync}(${join}(${getAgentDir}(),"models-store.json"))).openrouter?.models??[]).filter(model=>model?.id&&model?.cost).map(model=>[model.id,model.cost]))}catch{return new Map}}` +
         "loadModelsFromSnapshot(){let catalogCosts=this.getOpenRouterCosts(),models=this.modelRuntime.getAvailableSnapshot().map(model=>{let cost=model.provider===\"openrouter\"&&!model.cost?catalogCosts.get(model.id):void 0;return{provider:model.provider,id:model.id,model:cost?{...model,cost}:model}});" +
         "this.allModels=this.sortModels(models),this.scopedModels=this.scopedModels.map(scoped=>{let model=this.modelRuntime.getModel(scoped.model.provider,scoped.model.id)??scoped.model,cost=model.provider===\"openrouter\"&&!model.cost?catalogCosts.get(model.id):void 0;return{...scoped,model:cost?{...model,cost}:model}}),",
     },
