@@ -126,6 +126,7 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
     items: SelectListItem[],
     maxVisible: number,
     theme?: unknown,
+    layout?: unknown,
   ) => SelectListLike) | null = null;
   let selectListTheme: unknown;
   let matchesSaveKey = (data: string) => classifyKey(data).kind === "save-default";
@@ -152,6 +153,12 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
 
   const hasSelectList = SelectListCtor !== null;
 
+  // SelectList defaults its label column to 32 chars and clips longer labels,
+  // cutting off the model id (the distinguishing part of provider/id). Widen
+  // the column to fit full references; SelectList still clamps it to the
+  // terminal width at render time, so narrow viewports keep working.
+  const PICKER_LAYOUT = { minPrimaryColumnWidth: 24, maxPrimaryColumnWidth: 80 };
+
   const modelsOf = (ctx: ExtensionContext): PickerModel[] => {
     const registry = (ctx as unknown as {
       modelRegistry?: { getAll?: () => PickerModel[] };
@@ -175,13 +182,13 @@ export default async function modelPickerExtension(pi: ExtensionAPI) {
     onQuit: () => void,
   ) => {
     let query = "";
-    let list = new SelectListCtor!(items, MAX_VISIBLE, selectListTheme);
+    let list = new SelectListCtor!(items, MAX_VISIBLE, selectListTheme, PICKER_LAYOUT);
     list.onSelect = (item) => onPick({ value: item.value, saveDefault: false });
     list.onCancel = () => onQuit();
     const rebuild = () => {
       const q = query.toLowerCase();
       const matches = q ? items.filter((i) => i.value.toLowerCase().includes(q)) : items;
-      list = new SelectListCtor!(matches, MAX_VISIBLE, selectListTheme);
+      list = new SelectListCtor!(matches, MAX_VISIBLE, selectListTheme, PICKER_LAYOUT);
       list.onSelect = (item) => onPick({ value: item.value, saveDefault: false });
       list.onCancel = () => onQuit();
     };

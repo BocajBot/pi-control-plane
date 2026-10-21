@@ -254,7 +254,10 @@ extend the substring filter (rebuilt per keystroke), backspace edits it,
 retired `bin/patch-pi-model-page-nav.mjs` approach is archived under
 `~/.pi/agent/archive/`). OpenRouter rows show input/output pricing in Pi's
 native `$input/$output per Mtok` format; `+` marks models with request-size
-pricing tiers. Ctrl+s selects the highlighted filtered row, closes the modal,
+pricing tiers. The label column is widened to fit full `provider/model`
+references (up to 80 columns, clamped to the terminal width at render time),
+so long model ids are not clipped the way SelectList's 32-column default does.
+Ctrl+s selects the highlighted filtered row, closes the modal,
 and saves it as the global default after selection succeeds. Enter remains
 session-only; Ctrl+s with no matches does nothing. Save success/failure is
 notified explicitly, including when saving the already-current or only model.
