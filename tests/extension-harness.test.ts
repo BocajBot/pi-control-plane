@@ -2020,6 +2020,7 @@ test("minimal UI renders one row, hides counters, and details remains available"
   });
   let footer: { render: (width: number) => string[] } | undefined;
   let counter: { render: (width: number) => string[] } | undefined;
+  let cwdWidget: { render: (width: number) => string[] } | undefined;
   const colors: { color: string; text: string }[] = [];
   const theme = { fg: (color: string, text: string) => {
     colors.push({ color, text });
@@ -2034,17 +2035,26 @@ test("minimal UI renders one row, hides counters, and details remains available"
   ctx.ui.getEditorText = () => "draft";
   ctx.ui.setWidget = (key: string, factory: unknown) => {
     if (key === "control-plane-draft-counter" && typeof factory === "function") counter = factory({}, theme);
+    if (key === "control-plane-cwd" && typeof factory === "function") cwdWidget = factory({}, theme);
   };
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
   assert.ok(footer);
   assert.ok(counter);
+  assert.ok(cwdWidget);
+  // The directory is its own row above the editor, not part of the status row.
+  assert.deepEqual(cwdWidget.render(140), [" /work/project"]);
+  for (const width of [30, 40]) {
+    assert.match(cwdWidget.render(width)[0]!, /project/, `cwd widget keeps the tail at ${width} cols`);
+  }
+  assert.ok(cwdWidget.render(24)[0]!.endsWith("project"), "narrow widget shows the deepest directory");
+  assert.ok(cwdWidget.render(8).every((line) => line.length <= 8));
   // One natural-width status row. No reserved blank rows or 100-column cap.
   const initial = footer.render(140);
   assert.deepEqual(initial, [
     // Fresh session opens in Auto (Execute + unattended); see state.ts freshState().
     // Context reads as used/window (fixture: 100 of 1000), not a bare percent,
     // so the loaded model's context size is always on screen.
-    " /work/project  ·  Auto  ·  ctx ~100/1.0k  ·  OpenRouter loading  ·  test-model  ·  alt+h help",
+    " Auto  ·  ctx ~100/1.0k  ·  OpenRouter loading  ·  test-model  ·  alt+h help",
   ]);
   assert.match(initial[0], /ctx ~100\/1\.0k  ·  OpenRouter loading  ·  test-model/);
   assert.equal(footer.render(80).length, 1);
@@ -2053,15 +2063,17 @@ test("minimal UI renders one row, hides counters, and details remains available"
   assert.ok(colors.some((item) => item.color === "accent" && item.text === "Auto"));
   assert.ok(colors.some((item) => item.color === "muted" && item.text.includes("project")),
     "cwd sits in the quiet muted baseline");
+  assert.doesNotMatch(initial[0]!, /work\/project/, "cwd is not repeated in the status row");
   for (const width of [0, 1, 12, 24, 40, 80, 120]) {
     assert.ok(footer.render(width).every((line) => line.length <= width));
   }
   // A clipped tail used to remove the model entirely on narrow terminals;
-  // low-value segments (help, cache, cwd) now give way first.
+  // low-value segments (help, cache, credits, ctx) now give way first.
   for (const width of [12, 14, 24, 40, 60]) {
     const row = footer.render(width)[0]!;
     assert.match(row, /test-model/, `loaded model stays visible at ${width} cols: ${row}`);
   }
+
   assert.deepEqual(footer.render(200), initial);
   ctx.statuses.lsp = "\x1b[90mLSP Inactive\x1b[0m";
   assert.equal(footer.render(80).length, 1, "idle status does not reserve a row");

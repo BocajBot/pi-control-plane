@@ -26,13 +26,14 @@ they no longer occupy the default view. Detailed mode retains the legacy layout.
 
 Pi stacks header, transcript, editor and footer in one viewport, so footer rows
 are reserved in document flow and never overlay the transcript. The extension
-contributes exactly one header row, opaque transcript rows for diagnostics, and
-a compact footer whose contextual second row exists only when needed.
+contributes exactly one header row, one working-directory row above the editor,
+opaque transcript rows for diagnostics, and a compact footer whose contextual
+second row exists only when needed.
 
 ### Left grid
 
-Every extension-owned line starts at column 1: header and footer rows carry a
-literal one-space pad; transcript entries render inside a `Box(1, 0)`. Sub-items
+Every extension-owned line starts at column 1: header, cwd, and footer rows
+carry a literal one-space pad; transcript entries render inside a `Box(1, 0)`. Sub-items
 (`  - `, `  [on] `) nest one indent level under that grid.
 
 ### Header
@@ -52,17 +53,21 @@ exist. A second row appears only for active contextual extension statuses. Rows
 use available terminal width and clip only at the actual viewport edge.
 
 ```text
+ ~/x/y                                  <- cwd row, directly above the editor
  Context ~76% estimated — /compact
- ~/x/y  ·  Execute (attended)  ·  ctx 1%  ·  OpenRouter · $22.16  ·  model-name  ·  alt+h help
+ Execute (attended)  ·  ctx 1%  ·  OpenRouter · $22.16  ·  model-name  ·  alt+h help
  LSP Active: typescript
 ```
 
-Directory, context/provider/cost and model are muted; mode uses accent;
-the context percentage turns warning/error at 75%/90%. The model sits beside
-the provider metadata rather than at the far right. On narrow terminals the row
-sheds low-value segments before clipping — help hint and cache rate, then
-directory, then credits, then context — so the loaded model stays visible; only
-a model wider than the viewport itself is clipped. Attention text wraps on the
+The working directory is a muted widget row above the editor (`aboveEditor`),
+not a status-row segment, so it survives every terminal width; when the path
+does not fit, the row keeps its tail (`…/project`). Context/provider/cost and
+model are muted in the status row; mode uses accent; the context percentage
+turns warning/error at 75%/90%. The model sits beside the provider metadata
+rather than at the far right. On narrow terminals the status row sheds
+low-value segments before clipping — help hint and cache rate, then credits,
+then context — so the loaded model stays visible, and only a model wider than
+the viewport itself is clipped. Attention text wraps on the
 grid, preserving reasons and commands. Other extensions retain their own status.
 The exact idle message `LSP Inactive` is hidden in minimal view and remains
 available in details; active and error statuses stay visible. Detailed mode
@@ -147,7 +152,8 @@ The alt+h cheat sheet's mode-cycle line is parameterized
 
 ## Scope and verification
 
-Changes apply to `installFooter`, `installDraftCounter`, `/control-ui` in
+Changes apply to `installFooter`, `installCwdWidget`, `installDraftCounter`,
+`/control-ui` in
 `extensions/control-plane.ts`, and `compactFooterState` in
 `src/control-plane/ui.ts`. Authorization, persistence and provider requests are
 unchanged. Native tool operations, cancellation and approval dialogs remain Pi's
@@ -177,6 +183,12 @@ Pi does not set the terminal's default background: use a dark background such as
 `#10121F` for unboxed conversation. Theme surfaces and HTML export use matching
 ink tones. This theme is intended for dark terminals; switch themes in `/settings`
 when using a light terminal. Terminal configuration itself is unchanged.
+
+Pi's theme schema allows only its own color tokens (`additionalProperties:
+false`), and an unknown token makes the whole theme fail to load
+("Theme not found"). The theme therefore defines no extension-specific accents;
+the footer/Todo code's stock-token fallbacks (`muted`, `dim`, `text`) supply those
+colors. `tests/theme.test.ts` validates the file against the installed Pi schema.
 
 ## Context tools header
 

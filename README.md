@@ -84,10 +84,11 @@ Auto                                    model-name
 Context ~12.0% · OpenRouter $20.00 · Δ −$0.0021
 ```
 
-Full directory and permission mode stay visible. On narrow terminals the
-compact row sheds the help hint and cache rate, then directory, then credits,
-then context, so the loaded model stays identifiable; only a model wider than
-the viewport is clipped. Invalid policy and context pressure appear only when
+The working directory is its own muted row directly above the input editor, so
+it stays visible at any footer width and at every terminal size (its tail is
+kept: `…/project`). On narrow terminals the compact status row sheds the help
+hint and cache rate, then credits, then context, so the loaded model stays
+identifiable; only a model wider than the viewport is clipped. Invalid policy and context pressure appear only when
 relevant. Attention text wraps on narrow terminals. In the detailed footer the
 model aligns right and narrow stats are shortened rather than dropping it.
 Enabled sandbox, edited context and active extension statuses remain visible;

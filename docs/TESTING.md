@@ -37,6 +37,7 @@ No dependencies: Node 22's built-in test runner executes the TypeScript directly
 | `rules.test.ts` | Remembered-decision soft rules ("Always" confirmations) validation and matching |
 | `sandbox.test.ts` | Bwrap command-line assembly: arg building, credential shadowing, pure (no spawn) |
 | `model-swap.test.ts` | `/swap` parsing (until free-text, for prompts/minutes, status/cancel, error cases), strict state validation and walk-backward restoration (incl. cancelled tombstones), deterministic condition math (prompt countdown, minute deadline, floor-at-zero), trusted-evaluator contract (condition embedded verbatim, ground-truth facts incl. unknown-never-guessed balances, signed delta, strict MET/NOT MET verdict parsing that rejects near-misses like UNMET), and status rendering |
+| `theme.test.ts` | The packaged `pi-cyberpunk` theme validates and loads through the installed Pi's strict theme schema with its validator installed (the startup path); fails when the theme carries unknown color tokens, which makes Pi report `Theme not found`. Skips without an installed Pi; supports `PI_CODING_AGENT_DIST` |
 | `sensitive-paths.test.ts` | Sensitive read-target denylist matching |
 | `transcription.test.ts` | Audio transcription tool (`transcribe_audio`) logic |
 | `imagegen.test.ts` | Image generation tool (`generate_image`) logic: size parsing, generations vs edits routing, transport/response failures |

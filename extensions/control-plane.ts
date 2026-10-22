@@ -1509,11 +1509,6 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           for (const message of view.attention) {
             lines.push(...wrap(message.text).map((line) => pad + theme.fg(message.color, line)));
           }
-          const home = process.env.HOME ?? "";
-          let cwd = ctx.sessionManager.getCwd();
-          if (home !== "" && (cwd === home || cwd.startsWith(`${home}/`))) {
-            cwd = cwd === home ? "~" : `~${cwd.slice(home.length)}`;
-          }
           const model = ctx.model?.id ?? "No model";
           const statusWidth = cols;
           // Absolute usage against the loaded model's window ("ctx ~42k/1.0M")
@@ -1561,13 +1556,14 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           // Narrow terminals: shed low-value segments before clipping. A plain
           // clip removes the tail of the line, which is exactly where the model
           // sits, so a small window hid the loaded model entirely. Keep the
-          // model longest, then mode, ctx, credits, cwd, cache, help.
+          // model longest, then mode and ctx. The directory lives above the
+          // editor (installCwdWidget) so it never competes for this row.
+          const modePainted = theme.fg("accent", view.mode);
           const tiers: (string | null)[][] = [
-            [theme.fg("muted", cwd), theme.fg("accent", view.mode), contextPainted, cachePainted, creditsPainted, modelPainted, theme.fg("dim", "alt+h help")],
-            [theme.fg("muted", cwd), theme.fg("accent", view.mode), contextPainted, creditsPainted, modelPainted],
-            [theme.fg("accent", view.mode), contextPainted, creditsPainted, modelPainted],
-            [theme.fg("accent", view.mode), contextPainted, modelPainted],
-            [theme.fg("accent", view.mode), modelPainted],
+            [modePainted, contextPainted, cachePainted, creditsPainted, modelPainted, theme.fg("dim", "alt+h help")],
+            [modePainted, contextPainted, creditsPainted, modelPainted],
+            [modePainted, contextPainted, modelPainted],
+            [modePainted, modelPainted],
             [modelPainted],
           ];
           let status = composeStatus(tiers[tiers.length - 1]!);
@@ -1732,6 +1728,35 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
       },
     }));
     toolsHeaderInstalled = true;
+  };
+
+  // Directory above the editor (not in the status row), so the path stays
+  // visible at every width and the footer can spend its width on model/state.
+  const CWD_WIDGET_KEY = "control-plane-cwd";
+  const installCwdWidget = (ctx: ExtensionContext) => {
+    if (typeof ctx.ui.setWidget !== "function") return;
+    ctx.ui.setWidget(
+      CWD_WIDGET_KEY,
+      (_tui, theme) => ({
+        invalidate() {},
+        render: (cols: number): string[] => {
+          if (cols <= 0) return [];
+          const home = process.env.HOME ?? "";
+          let cwd = ctx.sessionManager.getCwd();
+          if (home !== "" && (cwd === home || cwd.startsWith(`${home}/`))) {
+            cwd = cwd === home ? "~" : `~${cwd.slice(home.length)}`;
+          }
+          const full = PAD + theme.fg("muted", cwd);
+          if (measureWidth(full) <= cols) return [full];
+          // Keep the deepest directory: a clipped head ("/home/…") would not
+          // identify where the session is.
+          const budget = Math.max(0, cols - 2);
+          const tail = Array.from(cwd).slice(-budget).join("");
+          return [clipLine(PAD + theme.fg("muted", `…${tail}`), cols)];
+        },
+      }),
+      { placement: "aboveEditor" },
+    );
   };
 
   // Keep open work in a noncapturing top-right overlay. A zero-height widget
@@ -2343,6 +2368,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     }
     ctx.ui.setToolsExpanded?.(false);
     installToolsHeader(ctx);
+    installCwdWidget(ctx);
     installTodoWidget(ctx);
     refreshTodoWidget();
     installFooter(ctx);
