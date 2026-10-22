@@ -2056,6 +2056,12 @@ test("minimal UI renders one row, hides counters, and details remains available"
   for (const width of [0, 1, 12, 24, 40, 80, 120]) {
     assert.ok(footer.render(width).every((line) => line.length <= width));
   }
+  // A clipped tail used to remove the model entirely on narrow terminals;
+  // low-value segments (help, cache, cwd) now give way first.
+  for (const width of [12, 14, 24, 40, 60]) {
+    const row = footer.render(width)[0]!;
+    assert.match(row, /test-model/, `loaded model stays visible at ${width} cols: ${row}`);
+  }
   assert.deepEqual(footer.render(200), initial);
   ctx.statuses.lsp = "\x1b[90mLSP Inactive\x1b[0m";
   assert.equal(footer.render(80).length, 1, "idle status does not reserve a row");
@@ -2069,6 +2075,11 @@ test("minimal UI renders one row, hides counters, and details remains available"
   assert.match(footer.render(80).join("\n"), /context/);
   assert.match(footer.render(80).join("\n"), /LSP Inactive/);
   assert.match(footer.render(80).join("\n"), /OpenRouter/);
+  // Detailed line 2 is stats-left/model-right; narrow widths shrink the stats
+  // instead of dropping the model.
+  for (const width of [20, 30, 40]) {
+    assert.match(footer.render(width).join("\n"), /test-model/, `detailed footer keeps the model at ${width} cols`);
+  }
   assert.equal(counter.render(80).length, 2);
   assert.ok(counter.render(8).every((line) => line.length <= 8));
   await pi.commands.get("control-ui")!.handler("minimal", ctx);

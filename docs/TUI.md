@@ -59,7 +59,10 @@ use available terminal width and clip only at the actual viewport edge.
 
 Directory, context/provider/cost and model are muted; mode uses accent;
 the context percentage turns warning/error at 75%/90%. The model sits beside
-the provider metadata rather than at the far right. Attention text wraps on the
+the provider metadata rather than at the far right. On narrow terminals the row
+sheds low-value segments before clipping — help hint and cache rate, then
+directory, then credits, then context — so the loaded model stays visible; only
+a model wider than the viewport itself is clipped. Attention text wraps on the
 grid, preserving reasons and commands. Other extensions retain their own status.
 The exact idle message `LSP Inactive` is hidden in minimal view and remains
 available in details; active and error statuses stay visible. Detailed mode

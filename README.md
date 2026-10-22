@@ -84,10 +84,13 @@ Auto                                    model-name
 Context ~12.0% · OpenRouter $20.00 · Δ −$0.0021
 ```
 
-Full directory and permission mode stay visible. Model appears when space permits.
-Invalid policy and context pressure appear only when relevant. Attention text
-wraps on narrow terminals. Model aligns right when space permits. Enabled
-sandbox, edited context and active extension statuses remain visible;
+Full directory and permission mode stay visible. On narrow terminals the
+compact row sheds the help hint and cache rate, then directory, then credits,
+then context, so the loaded model stays identifiable; only a model wider than
+the viewport is clipped. Invalid policy and context pressure appear only when
+relevant. Attention text wraps on narrow terminals. In the detailed footer the
+model aligns right and narrow stats are shortened rather than dropping it.
+Enabled sandbox, edited context and active extension statuses remain visible;
 `LSP Inactive` moves to details. Native Pi tool progress and approval dialogs
 are unchanged.
 

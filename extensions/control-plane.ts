@@ -1555,13 +1555,29 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
               theme.fg("muted", "thinking ") + footerPaint(theme, "footerYellow", thinking);
           }
           const cacheRates = formatCacheRates(collectSessionUsage(ctx).cacheHitPercent);
-          const cachePainted =
-            cacheRates === null ? "" : theme.fg("muted", cacheRates) + separator;
-          const status =
-            PAD + theme.fg("muted", cwd) + separator +
-            theme.fg("accent", view.mode) + separator +
-            contextPainted + separator + cachePainted + creditsPainted +
-            separator + modelPainted + separator + theme.fg("dim", "alt+h help");
+          const cachePainted = cacheRates === null ? null : theme.fg("muted", cacheRates);
+          const composeStatus = (sections: (string | null)[]): string =>
+            PAD + sections.filter((section): section is string => section !== null).join(separator);
+          // Narrow terminals: shed low-value segments before clipping. A plain
+          // clip removes the tail of the line, which is exactly where the model
+          // sits, so a small window hid the loaded model entirely. Keep the
+          // model longest, then mode, ctx, credits, cwd, cache, help.
+          const tiers: (string | null)[][] = [
+            [theme.fg("muted", cwd), theme.fg("accent", view.mode), contextPainted, cachePainted, creditsPainted, modelPainted, theme.fg("dim", "alt+h help")],
+            [theme.fg("muted", cwd), theme.fg("accent", view.mode), contextPainted, creditsPainted, modelPainted],
+            [theme.fg("accent", view.mode), contextPainted, creditsPainted, modelPainted],
+            [theme.fg("accent", view.mode), contextPainted, modelPainted],
+            [theme.fg("accent", view.mode), modelPainted],
+            [modelPainted],
+          ];
+          let status = composeStatus(tiers[tiers.length - 1]!);
+          for (const tier of tiers) {
+            const candidate = composeStatus(tier);
+            if (width(candidate) <= statusWidth) {
+              status = candidate;
+              break;
+            }
+          }
           lines.push(clip(status, statusWidth, "…"));
           const contextual = [describeSandbox(sandbox), contextOverlay !== null ? "Context edited" : ""];
           for (const [key, text] of footerData.getExtensionStatuses()) {
@@ -1655,11 +1671,20 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           if (leftWidth + 2 + width(withProvider) <= lineWidth) right = withProvider;
         }
         let statsLine: string;
-        if (leftWidth + 2 + width(right) <= lineWidth) {
-          const padding = " ".repeat(lineWidth - leftWidth - width(right));
+        // The model is right-aligned, so a plain "stats win" fallback dropped
+        // it entirely on narrow terminals. Shrink the stats instead, and when
+        // the model alone does not fit, keep the model rather than the stats.
+        const rightWidth = width(right);
+        if (leftWidth + 2 + rightWidth <= lineWidth) {
+          const padding = " ".repeat(lineWidth - leftWidth - rightWidth);
           statsLine = left + theme.fg("muted", padding) + right;
+        } else if (rightWidth + 2 < lineWidth) {
+          const clippedLeft = clip(left, lineWidth - rightWidth - 2, theme.fg("muted", "..."));
+          const clippedLeftWidth = width(clippedLeft);
+          const padding = " ".repeat(Math.max(2, lineWidth - clippedLeftWidth - rightWidth));
+          statsLine = clippedLeft + theme.fg("muted", padding) + right;
         } else {
-          statsLine = left;
+          statsLine = clip(right, lineWidth, theme.fg("muted", "..."));
         }
 
         // Line 3: extension statuses (includes our own status segment).
