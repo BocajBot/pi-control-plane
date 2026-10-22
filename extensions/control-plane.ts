@@ -1746,13 +1746,22 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
           if (home !== "" && (cwd === home || cwd.startsWith(`${home}/`))) {
             cwd = cwd === home ? "~" : `~${cwd.slice(home.length)}`;
           }
-          const full = PAD + theme.fg("muted", cwd);
+          // Yellow accent: the custom token when a theme still defines it,
+          // else the stock yellow role (Pi 1.4 rejects unknown theme tokens).
+          const paintCwd = (text: string): string => {
+            try {
+              return theme.fg("footerYellow", text);
+            } catch {
+              return theme.fg("warning", text);
+            }
+          };
+          const full = PAD + paintCwd(cwd);
           if (measureWidth(full) <= cols) return [full];
           // Keep the deepest directory: a clipped head ("/home/…") would not
           // identify where the session is.
           const budget = Math.max(0, cols - 2);
           const tail = Array.from(cwd).slice(-budget).join("");
-          return [clipLine(PAD + theme.fg("muted", `…${tail}`), cols)];
+          return [clipLine(PAD + paintCwd(`…${tail}`), cols)];
         },
       }),
       { placement: "aboveEditor" },
@@ -4630,7 +4639,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
     });
   }
 
-  // ---- context editor (alt+e) ----
+  // ---- context editor (ctrl+alt+e) ----
 
   const pickEditor = (): string | null => {
     for (const candidate of ["nvim", "vim"]) {
@@ -4781,7 +4790,7 @@ export default async function controlPlaneExtension(pi: ExtensionAPI) {
 
   // ---- hotkeys ----
 
-  pi.registerShortcut("alt+e", {
+  pi.registerShortcut("ctrl+alt+e", {
     description: "Control plane: view/edit session context in nvim",
     handler: async (ctx) => {
       await runContextEditor(ctx, { includeDraft: false });

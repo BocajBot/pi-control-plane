@@ -14,7 +14,7 @@ The central rule: **you can inspect and correct Pi's context before Pi is permit
 ## Features
 
 - **Enforced modes** — Plan (read-only), Manual (confirm risky calls), Accept (auto-accept in-root edits), Auto (credential-path protection only). Fails closed: corrupted state restores as Plan, a broken policy file means read-only.
-- **Context inspection and editing** — `/context` summaries, diffs, verified source toggles, tool profiles, exact token recounts, and an nvim context editor (`alt+e`) / send preview (`alt+s`).
+- **Context inspection and editing** — `/context` summaries, diffs, verified source toggles, tool profiles, exact token recounts, and an nvim context editor (`ctrl+alt+e`) / send preview (`alt+s`).
 - **Edit safety** — read-before-edit, backup-before-edit, and a sensitive-path denylist.
 - **OS isolation (optional)** — `/bwrap` wraps allowed `bash` calls in bubblewrap with credential paths blanked.
 - **Model tooling** — typeahead `/models` picker (`alt+m`) with frecency, paging, and OpenRouter price badges; `/swap` temporary model switches that revert on a condition.
@@ -84,7 +84,7 @@ Auto                                    model-name
 Context ~12.0% · OpenRouter $20.00 · Δ −$0.0021
 ```
 
-The working directory is its own muted row directly above the input editor, so
+The working directory is its own yellow row directly above the input editor, so
 it stays visible at any footer width and at every terminal size (its tail is
 kept: `…/project`). On narrow terminals the compact status row sheds the help
 hint and cache rate, then credits, then context, so the loaded model stays
@@ -130,7 +130,7 @@ See [TUI design](docs/TUI.md) for hierarchy, disclosure and state examples.
 - `/context diff` — what changed since the last `/context` or `/context full` (sources, tools, skills, model, tokens, hashes). The first run establishes the baseline.
 - `/context full` — detailed view including the redacted system prompt (size-limited, truncation marked). Prints a warning first: redaction is pattern-based and cannot guarantee every secret is caught.
 - `/context sources` — every prompt source with its toggle status: `enabled`, `disabled`, or `not toggleable`.
-- `/context restore` — remove the `alt+e` context override (see the context editor section below).
+- `/context restore` — remove the `ctrl+alt+e` context override (see the context editor section below).
 - `/context recount` — re-count the last provider request with the model's own tokenizer (via llama-swap) and compare against pi's estimate. The same count feeds the footer's context segment automatically after every request.
 
 The exact count also drives context-fullness warnings: a warning notification at 75% of the window and an error-level one at 90%, each fired once until usage drops back below 75% (e.g. after `/compact`). This matters because pi's built-in auto-compaction watches its own estimate, which can be off by a large margin (46% observed) — the control plane warns from the accurate number so you can `/compact` before the window actually overflows.
@@ -190,7 +190,7 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 | `alt+o` | Toggle a live **bash output** widget above the editor: the tail of the running (or last) bash call, with elapsed time and running/done/failed status. Hidden by default and never written to the transcript; output is captured even while hidden, so pressing `alt+o` mid-command shows what has already printed |
 | `ctrl+alt+b` `ctrl+alt+b` | Move the running bash command to a **background task** (pi-background-tasks). Pi has no per-tool-call detach, so this aborts the foreground call — and with it the agent turn — and **re-runs the command from the beginning** as a task; side effects it already performed happen again. The first press only prints the warning, the second acts. Output then goes to the task log (`/logs <id>`), and the widget shows `background` |
 | `alt+c` | Toggle a context-preview widget above the editor |
-| `alt+e` | Open the session context in **nvim** to view and edit it |
+| `ctrl+alt+e` | Open the session context in **nvim** to view and edit it |
 | `alt+s` | **Send preview**: everything the next message will send — system prompt (with the auto-appended control-plane block shown read-only), full history, and your unsent draft — in nvim, editable |
 | `ctrl+alt+t` | Tool-profile picker: modal with profile names in a left column (1/5 width) and, on the right, the selected profile's description over its tool list. ↑/↓ or j/k select, **enter** applies for this session only, **space** also saves it as the default for new sessions (written to `policy/profiles.json` as `defaultProfile`), esc closes; `*` marks the active profile, `(default)` the default one |
 | `ctrl+alt+r` | Reload Pi resources (same as `/reload`); refuses while Pi is busy |
@@ -200,14 +200,14 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 | `alt+i` | Diagnostics panel: a centered modal listing this session's diagnostic entries (declined reads, unattended action logs, verification events) |
 | `alt+h` | Hotkey cheat sheet as a centered modal (any key closes; `/hotkeys` lists everything) |
 
-`alt+s` is `alt+e` plus two things: lines prefixed `#> ` show the control-plane state block exactly as it will be appended to the system prompt (read-only — edits to them are ignored), and a `DRAFT` section holds your unsent message — editing it rewrites the input box on save. Context edits behave identically to `alt+e` (override, `Context edited`, `/context restore`).
+`alt+s` is `ctrl+alt+e` plus two things: lines prefixed `#> ` show the control-plane state block exactly as it will be appended to the system prompt (read-only — edits to them are ignored), and a `DRAFT` section holds your unsent message — editing it rewrites the input box on save. Context edits behave identically to `ctrl+alt+e` (override, `Context edited`, `/context restore`).
 
-### The context editor (`alt+e`)
+### The context editor (`ctrl+alt+e`)
 
-`alt+e` suspends the TUI and opens the current session context — the system prompt plus every message the model would receive — in nvim (falls back to vim). Each message sits under a marker line; edit the text, delete whole message sections to remove them, `:wq` to apply, `:q!` to cancel.
+`ctrl+alt+e` suspends the TUI and opens the current session context — the system prompt plus every message the model would receive — in nvim (falls back to vim). Each message sits under a marker line; edit the text, delete whole message sections to remove them, `:wq` to apply, `:q!` to cancel.
 
 - Edits become an **override for future turns in this session**: the model sees your edited history instead of the original. The session file is never rewritten — the chat scrollback still shows what really happened.
-- Tool calls, tool results, thinking, and images appear as `[non-text: …]` placeholders and are preserved exactly; only text is editable. (Deleting one half of a tool call/result pair can make the provider reject the request — if that happens, `alt+e` again or restore.)
+- Tool calls, tool results, thinking, and images appear as `[non-text: …]` placeholders and are preserved exactly; only text is editable. (Deleting one half of a tool call/result pair can make the provider reject the request — if that happens, `ctrl+alt+e` again or restore.)
 - `/context restore` removes the override. The footer shows `Context edited` while one is active.
 - The override lives in memory only: it does not survive quitting, `/reload`, or compaction (compaction invalidates it with a notification, since the conversation no longer lines up).
 - Malformed edits (broken markers, missing system-prompt section) are rejected whole — nothing half-applies.
@@ -446,10 +446,11 @@ relevant source, tests, and `docs/` before changing Pi behavior.
   are part of model-visible API. Do not add a second `todo` or collide with
   another extension's tool name.
 - **TUI and live usage:** cyberpunk theme supplies readable editor/Working
-  state, neon purple To-Do border, neon blue `Tasks x/y`, yellow open-task
-  bullets, visible footer credits, live OpenRouter cost projection, context
-  counts, timing, diagnostics, and active-tool header.
-- **Session UX:** `alt+e` edits context in nvim, `alt+s` previews next send,
+  state and a yellow cwd row above the editor; the To-Do widget and open-task
+  bullets use stock token fallbacks because Pi 1.4 rejects extension-only theme
+  tokens. Visible footer credits, live OpenRouter cost projection, context
+  counts, timing, diagnostics, and active-tool header remain.
+- **Session UX:** `ctrl+alt+e` edits context in nvim, `alt+s` previews next send,
   `alt+c` toggles context preview, `ctrl+alt+t` picks tool profiles,
   `ctrl+alt+r` reloads when idle, `alt+i` opens diagnostics, `alt+h` opens
   hotkey help, `alt+o` toggles the live bash output widget. `alt+d` remains Pi

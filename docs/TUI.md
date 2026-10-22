@@ -59,7 +59,7 @@ use available terminal width and clip only at the actual viewport edge.
  LSP Active: typescript
 ```
 
-The working directory is a muted widget row above the editor (`aboveEditor`),
+The working directory is a yellow-accent widget row above the editor (`aboveEditor`),
 not a status-row segment, so it survives every terminal width; when the path
 does not fit, the row keeps its tail (`…/project`). Context/provider/cost and
 model are muted in the status row; mode uses accent; the context percentage
@@ -176,8 +176,11 @@ picker once this package is loaded. Reload resources with `/reload` after update
 
 Cool white text (`#E6EDF7`), readable slate metadata (`#A5AEC5`), cyan focus
 (`#53F5FF`) and magenta headings/syntax (`#F48CFF`) sit on dark ink surfaces.
-Amber (`#FFD166`) marks warnings; pink-red (`#FF719A`) marks errors; mint
-(`#65F5B5`) marks success. Borders stay subdued. Semantic roles remain unchanged.
+Neon yellow (`#FFE800`) marks warnings and colors the cwd row above the editor
+(it is the stock `warning` role, since Pi 1.4 rejects extension-only tokens);
+amber (`#FFD166`) stays on syntax numbers, pink-red (`#FF719A`) marks errors,
+and mint (`#65F5B5`) marks success. Borders stay subdued. Semantic roles remain
+unchanged.
 
 Pi does not set the terminal's default background: use a dark background such as
 `#10121F` for unboxed conversation. Theme surfaces and HTML export use matching

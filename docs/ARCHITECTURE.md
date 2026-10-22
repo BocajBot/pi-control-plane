@@ -22,7 +22,7 @@ Verified against pi 0.85.1 (`dist/core/extensions/types.d.ts`):
 | `before_provider_request` | Capture redacted payload length + sha256 (metadata only; payload never stored or persisted) |
 | `tool_call` | The enforcement point: allow / confirm / block every tool call |
 | `tool_result` | Read-credit accounting (refreshReadCredit) |
-| `context` | Context-editor overlay merge (alt+e override applied per turn, invalidated on shrink) |
+| `context` | Context-editor overlay merge (ctrl+alt+e override applied per turn, invalidated on shrink) |
 | `message_update` | Time-to-first-text timing and throttled live credit refreshes |
 | `message_end` | Immediate OpenRouter response-cost projection and endpoint reconciliation |
 | `agent_end` | Record the workload-timing ledger turn (persisted as its own entry), refresh credits, schedule delayed-billing reconciliation |
@@ -63,7 +63,7 @@ Three mechanisms, by kind:
 
 `before_agent_start` returns `{ systemPrompt: original + "\n\n" + block }`. Because the return value replaces the prompt only for that turn, injection is ephemeral: no duplicate messages accumulate in the session. The block contains the mode and the behavioral requirements, capped at `LIMITS.injectionTotal` chars (truncation marked `[TRUNCATED]`).
 
-## Context editor (alt+e)
+## Context editor (ctrl+alt+e)
 
 `context-editor.ts` (pure) serializes the effective context — system prompt + messages captured from the `context` event — into a marker-delimited document, parses the edited result, and splices text edits back while preserving non-text blocks verbatim. The entry suspends the TUI with the same `tui.stop()` → spawn (stdio inherit) → `tui.start()` pattern Pi's own external-editor support uses, launching nvim (vim fallback) on a mode-0600 temp file that is always unlinked.
 

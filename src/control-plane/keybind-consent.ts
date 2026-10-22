@@ -170,8 +170,8 @@ export function validateRecordedKey(raw: string): RecordedKeyCheck {
 /** Shortcuts this extension package itself registers (both entry points).
  *  A recorded key may not shadow our own live shortcuts. */
 export const OWN_EXTENSION_SHORTCUTS: readonly string[] = [
-  "alt+c", "alt+e", "alt+s", "alt+h", "alt+i", "alt+p", "alt+m",
-  "ctrl+alt+r", "ctrl+alt+t",
+  "alt+c", "alt+s", "alt+h", "alt+i", "alt+p", "alt+m",
+  "ctrl+alt+e", "ctrl+alt+r", "ctrl+alt+t",
 ];
 
 // ---------------------------------------------------------------------------

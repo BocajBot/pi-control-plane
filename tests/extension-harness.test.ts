@@ -1413,11 +1413,11 @@ test("unknown toggle target produces an actionable error, not a state change", a
   assert.ok(ctx.notifications.some((n) => /unknown source/i.test(n.message)));
 });
 
-test("context overlay: /context restore with no override says so; alt+e registered", async () => {
+test("context overlay: /context restore with no override says so; ctrl+alt+e registered", async () => {
   const pi = await boot();
   const ctx = makeCtx({ cwd: tmpRoot() });
   await pi.emit("session_start", { type: "session_start", reason: "startup" }, ctx);
-  assert.ok(pi.shortcuts.has("alt+e"), "alt+e shortcut registered");
+  assert.ok(pi.shortcuts.has("ctrl+alt+e"), "ctrl+alt+e shortcut registered");
   await pi.commands.get("context")!.handler("restore", ctx);
   assert.ok(ctx.notifications.some((n) => /no context override/i.test(n.message)));
 });
@@ -1433,7 +1433,7 @@ test("alt+h and alt+s registered; alt+h without modal support falls back to chat
   await pi.shortcuts.get("alt+h")!(ctx);
   const output = pi.entries.find((e) => e.customType === "pi-control-plane-output");
   assert.ok(output, "cheat sheet emitted as chat entry when no modal UI exists");
-  assert.ok(JSON.stringify(output!.data).includes("alt+e"));
+  assert.ok(JSON.stringify(output!.data).includes("ctrl+alt+e"));
 });
 
 test("/context profile applies loadouts, lists them, and 'all' restores", async () => {
@@ -2061,8 +2061,8 @@ test("minimal UI renders one row, hides counters, and details remains available"
   assert.ok(colors.some((c) => c.color === "accent" && c.text === "Auto"));
   assert.deepEqual(counter.render(80), []);
   assert.ok(colors.some((item) => item.color === "accent" && item.text === "Auto"));
-  assert.ok(colors.some((item) => item.color === "muted" && item.text.includes("project")),
-    "cwd sits in the quiet muted baseline");
+  assert.ok(colors.some((item) => item.color === "footerYellow" && item.text.includes("project")),
+    "cwd uses the yellow accent");
   assert.doesNotMatch(initial[0]!, /work\/project/, "cwd is not repeated in the status row");
   for (const width of [0, 1, 12, 24, 40, 80, 120]) {
     assert.ok(footer.render(width).every((line) => line.length <= width));
