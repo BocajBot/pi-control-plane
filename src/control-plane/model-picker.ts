@@ -31,11 +31,12 @@ export function nextSortMode(mode: SortMode): SortMode {
  * pi-tui clamps the label column to 32 chars by default, which truncates long
  * `provider/model` refs (observed max 41 in models.json) whenever a
  * description column is shown (price labels, "current" marker). Grow the
- * column with content up to 60 instead of clipping mid-name.
+ * column with content up to 80 instead of clipping mid-name; pi-tui still
+ * clamps it to the terminal width at render time.
  */
 export const PRIMARY_COLUMN_LAYOUT = {
-  minPrimaryColumnWidth: 32,
-  maxPrimaryColumnWidth: 60,
+  minPrimaryColumnWidth: 24,
+  maxPrimaryColumnWidth: 80,
 } as const;
 
 export interface UsageEntry {

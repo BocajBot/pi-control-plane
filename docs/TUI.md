@@ -248,8 +248,10 @@ sessions keep their totals; the detailed footer carries a compact segment
 The model picker is a `ctx.ui.custom` modal: a keymap header and separate
 `Ctrl+s select and save as default` hint, both clipped to viewport width, a
 filter line (`> query`), and pi-tui's `SelectList` (15 visible) laid out with
-`PRIMARY_COLUMN_LAYOUT` (the model-ref column grows with content up to 60
-chars, so long `provider/model` refs stay whole next to their description).
+`PRIMARY_COLUMN_LAYOUT` (the model-ref column grows with content up to 80
+chars, clamped to the terminal width at render time, so long `provider/model`
+refs stay whole next to their description instead of being clipped the way
+SelectList's 32-column default does).
 Printable keys
 extend the substring filter (rebuilt per keystroke), backspace edits it,
 ↑↓/enter/esc go to the list, and PageUp/PageDown jump a page via
