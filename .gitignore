@@ -5,4 +5,8 @@ node_modules/
 rpc-smoke-*.txt
 interp-test.txt
 .pi/tasks/
+.pi/goals/
+.pi/.goals-pool-snapshot.json
+pi-session-*.html
+*.pid
 .startup-validation/
