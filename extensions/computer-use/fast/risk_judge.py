@@ -11,7 +11,7 @@ import hashlib, json, os, time, urllib.request
 
 BASE_URL = os.environ.get("COMPUTER_USE_BASE_URL", "http://localhost:9292/v1")
 MODEL = os.environ.get("FASTCU_RISK_MODEL", "nex-n25-mini:nothink")
-CACHE = os.path.expanduser(os.environ.get("FASTCU_RISK_CACHE", "~/computer-use-work/risk-cache.json"))
+CACHE = os.path.expanduser(os.environ.get("FASTCU_RISK_CACHE", "~/Documents/Projects/computer-use-work/risk-cache.json"))
 PROMPT_VERSION = "v1-maj5"
 # Identical calls at temperature 0 were seen to flip, so one vote would cache
 # luck. Vote spread on dev names (runs/judge-vote-spread-dev.log, 9 votes

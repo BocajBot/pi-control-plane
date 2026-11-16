@@ -2,7 +2,7 @@
 """Drop-in picker server with decide_server.py's contract, backed by Laya (convaiinnovations/laya) instead of GLiNER.
   POST /classify {"text": instruction, "tasks": {"target": [labels...]}} -> {"result": {"target": {"label", "confidence"}}}
   GET  /health
-Run from the laya venv:  ~/laya-work/.venv/bin/python laya_server.py   (same port 8377; stop decide_server.py first)
+Run from the laya venv:  ~/Documents/Projects/laya-work/.venv/bin/python laya_server.py   (same port 8377; stop decide_server.py first)
 Zero-shot Laya lost to GLiNER on the test app (held-out 20/26 vs 26/26, 2026-09-29); this exists to try it on real apps.
 """
 import json, os, time

@@ -36,7 +36,7 @@ first step that is not `done`.
 
 ```
 # decision server (own venv, ~18 s load); localhost only
-~/computer-use-work/venv/bin/python decide_server.py 8377
+~/Documents/Projects/computer-use-work/venv/bin/python decide_server.py 8377
 # one goal
 python3 planner.py <atspi-app-name> <window-title> "<goal>" '["Approved control name"]'
 # validation (system python: needs python-gobject)
@@ -49,8 +49,8 @@ python3 risk_judge.py <dev|heldout|heldout2> <reps>
 Weights: `~/models/fastino/GLiNER2.5-Decide` (revision and sha256 in its
 `SOURCE.txt`); the server runs offline. Override with `FASTCU_DECIDE_MODEL`.
 Venv: `uv venv --python 3.11`, CPU torch, `gliner2[local]`;
-lock in `~/computer-use-work/requirements.lock.txt`.
-All run artifacts and frozen hashes: `~/computer-use-work/runs/`.
+lock in `~/Documents/Projects/computer-use-work/requirements.lock.txt`.
+All run artifacts and frozen hashes: `~/Documents/Projects/computer-use-work/runs/`.
 
 ## Results (ground truth = test app event log; bars fixed before each run)
 

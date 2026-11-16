@@ -2,15 +2,15 @@
 """Decision server: GLiNER2.5-Decide behind a localhost-only HTTP endpoint.
 
 Kept as its own process because the model takes ~18s to load and lives in a
-separate venv (~/computer-use-work/venv) from the system Python that has the
+separate venv (~/Documents/Projects/computer-use-work/venv) from the system Python that has the
 AT-SPI bindings.
 
   POST /classify  {"text": str, "tasks": {name: [labels] | {...}}}
        -> {"result": {name: {"label": str, "confidence": float}}, "ms": float}
   GET  /health    -> {"ok": true, "model": str}
 
-Run (GPU):  ~/computer-use-work/venv-rocm/bin/python decide_server.py [port]
-Run (CPU):  FASTCU_DECIDE_DEVICE=cpu ~/computer-use-work/venv/bin/python decide_server.py [port]
+Run (GPU):  ~/Documents/Projects/computer-use-work/venv-rocm/bin/python decide_server.py [port]
+Run (CPU):  FASTCU_DECIDE_DEVICE=cpu ~/Documents/Projects/computer-use-work/venv/bin/python decide_server.py [port]
 
 Measured 2026-09-29 (gpu-bench/): CPU 8 threads 224 ms median; 6900 XT fp16
 26.5 ms, 960 MiB. torch ROCm order: cuda:0 = 6900 XT, cuda:1 = 7900 XTX.
