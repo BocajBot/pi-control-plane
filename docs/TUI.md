@@ -292,3 +292,16 @@ directly and `/models` prints the frecency-ordered list.
 Historical note: an earlier vendor patch restyled pi-lens ("Code diagnostics"
 above input). pi-lens is no longer installed; the patch script is archived
 alongside the model-nav patch under `~/.pi/agent/archive/`.
+
+
+## Last user prompt
+
+Fullscreen `/last-prompt` and `ctrl+alt+u` move to the latest rendered user/skill
+prompt, independent of current scroll position. Wrapping uses the live content
+width. Following output pauses; `ctrl+end` resumes it. No widget rows, draft
+changes, new session entries, or provider requests are introduced. No user
+prompt or unsupported fullscreen layout produces a notice. Native previous/next
+marked-message navigation remains unchanged.
+
+Startup picker opens only without a saved default pair (and unless explicitly
+disabled). On-demand `/models`, native `/model`, and `alt+m` keep their behavior.

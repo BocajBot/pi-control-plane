@@ -95,3 +95,18 @@ Most items below are covered headlessly by the RPC suite; the TUI-only remainder
 - Steps 5–9 need a configured, reachable model provider (this machine: pi-llama expects a llama.cpp endpoint; point it at a running server or log into a provider first).
 - Confirmation dialogs and the `alt+c` widget only exist in TUI mode. In print/RPC modes Attended blocks risky calls outright (fail-closed) — that is the expected behavior, not a bug.
 - `alt+*` hotkeys depend on the terminal delivering Alt combinations (foot/kitty/alacritty fine; some terminals swallow Alt).
+
+
+## Prompt navigation / saved-default startup regression
+
+```bash
+node --test tests/last-user-prompt.test.ts tests/model-picker.test.ts tests/model-picker-runtime.test.ts tests/model-picker-layout.test.ts
+```
+
+Navigation uses installed Pi message components, fullscreen layout, ScrollView
+and extension loader; covers both entry points, old/new scroll positions,
+Unicode wrapping at narrow/wide widths, streaming output, empty transcripts and
+unsupported modes. Model tests cover saved/partial defaults, custom tilde agent
+directory, unsaved startup, reload, and manual command/shortcut preservation.
+No provider requests are needed. Runtime tests require installed Pi; run all
+checks with `npm test` and report unrelated failures separately.

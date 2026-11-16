@@ -10,6 +10,44 @@ import { resolvePiDist } from "../scripts/pi-dist.mjs";
 
 const dist = resolvePiDist();
 
+test("saved default in tilde agent directory skips startup; unsaved startup and manual picker still open", { skip: !dist }, async () => {
+  const temp = fs.mkdtempSync(path.join(process.cwd(), ".model-picker-startup-test-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = `~/${path.relative(os.homedir(), temp)}`;
+  try {
+    const settingsFile = path.join(temp, "settings.json");
+    fs.writeFileSync(settingsFile, JSON.stringify({ defaultProvider: "test", defaultModel: "alpha", modelPicker: true }));
+    const { loadExtensions, createExtensionRuntime } = await import(pathToFileURL(path.join(dist!, "core/extensions/loader.js")).href);
+    const runtime = createExtensionRuntime();
+    runtime.setModel = async () => true;
+    const loaded = await loadExtensions([path.resolve("extensions/model-picker.ts")], process.cwd(), undefined, runtime);
+    assert.deepEqual(loaded.errors, []);
+    const extension = loaded.extensions[0];
+    let opens = 0;
+    const ctx = { cwd: temp, mode: "tui", modelRegistry: { getAll: () => [{ provider: "test", id: "alpha" }] }, ui: {
+      notify() {}, custom: async () => { opens++; return { value: "test/alpha", saveDefault: false }; },
+    } };
+    const start = async (reason: string) => {
+      for (const handler of extension.handlers.get("session_start")) await handler({ reason }, ctx);
+    };
+    await start("startup");
+    assert.equal(opens, 0);
+    await extension.commands.get("models").handler("", ctx);
+    await extension.shortcuts.get("alt+m").handler(ctx);
+    assert.equal(opens, 2);
+    fs.writeFileSync(settingsFile, "{}");
+    await start("startup");
+    assert.equal(opens, 3);
+    await start("reload");
+    await start("new");
+    assert.equal(opens, 3);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("/models Ctrl+s saves the filtered selection; Enter/Esc/failed switches do not save", {
   skip: !dist,
 }, async () => {

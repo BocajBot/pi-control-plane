@@ -175,3 +175,21 @@ Discovered 2026-07-22 auditing every extension in `~/.pi/agent/settings.json`'s 
 - **Command names do not collide silently.** `resolveRegisteredCommands` in `extensions/runner.js` detects a name used by more than one extension and assigns each occurrence a disambiguated `invocationName` (`example:1`, `example:2`, ...), which Pi's TUI resolves via a picker - not a bug, confirmed by reading the source rather than assumed.
 - **Beyond exact-name collisions, two extensions do overlapping jobs with different tool names**: this package's `local_web_search` and `pi-web-access`'s `web_search` (paid multi-provider). `alwaysDisabledTools` in `policy/profiles.json` (a field alongside `profiles`/`defaultProfile`, `profiles.ts`) currently disables only `web_search`: it and `local_web_search` are both plain, standalone, general-purpose search tools with no other extension depending on either of them, making the redundancy a clean call. (`pi-task`'s `pi-worker-search`/`pi-worker-fetch` were deliberately left alone while it was installed — they were wired into `pi-task`'s own command-pipeline orchestration, a different job than standalone search; `pi-task` is no longer installed.)
 - **Mechanism**: `applyAlwaysDisabled` (`profiles.ts`) forces the listed tools off in a toggle map; `applyNamedProfile` (`extensions/control-plane.ts`) calls it after computing whichever profile's own allowlist, including `"all"` - so `alwaysDisabledTools` wins regardless of which profile is active, and `"all"` no longer means literally every tool (documented in `currentProfileName`'s matching logic, which now excludes `alwaysDisabledTools` from what `"all"` is expected to equal). Applied once more, independently, for a fresh session that starts with no default profile at all (`defaultProfile: null` or `"all"`) so the invariant holds even outside the profile system. Restored sessions are never touched - the same "don't silently revert a toggle set by hand" rule the rest of source-toggle handling already follows. An individual `/context toggle tool:<name>` afterward still works normally; only bulk profile application is guarded.
+
+
+## Prompt navigation and startup selection
+
+`extensions/last-user-prompt.ts` registers `/last-prompt` and `ctrl+alt+u`. A
+zero-height below-editor widget captures Pi's stable renderer reference without
+replacing the editor/footer. `src/control-plane/last-user-prompt.ts` reads the
+Pi 1.4 fullscreen layout's primary transcript, finds the last native user/skill
+component under its Container tree, and measures preceding components at the
+current content width. Native ScrollView receives the resulting row with
+`disableFollow: true`, then the renderer repaints. No model, session, or draft
+mutation occurs. Missing layouts/targets return explicit status. The private
+layout/component-name bridge needs compatibility tests after Pi updates.
+
+Startup-only `pickerDisabled` also recognizes nonempty saved default provider
+and model fields. `extensions/model-picker.ts` resolves settings and usage paths
+through native `getAgentDir()`, including custom/tilde agent directories. Manual
+model commands and shortcuts bypass this startup gate.

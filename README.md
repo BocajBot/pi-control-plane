@@ -194,6 +194,7 @@ Fails closed: if the sandbox is on and `bwrap` disappears from `PATH` mid-sessio
 | `alt+s` | **Send preview**: everything the next message will send — system prompt (with the auto-appended control-plane block shown read-only), full history, and your unsent draft — in nvim, editable |
 | `ctrl+alt+t` | Tool-profile picker: modal with profile names in a left column (1/5 width) and, on the right, the selected profile's description over its tool list. ↑/↓ or j/k select, **enter** applies for this session only, **space** also saves it as the default for new sessions (written to `policy/profiles.json` as `defaultProfile`), esc closes; `*` marks the active profile, `(default)` the default one |
 | `ctrl+alt+r` | Reload Pi resources (same as `/reload`); refuses while Pi is busy |
+| `ctrl+alt+u` | Jump to Last User Prompt in fullscreen transcript (also `/last-prompt`); pauses output following |
 | `alt+p` | Cycle mode: Plan → Manual → Accept → Auto |
 | `shift+tab` | Same cycle as `alt+p` (Claude-Code-style) — **only after keybind consent**, see below |
 | `alt+m` | Model picker: typeahead with ↑↓ move, **PgUp/PgDn page**, enter select, **Ctrl+s select + save default**, esc close (also `/models`; `/models <query>` switches directly) |
@@ -225,13 +226,27 @@ The decision is stored in `~/.pi/agent/control-plane-keys.json`, so the prompt i
 A typeahead model picker built entirely on public extension APIs — the isolated replacement for the retired `bin/patch-pi-model-page-nav.mjs`, which patched minified anchors inside pi's bundle and broke on every `pi update`. Paged navigation (PageUp/PageDown jump 15 models — the exact feature the patch existed for) is implemented via `SelectList.setSelectedIndex`, so it survives updates by construction. OpenRouter rows retain Pi's input/output price badge (`$input/$output per Mtok`, with `+` for tiered pricing).
 
 - `alt+m` or `/models` — the picker, on demand. Type to filter (substring), ↑↓ move, PgUp/PgDn page, enter selects for this session, **Ctrl+s selects and saves as the global default**, esc closes. **Tab cycles the sort** (frecency → name → price → provider → publisher; `sortModelsBy`): name is plain `provider/model` alphabetical, price is cheapest-input-first with unpriced models last, provider groups by registry provider, publisher groups by upstream publisher (`publisherOf`: first `publisher/model` segment of the id, stealth `~` prefix stripped, provider fallback for local ids), and the highlighted model is kept across a cycle. The model-ref column grows with the longest visible ref (up to 80 chars, `PRIMARY_COLUMN_LAYOUT`), so full `provider/model` references are not truncated when a description column is shown; on narrow terminals the column shrinks with the viewport.
-- At interactive startup the picker also appears (frecency-ordered: most-used-recently first, local models leading while history is cold, usage tracked in `~/.pi/agent/model-usage.json`); esc at launch quits pi — no model chosen, no session. Disable the startup dialog with `"modelPicker": false` in `~/.pi/agent/settings.json` (usage tracking continues either way).
+- At interactive startup the picker appears only without a saved `defaultProvider` + `defaultModel` pair (frecency-ordered: most-used-recently first, local models leading while history is cold, usage tracked in `~/.pi/agent/model-usage.json`); esc at launch quits pi — no model chosen, no session. Disable the startup dialog with `"modelPicker": false` in `~/.pi/agent/settings.json` (usage tracking continues either way).
 - `/models <query>` (any mode, incl. RPC/print) — switch directly; exact `provider/model` wins, then unique substring match; ambiguous queries list their matches instead of guessing.
 - `pi.setModel` switches for this session only (including `/models <query>`). Ctrl+s explicitly saves `defaultProvider` and `defaultModel` through Pi's exported `SettingsManager`, preserving unrelated settings and thinking defaults. Success is reported only after the write finishes; a failed switch never saves, and a failed save reports that the model is session-only. Project settings and CLI overrides still take precedence over global defaults.
 
 Native `/model` retains its own selector. Its installed-runtime scoped
 OpenRouter pricing repair is documented in the
 [continuity contract](#continuity-contract--read-before-changing-pi) below.
+
+## Jump to Last User Prompt (`/last-prompt`)
+
+`/last-prompt` or `ctrl+alt+u` scrolls directly to the latest rendered user prompt
+in fullscreen mode, from any transcript position. It distinguishes user prompts
+from assistant output, handles wrapped text and skill prompts, and pauses output
+following so streaming does not pull the view back down. `ctrl+end` resumes
+following output. Editor text and session state are unchanged. Empty transcripts
+and unsupported layouts show a notice instead of moving the viewport.
+
+The extension uses a guarded Pi 1.4 fullscreen-layout adapter because Pi has no
+public API for targeting a transcript message. Recheck compatibility after Pi
+updates; no installed bundle files are patched. Reload resources with `/reload`
+to load the new extension in an existing Pi process.
 
 ## Temporary model swap (`/swap`)
 
@@ -415,6 +430,13 @@ relevant source, tests, and `docs/` before changing Pi behavior.
   save the highlighted model as the global default, and OpenRouter
   input/output price badges. Native `/model` also keeps OpenRouter price badges
   for both all and scoped lists.
+- **Prompt navigation:** `/last-prompt` and `ctrl+alt+u`, owned by
+  `extensions/last-user-prompt.ts` and `src/control-plane/last-user-prompt.ts`,
+  target the latest rendered user/skill prompt in fullscreen mode. Preserve
+  editor/session content and pause output following. Native previous/next
+  prompt navigation also includes assistant messages; it is not a substitute.
+  Startup model picker stays closed when native agent settings contain a saved
+  default pair; `/models` and `alt+m` remain available on demand.
 - **Temporary model swap:** `/swap <model> until <condition>` (or `for <N>
   prompts|minutes`) switches the session to another model immediately and
   reverts to the original when the condition is met — checked at turn

@@ -476,6 +476,7 @@ export function renderHotkeyCheatsheet(modeCycleKeys = "alt+p"): string[] {
     "  alt+i  diagnostics panel (session diagnostic log)",
     "  alt+h  this cheat sheet",
     "  ctrl+alt+r  reload Pi resources (when idle)",
+    "  ctrl+alt+u  jump to last user prompt (/last-prompt; fullscreen)",
     "",
     "Pi essentials:",
     "  ctrl+g     edit prompt in external editor",

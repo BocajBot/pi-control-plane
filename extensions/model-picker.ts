@@ -16,7 +16,7 @@
  *
  * Surfaces:
  *   - at interactive startup (session_start reason "startup"): the typeahead
- *     picker; escape at launch quits pi (no model chosen, no session).
+ *     picker only without a saved default; escape at launch quits pi.
  *     Disable with "modelPicker": false in ~/.pi/agent/settings.json.
  *   - alt+m / /models (no args, TUI): the same picker on demand.
  *   - /models <query> (any mode): switch directly to the unique match.
@@ -24,9 +24,8 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import {
   applyModelPick,
@@ -51,7 +50,7 @@ import {
   type UsageFs,
 } from "../src/control-plane/model-picker.ts";
 
-const AGENT_DIR = path.join(os.homedir(), ".pi", "agent");
+const AGENT_DIR = getAgentDir();
 const USAGE_FILE = path.join(AGENT_DIR, "model-usage.json");
 const SETTINGS_FILE = path.join(AGENT_DIR, "settings.json");
 const MODELS_FILE = path.join(AGENT_DIR, "models.json");

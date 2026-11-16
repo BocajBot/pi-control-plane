@@ -251,12 +251,16 @@ export function classifyKey(data: string): PickerKey {
   return { kind: "other", data };
 }
 
-/** settings.json reader for the `modelPicker: false` opt-out (fs injected). */
+/** Startup-only picker gate: explicit opt-out or a saved default model. */
 export function pickerDisabled(fs: UsageFs, settingsFile: string): boolean {
   try {
     const parsed: unknown = JSON.parse(fs.readUtf8(settingsFile));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
-    return (parsed as Record<string, unknown>).modelPicker === false;
+    const settings = parsed as Record<string, unknown>;
+    return settings.modelPicker === false || (
+      typeof settings.defaultProvider === "string" && settings.defaultProvider.trim().length > 0 &&
+      typeof settings.defaultModel === "string" && settings.defaultModel.trim().length > 0
+    );
   } catch {
     return false;
   }

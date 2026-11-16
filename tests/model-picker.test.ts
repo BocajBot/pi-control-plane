@@ -235,7 +235,7 @@ test("classifyKey: typeable, backspace, page keys, modifier variants, other", ()
   assert.deepEqual(classifyKey("\x1b"), { kind: "other", data: "\x1b" }); // escape -> SelectList
 });
 
-test("pickerDisabled: only modelPicker === false disables; junk tolerated", () => {
+test("pickerDisabled: explicit opt-out disables; junk tolerated", () => {
   const off = memoryFs({ "/s.json": JSON.stringify({ modelPicker: false }) });
   assert.equal(pickerDisabled(off, "/s.json"), true);
   const on = memoryFs({ "/s.json": JSON.stringify({ modelPicker: true }) });
@@ -244,6 +244,16 @@ test("pickerDisabled: only modelPicker === false disables; junk tolerated", () =
   assert.equal(pickerDisabled(absent, "/s.json"), false);
   const broken = memoryFs({ "/s.json": "{oops" });
   assert.equal(pickerDisabled(broken, "/s.json"), false);
+});
+
+test("startup picker stays closed with a saved default, including explicit modelPicker true", () => {
+  for (const extra of [{}, { modelPicker: true }]) {
+    const saved = memoryFs({ "/s.json": JSON.stringify({ defaultProvider: "llama-swap", defaultModel: "qwen3-8-27b-pi-q6", ...extra }) });
+    assert.equal(pickerDisabled(saved, "/s.json"), true);
+  }
+  for (const settings of [{ defaultProvider: "test" }, { defaultModel: "test" }, { defaultProvider: " ", defaultModel: "test" }]) {
+    assert.equal(pickerDisabled(memoryFs({ "/s.json": JSON.stringify(settings) }), "/s.json"), false);
+  }
 });
 
 test("default save: select first, explicit saves only, failures never report saved", async () => {

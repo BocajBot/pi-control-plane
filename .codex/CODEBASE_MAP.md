@@ -5,11 +5,11 @@
 - Root: `/home/bocaj/Documents/pi-control-plane`
 - Purpose: Pi extension package for execution policy, context controls, model selection, diagnostics, credits, and task tracking.
 - Branch: `master`
-- Mapped commit: `619ae512e1fe575f3865fe71004112697b333ade`
-- Working tree: Modified by active control-plane work; preserve all existing changes.
-- Last updated: 2026-09-17
+- Mapped commit: `d526f2b1be9c13421198b3b2ac2c54e4bc484831` (task-relevant sections verified; older unrelated sections partial)
+- Working tree: Initially clean; current prompt-navigation and saved-default changes uncommitted.
+- Last updated: 2026-10-24
 - Status: partial, task-focused
-- Task focus: persistent task tool with wrapped widget rows, model-price picker rows, and Pi-package read carve-out
+- Task focus: fullscreen last-user-prompt navigation and saved-default startup picker suppression
 - Excluded or unexplored areas: transcription internals, RPC smoke implementation, skill internals
 
 ## Technology Stack
@@ -121,3 +121,11 @@ Relevant symbols:
 | Working tree | Model picker and policy | Restored OpenRouter input/output price labels and permitted Pi package documentation reads without exposing credentials. |
 | Working tree | Native Pi model selector | Scoped OpenRouter models now restore cached catalog pricing; runtime-bundle regression test guards installed `/model`. |
 | Working tree | Agent continuity | Added root AGENTS.md directing future sessions to preservation rules and required documentation updates. |
+
+
+## Current task: prompt navigation / startup default (2026-10-24)
+- Entry: `package.json` loads `extensions/last-user-prompt.ts`; session_start captures stable TUI via zero-height belowEditor widget. `/last-prompt` and Ctrl+Alt+U call `jumpToLastUserPrompt` in `src/control-plane/last-user-prompt.ts`.
+- Flow: primary fullscreen layout, native Container/message component tree, latest user/skill component, preceding rendered heights at live width, ScrollView.scrollTo(disableFollow:true), repaint. No model/session/editor persistence writes. Regular mode/missing layout/empty transcript give notices. Pi 1.4 private layout/component names are a compatibility boundary; installed bundles untouched.
+- Selector: `extensions/model-picker.ts` uses Pi `getAgentDir()`; startup calls `pickerDisabled` in `src/control-plane/model-picker.ts` to skip when modelPicker:false or nonempty saved defaultProvider/defaultModel. Manual `/models`, Alt+M and native `/model` unchanged.
+- Tests: `tests/last-user-prompt.test.ts`, `tests/model-picker.test.ts`, `tests/model-picker-runtime.test.ts`, `tests/model-picker-layout.test.ts`; node --test focused22PASS before docs/help update. Full suite baseline has unrelated missing native /model pricing patch; do not claim full green. Final evidence recorded in delivery.
+- UI help: `src/control-plane/ui.ts` and README hotkeys; ownership/compatibility in README continuity and docs ARCHITECTURE/TUI/TESTING. Existing Pi requires /reload; no live user session interrupted. No commits or remote operations.
