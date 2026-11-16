@@ -2,13 +2,15 @@
  * prefill-progress: show "Working NN%" in pi's working indicator while a
  * llama-swap model prefills a long prompt.
  *
- * On agent_start (for a llama-swap model) it tails the per-model upstream log
- * stream (GET /logs/stream/<model>?no-history) and parses llama.cpp's
+ * On turn_start (one LLM call; for a llama-swap model) it tails the turn's
+ * model's upstream log stream (GET /logs/stream/<model>?no-history) and parses llama.cpp's
  * "prompt processing ... progress = X.XX" lines — one per ~3s, only while the
  * prefill exceeds 3s. The latest value is rendered as a percentage appended to
  * the working message ("Working 42%"), so a long prefill is visible instead of
  * a static "Working". When generation starts (first content block) or the turn
- * ends, the default message is restored.
+ * ends, the default message is restored. Per turn, not per agent run: a model
+ * switch mid-run (/model) or an unload/reload that closes the stream would
+ * otherwise leave the rest of the run on a dead or wrong-model stream.
  *
  * Pure parsing lives in ../src/control-plane/prefill-progress.ts.
  */
@@ -37,7 +39,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setWorkingMessage();
   };
 
-  pi.on("agent_start", (_event, ctx) => {
+  pi.on("turn_start", (_event, ctx) => {
     stopStream();
     percentShown = false;
 
@@ -85,6 +87,11 @@ export default function (pi: ExtensionAPI) {
     if (msg.role === "assistant" && msg.content.length > 0) {
       restoreWorkingMessage(ctx);
     }
+  });
+
+  pi.on("turn_end", (_event, ctx) => {
+    stopStream();
+    restoreWorkingMessage(ctx);
   });
 
   pi.on("agent_end", (_event, ctx) => {
